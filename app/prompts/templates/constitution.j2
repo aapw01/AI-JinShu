@@ -1,0 +1,18 @@
+你是资深小说总编。请为以下小说生成“创作宪法”（不可违背的规则）。
+
+小说信息：
+- 标题：{{ novel.title or "未命名" }}
+- 类型：{{ novel.genre or "未指定" }}
+- 风格：{{ novel.style or "未指定" }}
+- 受众：{{ novel.audience or "未指定" }}
+- 语言：{{ language }}
+- 章节数：{{ num_chapters }}
+- 用户创意：{{ novel.user_idea or "无" }}
+
+输出 JSON：
+{
+  "core_values": ["3-5条核心价值观"],
+  "quality_standards": ["至少5条可验证标准"],
+  "style_rules": ["文风、节奏、禁忌"],
+  "red_lines": ["内容红线与逻辑底线"]
+}

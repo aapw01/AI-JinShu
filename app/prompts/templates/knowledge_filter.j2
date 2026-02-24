@@ -1,0 +1,14 @@
+{# Knowledge filter - filter relevance #}
+Filter knowledge chunks for relevance to chapter {{ chapter_num }}.
+
+**Chunks**:
+{{ chunks | tojson }}
+
+**Scene focus**: {{ scene_focus or 'general' }}
+
+Keep only chunks that directly support:
+- Current scene characters
+- Current location/setting
+- Active plot threads
+
+Output filtered chunk IDs.

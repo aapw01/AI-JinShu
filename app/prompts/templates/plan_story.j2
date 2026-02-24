@@ -1,0 +1,22 @@
+请基于以下规格生成“创作计划”（creative plan）。
+
+小说信息：
+{{ novel | tojson }}
+
+目标章节：{{ num_chapters }}
+语言：{{ language }}
+
+输出 JSON：
+{
+  "writing_method": "{{ novel.writing_method or '三幕结构' }}",
+  "volume_plan": [{"volume": 1, "chapter_range": "1-10", "goal": "该卷目标"}],
+  "emotion_curve": [{"chapter": 1, "type": "悬念", "intensity": "中"}],
+  "pacing_rules": ["节奏规则1", "节奏规则2"],
+  "opening_strategy": "前三章钩子与冲突策略",
+  "serial_rules": {
+    "small_climax_every": "3-5 chapters",
+    "medium_climax_every": "10-15 chapters",
+    "volume_climax_every": "30-50 chapters"
+  },
+  "risk_controls": ["风险项及预案"]
+}

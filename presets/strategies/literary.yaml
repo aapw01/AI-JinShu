@@ -1,0 +1,20 @@
+id: literary
+name: Literary Strategy
+description: Literary writing strategy focused on depth, consistency, and style.
+stages:
+  architect:
+    provider: openai
+    model: __default__
+  outliner:
+    provider: openai
+    model: __default__
+  writer:
+    provider: openai
+    model: __default__
+  reviewer:
+    provider: openai
+    model: __default__
+  finalizer:
+    provider: openai
+    model: __default__
+

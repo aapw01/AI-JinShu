@@ -1,0 +1,16 @@
+{# Character state update - after chapter #}
+Update character states after chapter {{ chapter_num }}.
+
+**Characters in chapter**: {{ characters | tojson }}
+
+**Chapter events**: {{ events_summary or '' }}
+
+**Current states**: {{ current_states | default({}) | tojson }}
+
+For each character, update:
+- Emotional state
+- Relationships changed
+- Goals/obstacles
+- Physical state (injuries, etc.)
+
+Output updated character states as JSON.

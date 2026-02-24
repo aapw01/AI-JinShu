@@ -1,0 +1,13 @@
+{# Chapter summary - for memory/context #}
+Summarize this chapter for future context retrieval.
+
+**Chapter content**:
+{{ content[:2000] if content else '' }}
+
+**Chapter number**: {{ chapter_num }}
+
+Output a concise summary (100-200 words) in {{ language or 'zh' }} covering:
+1. Main events
+2. Character developments
+3. Key revelations
+4. Setup for next chapter

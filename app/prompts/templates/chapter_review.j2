@@ -1,0 +1,17 @@
+{# Chapter review - quality scoring #}
+Review chapter {{ chapter_num }} draft and score quality.
+
+**Draft**:
+{{ draft[:3000] if draft else '' }}
+
+**Criteria** (score 0-1 each):
+- Plot coherence
+- Character consistency
+- Pacing
+- Anti-AI compliance (paragraph structure, avoid banned words)
+- Language quality ({{ language or 'zh' }})
+- Native style adherence: {{ native_style_profile or '' }}
+- Chapter-end hook strength
+- Foreshadow/payoff continuity (no dangling contradictions)
+
+Output JSON: {"score": 0.0-1.0, "feedback": "specific improvement suggestions"}

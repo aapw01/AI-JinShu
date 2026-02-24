@@ -1,0 +1,58 @@
+{# Next chapter writing prompt - uses layered context #}
+Write chapter {{ chapter_num }} of the novel.
+
+---
+
+## 全局设定（Global Bible）
+{{ context.global_bible | default('无') }}
+
+## 伏笔与线索追踪（Thread Ledger）
+{{ context.thread_ledger_text | default('无活跃伏笔') }}
+
+## 近期章节摘要（Recent Window）
+{{ context.recent_window | default('无前文摘要') }}
+
+{% if context.volume_brief | default('') %}
+## 前卷概述（Volume Brief）
+{{ context.volume_brief }}
+{% endif %}
+
+{% if context.consistency_warnings | default('') %}
+## ⚠️ 一致性警告（必须遵守）
+{{ context.consistency_warnings }}
+{% endif %}
+
+---
+
+## 本章大纲
+- 章节号: {{ chapter_num }}
+- 标题: {{ outline.title | default('') }}
+- 大纲: {{ outline.outline | default('') }}
+- 角色: {{ outline.role | default('') }}
+- 目的: {{ outline.purpose | default('') }}
+- 悬念等级: {{ outline.suspense_level | default('中') }}
+- 埋设伏笔: {{ outline.foreshadowing | default('无') }}
+- 回收伏笔: {{ outline.payoff | default('无') }}
+- 钩子: {{ outline.hook | default('') }}
+- 小高潮: {{ outline.mini_climax | default('none') }}
+
+---
+
+**字数目标**: {{ word_count or 3000 }}
+**语言**: {{ language or 'zh' }}
+**母语风格**: {{ native_style_profile or '' }}
+
+**Anti-AI 写作规则**（严格执行）:
+- 30-50% 单句段落，50-100字/段
+- 禁用: 弥漫着、唯一的、不禁、宛如、仿佛、渐渐地、缓缓地
+- 短句为主（15-25字），长短交替
+- 对话呈现情感，而非叙述情感
+
+**连载约束**:
+- 严格承接上一章结尾（参见 Recent Window），不能出现断裂
+- 每章结构: 目标 → 障碍 → 升级 → 收获/钩子
+- 非结尾章必须有章末悬念/钩子
+- 遵循长篇节奏: 每3-5章小高潮，每10-15章中高潮
+- 所有角色行为必须与 Global Bible 和 Thread Ledger 一致
+
+用 {{ language or 'zh' }} 输出完整章节正文，严格遵循母语写作风格。

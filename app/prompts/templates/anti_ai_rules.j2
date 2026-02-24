@@ -1,0 +1,20 @@
+{# Anti-AI detection rules - from novel-writer spec #}
+Apply these anti-AI detection rules (Tencent Zhuque standard):
+
+**Paragraph structure**:
+- 30-50% single-sentence paragraphs
+- 50-100 chars per paragraph
+- Key info in separate lines
+
+**Banned words**: 弥漫着, 唯一的, 摇摇欲坠, 宛如, 仿佛, 犹如, 直到, 猛地, 话音未落, 不禁, 心中暗想, 顿时, 内心涌起, 不由得, 空气凝固, 皱起眉头
+
+**Replace with**: 有股霉味, 就一点光, 一张旧木桌, 像做梦, 删除, 删除, 叹气, 删除
+
+**Principles**:
+- One accurate detail > three stacked details
+- Concise narration
+- Short sentences (15-25 chars)
+- Show dialogue, not tell emotions
+- Punctuation varies by mood (…… and ...)
+
+**Scene**: {{ scene_type or 'general' }}

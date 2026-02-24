@@ -1,0 +1,23 @@
+请把小说创作计划拆解为可执行任务（tasks），用于逐章写作。
+
+小说信息：
+{{ novel | tojson }}
+
+目标章节：{{ num_chapters }}
+语言：{{ language }}
+
+输出 JSON：
+{
+  "tasks": [
+    {
+      "task_id": "T001",
+      "chapter_num": 1,
+      "must_contain": ["本章必须出现内容"],
+      "plotlines": ["PL-01"],
+      "foreshadowing": ["F-001"],
+      "hook_type": "章节末钩子类型（悬念/反转/危机）",
+      "climax_level": "none/small/medium/volume",
+      "dependencies": []
+    }
+  ]
+}
