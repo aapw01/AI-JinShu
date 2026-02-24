@@ -38,11 +38,46 @@ export interface GenerationStatus {
   step?: string;
   current_chapter?: number;
   total_chapters?: number;
+  volume_no?: number;
+  volume_size?: number;
   token_usage_input?: number;
   token_usage_output?: number;
   estimated_cost?: number;
   message?: string;
   error?: string;
+}
+
+export interface VolumeGateReport {
+  volume_no: number;
+  verdict: string;
+  metrics: Record<string, unknown>;
+  evidence_chain: Array<Record<string, unknown>>;
+  checkpoint_id?: number | null;
+  checkpoint_state?: Record<string, unknown>;
+  created_at?: string;
+}
+
+export interface NovelFeedback {
+  id: number;
+  chapter_num?: number | null;
+  volume_no?: number | null;
+  feedback_type: string;
+  rating?: number | null;
+  tags: string[];
+  comment?: string;
+  created_at?: string;
+}
+
+export interface ObservabilityPayload {
+  summary: {
+    quality_reports: number;
+    checkpoints: number;
+    feedback_count: number;
+    warning_or_fail_volumes: number;
+  };
+  quality_reports: Array<Record<string, unknown>>;
+  checkpoints: Array<Record<string, unknown>>;
+  feedback: NovelFeedback[];
 }
 
 export interface CreateNovelData {
@@ -181,6 +216,31 @@ export const api = {
     const url = `${BASE}/api/novels/${novelId}/generation/progress?task_id=${taskId}`;
     return new EventSource(url);
   },
+
+  getVolumeGateReport: (novelId: string, volumeNo: number) =>
+    fetchApi<VolumeGateReport>(`/api/novels/${novelId}/volumes/${volumeNo}/gate-report`),
+
+  listFeedback: (novelId: string) =>
+    fetchApi<NovelFeedback[]>(`/api/novels/${novelId}/feedback`),
+
+  createFeedback: (
+    novelId: string,
+    data: {
+      chapter_num?: number;
+      volume_no?: number;
+      feedback_type?: string;
+      rating?: number;
+      tags?: string[];
+      comment?: string;
+    }
+  ) =>
+    fetchApi<NovelFeedback>(`/api/novels/${novelId}/feedback`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  getObservability: (novelId: string) =>
+    fetchApi<ObservabilityPayload>(`/api/novels/${novelId}/observability`),
 };
 
 export default api;

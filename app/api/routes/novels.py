@@ -1,5 +1,6 @@
 """Novels CRUD routes."""
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db, resolve_novel
@@ -24,7 +25,8 @@ def _to_response(novel: Novel) -> NovelResponse:
 @router.get("", response_model=list[NovelResponse])
 def list_novels(skip: int = 0, limit: int = 50, db: Session = Depends(get_db)):
     """List all novels, ordered by creation date (newest first)."""
-    novels = db.query(Novel).order_by(Novel.created_at.desc()).offset(skip).limit(limit).all()
+    stmt = select(Novel).order_by(Novel.created_at.desc()).offset(skip).limit(limit)
+    novels = db.execute(stmt).scalars().all()
     return [_to_response(n) for n in novels]
 
 

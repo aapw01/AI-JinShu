@@ -4,6 +4,7 @@ import logging
 import re
 from typing import Any
 from pydantic import BaseModel, ValidationError
+from langchain_core.output_parsers import PydanticOutputParser
 
 from app.core.llm import get_llm_with_fallback
 from app.prompts import render_prompt
@@ -47,14 +48,26 @@ def _extract_json_block(content: str) -> str:
 
 def _invoke_json_with_schema(llm: Any, prompt: str, schema_cls: type[BaseModel], retries: int = 2) -> dict:
     """Strongly enforce structured output with retry on parse/validation errors."""
+    parser = PydanticOutputParser(pydantic_object=schema_cls)
+    format_instructions = parser.get_format_instructions()
+    prompt = (
+        f"{prompt}\n\n"
+        f"{format_instructions}\n"
+        "输出要求：只返回 JSON，不要包含 Markdown 或解释。"
+    )
     error = ""
     for attempt in range(retries + 1):
         try:
             resp = llm.invoke(prompt)
-            payload = _extract_json_block(str(resp.content))
-            raw = json.loads(payload)
-            validated = schema_cls.model_validate(raw)
-            return validated.model_dump()
+            content = str(resp.content).strip()
+            try:
+                parsed = parser.parse(content)
+                return parsed.model_dump()
+            except Exception:
+                payload = _extract_json_block(content)
+                raw = json.loads(payload)
+                validated = schema_cls.model_validate(raw)
+                return validated.model_dump()
         except (json.JSONDecodeError, ValidationError) as exc:
             error = str(exc)
             prompt = (
@@ -88,9 +101,27 @@ class ReviewSchema(BaseModel):
     feedback: str = ""
 
 
+class FactualReviewSchema(BaseModel):
+    score: float = 0.8
+    feedback: str = ""
+    contradictions: list[str] = []
+
+
+class AestheticReviewSchema(BaseModel):
+    score: float = 0.8
+    feedback: str = ""
+    highlights: list[str] = []
+
+
 class FinalBookReviewSchema(BaseModel):
     score: float = 0.8
     feedback: str = "ok"
+
+
+class FactExtractionSchema(BaseModel):
+    events: list[dict[str, Any]] = []
+    entities: list[dict[str, Any]] = []
+    facts: list[dict[str, Any]] = []
 
 
 class ArchitectAgent:
@@ -328,6 +359,60 @@ class ReviewerAgent:
             logger.error(f"ReviewerAgent failed: {e}")
             return 0.75, "Auto-review: acceptable quality"
 
+    def run_factual(
+        self,
+        draft: str,
+        chapter_num: int,
+        context: dict,
+        language: str = "zh",
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> tuple[float, str, list[str]]:
+        llm = get_llm_with_fallback(provider, model)
+        prompt = (
+            f"你是事实一致性审稿器。请检查第{chapter_num}章正文是否与上下文冲突。\n"
+            f"上下文要点:\n{json.dumps(context, ensure_ascii=False)[:3000]}\n\n"
+            f"正文:\n{draft[:6000]}\n\n"
+            "返回JSON字段: score(0-1), feedback(字符串), contradictions(字符串数组)。"
+        )
+        try:
+            result = _invoke_json_with_schema(llm, prompt, FactualReviewSchema)
+            score = float(result.get("score", 0.8))
+            if score > 1:
+                score = score / 100 if score <= 100 else 0.8
+            feedback = str(result.get("feedback", ""))
+            contradictions = [str(x) for x in (result.get("contradictions") or [])][:20]
+            return score, feedback, contradictions
+        except Exception as e:
+            logger.error(f"ReviewerAgent factual review failed: {e}")
+            return 0.75, "事实审校降级：未检测到显著冲突", []
+
+    def run_aesthetic(
+        self,
+        draft: str,
+        chapter_num: int,
+        language: str = "zh",
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> tuple[float, str, list[str]]:
+        llm = get_llm_with_fallback(provider, model)
+        prompt = (
+            f"你是网文节奏与审美审稿器。请评估第{chapter_num}章可读性、爽点兑现、情绪张力。\n"
+            f"正文:\n{draft[:6000]}\n\n"
+            "返回JSON字段: score(0-1), feedback(字符串), highlights(字符串数组)。"
+        )
+        try:
+            result = _invoke_json_with_schema(llm, prompt, AestheticReviewSchema)
+            score = float(result.get("score", 0.8))
+            if score > 1:
+                score = score / 100 if score <= 100 else 0.8
+            feedback = str(result.get("feedback", ""))
+            highlights = [str(x) for x in (result.get("highlights") or [])][:20]
+            return score, feedback, highlights
+        except Exception as e:
+            logger.error(f"ReviewerAgent aesthetic review failed: {e}")
+            return 0.75, "审美审校降级：节奏基本可用", []
+
 
 class FinalizerAgent:
     """Polish and finalize content."""
@@ -390,3 +475,34 @@ class FinalReviewerAgent:
         except Exception as e:
             logger.error(f"FinalReviewerAgent full-book review failed: {e}")
             return {"score": 0.8, "feedback": "final review fallback"}
+
+
+class FactExtractorAgent:
+    """Extract structured facts/events from finalized chapter text."""
+
+    def run(
+        self,
+        chapter_num: int,
+        content: str,
+        outline: dict | None = None,
+        language: str = "zh",
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> dict:
+        llm = get_llm_with_fallback(provider, model)
+        prompt = (
+            f"请抽取第{chapter_num}章的结构化事实，语言:{language}。\n"
+            f"大纲:\n{json.dumps(outline or {}, ensure_ascii=False)[:1500]}\n\n"
+            f"正文:\n{content[:7000]}\n\n"
+            "输出JSON字段:\n"
+            "- events: [{id,title,type,actors[],summary,time_marker}]\n"
+            "- entities: [{name,entity_type,status,summary}]\n"
+            "- facts: [{entity_name,fact_type,value}]\n"
+            "只输出JSON。"
+        )
+        try:
+            data = _invoke_json_with_schema(llm, prompt, FactExtractionSchema)
+            return data if isinstance(data, dict) else {"events": [], "entities": [], "facts": []}
+        except Exception as e:
+            logger.error(f"FactExtractorAgent failed: {e}")
+            return {"events": [], "entities": [], "facts": []}

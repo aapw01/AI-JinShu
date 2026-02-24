@@ -1,6 +1,7 @@
 """Thread ledger - tracks active foreshadowing, unresolved conflicts, and plot threads."""
 from typing import Optional
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
@@ -25,12 +26,8 @@ def get_thread_ledger(
     should_close = db is None
     db = db or SessionLocal()
     try:
-        rows = (
-            db.query(ChapterOutline)
-            .filter(ChapterOutline.novel_id == novel_id)
-            .order_by(ChapterOutline.chapter_num)
-            .all()
-        )
+        stmt = select(ChapterOutline).where(ChapterOutline.novel_id == novel_id).order_by(ChapterOutline.chapter_num)
+        rows = db.execute(stmt).scalars().all()
 
         active_foreshadowing = []
         for r in rows:

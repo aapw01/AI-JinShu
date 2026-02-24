@@ -5,7 +5,7 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { motion } from "framer-motion";
 import { ArrowLeft, CheckCircle2, LoaderCircle, XCircle } from "lucide-react";
-import { api, Novel, GenerationStatus } from "@/lib/api";
+import { api, Novel, GenerationStatus, ObservabilityPayload, VolumeGateReport } from "@/lib/api";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { SectionTitle } from "@/components/ui/SectionTitle";
@@ -13,12 +13,27 @@ import { StatsCard } from "@/components/ui/StatsCard";
 import { TopBar } from "@/components/ui/TopBar";
 
 const PIPELINE_STEPS = [
+  { id: "book_orchestrator", label: "总控编排", desc: "拆分卷任务并调度执行" },
   { id: "architect", label: "架构设计", desc: "规划故事结构与角色" },
   { id: "outliner", label: "大纲生成", desc: "生成章节大纲" },
+  { id: "volume_planning", label: "分卷规划", desc: "根据上卷质量重规划本卷目标" },
+  { id: "chapter_beats", label: "节拍卡", desc: "生成章节爽点/冲突/兑现节拍" },
   { id: "writer", label: "内容创作", desc: "撰写章节内容" },
   { id: "reviewer", label: "质量审核", desc: "检查内容质量" },
   { id: "finalizer", label: "最终处理", desc: "优化与定稿" },
 ];
+
+const STEP_ALIASES: Record<string, string> = {
+  queued: "book_orchestrator",
+  book_planning: "book_orchestrator",
+  volume_dispatch: "book_orchestrator",
+  prewrite: "architect",
+  outline_ready: "outliner",
+  chapter_writing: "writer",
+  chapter_review: "reviewer",
+  chapter_finalizing: "finalizer",
+  memory_update: "finalizer",
+};
 
 export default function ProgressPage() {
   const params = useParams();
@@ -31,6 +46,8 @@ export default function ProgressPage() {
   const [status, setStatus] = useState<GenerationStatus | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
+  const [gateReport, setGateReport] = useState<VolumeGateReport | null>(null);
+  const [observability, setObservability] = useState<ObservabilityPayload | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
@@ -55,6 +72,20 @@ export default function ProgressPage() {
     return () => clearInterval(interval);
   }, [id, taskId]);
 
+  useEffect(() => {
+    const volumeNo = status?.volume_no;
+    if (!volumeNo || volumeNo <= 0) return;
+    api.getVolumeGateReport(id, volumeNo).then(setGateReport).catch(() => undefined);
+  }, [id, status?.volume_no]);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      api.getObservability(id).then(setObservability).catch(() => undefined);
+    }, 5000);
+    api.getObservability(id).then(setObservability).catch(() => undefined);
+    return () => clearInterval(timer);
+  }, [id]);
+
   // SSE connection for real-time updates
   useEffect(() => {
     if (!taskId) return;
@@ -66,7 +97,10 @@ export default function ProgressPage() {
       es.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          if (data.type === "status") {
+          if (data && typeof data === "object" && "status" in data) {
+            // Backward compatibility: older backend sent raw status payload.
+            setStatus(data as GenerationStatus);
+          } else if (data.type === "status") {
             setStatus(data.payload);
           } else if (data.type === "log") {
             setLogs((prev) => [...prev, data.payload]);
@@ -97,7 +131,8 @@ export default function ProgressPage() {
   }, [logs]);
 
   const getCurrentStepIndex = useCallback(() => {
-    const step = status?.current_phase || status?.step;
+    const raw = status?.current_phase || status?.step;
+    const step = raw ? STEP_ALIASES[raw] || raw : raw;
     if (!step) return -1;
     return PIPELINE_STEPS.findIndex((s) => s.id === step);
   }, [status]);
@@ -240,6 +275,28 @@ export default function ProgressPage() {
             hint={`$${(status?.estimated_cost || 0).toFixed(4)}`}
           />
         </div>
+
+        {gateReport && (
+          <Card className="p-6">
+            <SectionTitle title={`第 ${gateReport.volume_no} 卷 Gate 报告`} subtitle={`结论: ${gateReport.verdict}`} />
+            <div className="text-sm text-[#6E6E73] space-y-1">
+              {(gateReport.evidence_chain || []).slice(0, 6).map((e, idx) => (
+                <p key={idx}>
+                  {String(e.metric || "metric")} = {String(e.value ?? "")} (阈值 {String(e.threshold ?? "")})
+                </p>
+              ))}
+            </div>
+          </Card>
+        )}
+
+        {observability && (
+          <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+            <StatsCard label="质量报告" value={`${observability.summary.quality_reports}`} hint="总数" />
+            <StatsCard label="检查点" value={`${observability.summary.checkpoints}`} hint="可恢复节点" />
+            <StatsCard label="人工反馈" value={`${observability.summary.feedback_count}`} hint="编辑/读者" />
+            <StatsCard label="风险卷" value={`${observability.summary.warning_or_fail_volumes}`} hint="warning/fail" />
+          </div>
+        )}
 
         <Card className="p-6">
           <SectionTitle title="生成流程" subtitle="阶段化可观测，便于定位问题" />

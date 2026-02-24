@@ -11,6 +11,14 @@ from app.models.novel import (
     KnowledgeChunk,
     GenerationTask,
     ChapterAnnotation,
+    StoryEntity,
+    StoryFact,
+    StoryEvent,
+    StoryForeshadow,
+    StorySnapshot,
+    GenerationCheckpoint,
+    QualityReport,
+    NovelFeedback,
 )
 
 __all__ = [
@@ -25,4 +33,12 @@ __all__ = [
     "KnowledgeChunk",
     "GenerationTask",
     "ChapterAnnotation",
+    "StoryEntity",
+    "StoryFact",
+    "StoryEvent",
+    "StoryForeshadow",
+    "StorySnapshot",
+    "GenerationCheckpoint",
+    "QualityReport",
+    "NovelFeedback",
 ]

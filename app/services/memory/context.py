@@ -9,11 +9,14 @@ Layers (priority order):
 """
 from typing import Optional
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
+from app.core.tokens import estimate_tokens
 from app.models.novel import Chapter, NovelSpecification
 from app.services.memory.summary_manager import SummaryManager
+from app.services.memory.story_bible import StoryBibleStore
 from app.services.memory.thread_ledger import get_thread_ledger
 from app.services.memory.vector_store import VectorStoreWrapper
 
@@ -24,11 +27,40 @@ GLOBAL_BIBLE_MAX_CHARS = 3000
 THREAD_LEDGER_MAX_CHARS = 1200
 RECENT_WINDOW_MAX_CHARS = 2000
 VOLUME_BRIEF_MAX_CHARS = 1600
+STORY_BIBLE_MAX_CHARS = 2200
 
 
-def _estimate_tokens(text: str) -> int:
-    return max(1, len(text) // 4)
-
+def _build_story_bible_context(novel_id: int, chapter_num: int, db: Session) -> str:
+    bible = StoryBibleStore()
+    entities = bible.list_entities(novel_id, db=db)
+    events = bible.list_recent_events(novel_id, chapter_num - 1, limit=20, db=db)
+    if not entities and not events:
+        return ""
+    char_entities = [e for e in entities if e.entity_type == "character"][:10]
+    item_entities = [e for e in entities if e.entity_type == "item"][:8]
+    lines: list[str] = []
+    if char_entities:
+        lines.append(
+            "角色状态: "
+            + "; ".join(
+                f"{e.name}({e.status or 'unknown'})" for e in char_entities if e.name
+            )
+        )
+    if item_entities:
+        lines.append(
+            "关键道具: "
+            + "; ".join(
+                f"{e.name}({e.summary or '已出现'})" for e in item_entities if e.name
+            )
+        )
+    if events:
+        lines.append(
+            "近期事件: "
+            + "; ".join(
+                f"ch{ev.chapter_num}:{(ev.title or ev.event_type or '事件')}" for ev in events[:10]
+            )
+        )
+    return "\n".join(lines)[:STORY_BIBLE_MAX_CHARS]
 
 def _compress_global_bible(prewrite: dict) -> str:
     parts = []
@@ -57,25 +89,19 @@ def _compress_global_bible(prewrite: dict) -> str:
 
 
 def _load_prewrite_from_db(novel_id: int, db: Session) -> dict:
-    rows = (
-        db.query(NovelSpecification)
-        .filter(NovelSpecification.novel_id == novel_id)
-        .all()
-    )
+    stmt = select(NovelSpecification).where(NovelSpecification.novel_id == novel_id)
+    rows = db.execute(stmt).scalars().all()
     return {r.spec_type: r.content for r in rows}
 
 
 def _load_outline_from_db(novel_id: int, chapter_num: int, db: Session) -> dict:
     from app.models.novel import ChapterOutline
 
-    row = (
-        db.query(ChapterOutline)
-        .filter(
-            ChapterOutline.novel_id == novel_id,
-            ChapterOutline.chapter_num == chapter_num,
-        )
-        .first()
+    stmt = select(ChapterOutline).where(
+        ChapterOutline.novel_id == novel_id,
+        ChapterOutline.chapter_num == chapter_num,
     )
+    row = db.execute(stmt).scalar_one_or_none()
     if not row:
         return {"chapter_num": chapter_num, "title": f"第{chapter_num}章", "outline": ""}
     meta = row.metadata_ or {}
@@ -90,14 +116,11 @@ def _load_outline_from_db(novel_id: int, chapter_num: int, db: Session) -> dict:
 def _get_last_chapter_ending(novel_id: int, chapter_num: int, db: Session) -> str:
     if chapter_num <= 1:
         return ""
-    row = (
-        db.query(Chapter)
-        .filter(
-            Chapter.novel_id == novel_id,
-            Chapter.chapter_num == chapter_num - 1,
-        )
-        .first()
+    stmt = select(Chapter).where(
+        Chapter.novel_id == novel_id,
+        Chapter.chapter_num == chapter_num - 1,
     )
+    row = db.execute(stmt).scalar_one_or_none()
     if not row or not row.content:
         return ""
     return row.content[-LAST_CHAPTER_ENDING_CHARS:]
@@ -134,6 +157,7 @@ def build_chapter_context(
         global_bible = _compress_global_bible(prewrite)
         thread_ledger = get_thread_ledger(novel_id, chapter_num, prewrite, db=db)
         thread_ledger_str = _format_thread_ledger(thread_ledger)
+        story_bible_context = _build_story_bible_context(novel_id, chapter_num, db)
 
         all_before = summary_mgr.get_summaries_before(novel_id, chapter_num, db=db)
         recent_summaries = all_before[-RECENT_WINDOW_SIZE:]
@@ -150,20 +174,23 @@ def build_chapter_context(
             )[:VOLUME_BRIEF_MAX_CHARS]
 
         used = (
-            _estimate_tokens(global_bible)
-            + _estimate_tokens(thread_ledger_str)
-            + _estimate_tokens(recent_window)
-            + _estimate_tokens(volume_brief)
+            estimate_tokens(global_bible)
+            + estimate_tokens(thread_ledger_str)
+            + estimate_tokens(recent_window)
+            + estimate_tokens(volume_brief)
+            + estimate_tokens(story_bible_context)
         )
 
         knowledge_chunks: list[dict] = []
         if used < token_budget:
-            chunks = vector_store.search(novel_id, limit=5, db=db)
+            outline_text = f"{outline.get('title', '')}\n{outline.get('outline', '')}".strip()
+            query_text = "\n".join(x for x in [outline_text, thread_ledger_str, recent_window] if x).strip()
+            chunks = vector_store.search(novel_id, query_text=query_text, limit=5, db=db)
             for c in chunks:
                 content = c.get("content", "") or str(c)
-                if used + _estimate_tokens(content) <= token_budget:
+                if used + estimate_tokens(content) <= token_budget:
                     knowledge_chunks.append(c)
-                    used += _estimate_tokens(content)
+                    used += estimate_tokens(content)
                 else:
                     break
 
@@ -171,6 +198,7 @@ def build_chapter_context(
             "global_bible": global_bible,
             "thread_ledger": thread_ledger,
             "thread_ledger_text": thread_ledger_str,
+            "story_bible_context": story_bible_context,
             "recent_window": recent_window,
             "volume_brief": volume_brief,
             "knowledge_chunks": knowledge_chunks,
