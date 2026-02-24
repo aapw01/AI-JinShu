@@ -6,6 +6,7 @@ before they enter the LLM prompt. Returns warnings and blockers.
 import logging
 import re
 from dataclasses import dataclass, field
+from sqlalchemy import select
 
 from app.core.database import SessionLocal
 from app.models.novel import Chapter
@@ -131,6 +132,31 @@ def _check_character_existence(
             )
 
 
+def _check_hard_constraints(
+    report: ConsistencyReport,
+    outline: dict,
+    context: dict,
+    chapter_num: int,
+) -> None:
+    """Hard constraints from story bible must never be violated."""
+    constraints = context.get("hard_constraints") or {}
+    forbidden = set(str(x) for x in (constraints.get("forbidden_characters") or []) if x)
+    if not forbidden:
+        return
+    outline_text = (outline.get("outline") or "") + (outline.get("title") or "") + (outline.get("summary") or "")
+    mentioned = _extract_names_from_text(outline_text)
+    violated = mentioned & forbidden
+    for name in sorted(violated):
+        report.issues.append(
+            ConsistencyIssue(
+                "blocker",
+                "character",
+                f"硬约束冲突：角色「{name}」已在 Story Bible 标记为不可出场",
+                chapter_num,
+            )
+        )
+
+
 def _check_foreshadowing_continuity(
     report: ConsistencyReport,
     outline: dict,
@@ -226,11 +252,12 @@ def _check_duplicate_content(
     """Duplicate: chapter already exists with completed status."""
     db = SessionLocal()
     try:
-        existing = (
-            db.query(Chapter)
-            .filter(Chapter.novel_id == novel_id, Chapter.chapter_num == chapter_num, Chapter.status == "completed")
-            .first()
+        stmt = select(Chapter).where(
+            Chapter.novel_id == novel_id,
+            Chapter.chapter_num == chapter_num,
+            Chapter.status == "completed",
         )
+        existing = db.execute(stmt).scalar_one_or_none()
         if existing:
             report.issues.append(
                 ConsistencyIssue(
@@ -242,6 +269,30 @@ def _check_duplicate_content(
             )
     finally:
         db.close()
+
+
+def _check_timeline_conflicts(
+    report: ConsistencyReport,
+    outline: dict,
+    context: dict,
+    chapter_num: int,
+) -> None:
+    """Detect obvious timeline conflicts between outline and story bible context."""
+    story_bible_context = str(context.get("story_bible_context") or "")
+    if not story_bible_context:
+        return
+    outline_text = (outline.get("outline") or "") + (outline.get("summary") or "") + (outline.get("title") or "")
+    # If previous context explicitly indicates event happened in latest chapter, avoid '数月后' hard jump immediately.
+    if chapter_num > 1 and ("ch" + str(chapter_num - 1) + ":") in story_bible_context:
+        if "数月后" in outline_text or "一年后" in outline_text:
+            report.issues.append(
+                ConsistencyIssue(
+                    "warning",
+                    "timeline",
+                    "时间线可能跳跃过大：上一章刚结束，本章出现长时间跃迁，请确认过渡是否充分",
+                    chapter_num,
+                )
+            )
 
 
 def _check_thread_overload(
@@ -293,9 +344,11 @@ def check_consistency(
     report = ConsistencyReport()
 
     _check_character_existence(report, outline, prewrite, context, chapter_num)
+    _check_hard_constraints(report, outline, context, chapter_num)
     _check_foreshadowing_continuity(report, outline, context, prewrite, novel_id, chapter_num)
     _check_outline_dependency(report, context, chapter_num)
     _check_duplicate_content(report, novel_id, chapter_num)
+    _check_timeline_conflicts(report, outline, context, chapter_num)
     _check_thread_overload(report, outline, prewrite, novel_id, chapter_num)
 
     if report.blockers:

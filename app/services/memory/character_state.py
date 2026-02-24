@@ -1,5 +1,6 @@
 """Character state manager - uses novel_memory table."""
 from typing import Optional
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
@@ -16,14 +17,11 @@ class CharacterStateManager:
         should_close = db is None
         db = db or SessionLocal()
         try:
-            rows = (
-                db.query(NovelMemory)
-                .filter(
-                    NovelMemory.novel_id == novel_id,
-                    NovelMemory.memory_type == "character",
-                )
-                .all()
+            stmt = select(NovelMemory).where(
+                NovelMemory.novel_id == novel_id,
+                NovelMemory.memory_type == "character",
             )
+            rows = db.execute(stmt).scalars().all()
             return [{"key": r.key, "content": r.content} for r in rows]
         finally:
             if should_close:
@@ -40,15 +38,12 @@ class CharacterStateManager:
         should_close = db is None
         db = db or SessionLocal()
         try:
-            existing = (
-                db.query(NovelMemory)
-                .filter(
-                    NovelMemory.novel_id == novel_id,
-                    NovelMemory.memory_type == "character",
-                    NovelMemory.key == character_id,
-                )
-                .first()
+            stmt = select(NovelMemory).where(
+                NovelMemory.novel_id == novel_id,
+                NovelMemory.memory_type == "character",
+                NovelMemory.key == character_id,
             )
+            existing = db.execute(stmt).scalar_one_or_none()
             if existing:
                 existing.content = state
             else:

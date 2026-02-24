@@ -5,6 +5,7 @@ import zipfile
 from urllib.parse import quote
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse, PlainTextResponse
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db, resolve_novel
@@ -32,7 +33,8 @@ def export_novel(novel_id: str, format: str = "txt", db: Session = Depends(get_d
     novel = resolve_novel(db, novel_id)
     if not novel:
         raise HTTPException(404, "Novel not found")
-    chapters = db.query(Chapter).filter(Chapter.novel_id == novel.id).order_by(Chapter.chapter_num).all()
+    chapter_stmt = select(Chapter).where(Chapter.novel_id == novel.id).order_by(Chapter.chapter_num)
+    chapters = db.execute(chapter_stmt).scalars().all()
 
     if format == "txt":
         content = _build_txt(novel, chapters)
@@ -48,12 +50,8 @@ def export_novel(novel_id: str, format: str = "txt", db: Session = Depends(get_d
             zf.writestr("00_小说信息.txt", f"标题: {novel.title}\n类型: {novel.genre or ''}\n状态: {novel.status}\n")
             for c in chapters:
                 zf.writestr(_chapter_file_name(c), c.content or "")
-            outlines = (
-                db.query(ChapterOutline)
-                .filter(ChapterOutline.novel_id == novel.id)
-                .order_by(ChapterOutline.chapter_num)
-                .all()
-            )
+            outline_stmt = select(ChapterOutline).where(ChapterOutline.novel_id == novel.id).order_by(ChapterOutline.chapter_num)
+            outlines = db.execute(outline_stmt).scalars().all()
             if outlines:
                 outline_payload = [
                     {
@@ -65,11 +63,11 @@ def export_novel(novel_id: str, format: str = "txt", db: Session = Depends(get_d
                     for o in outlines
                 ]
                 zf.writestr("01_chapter_outlines.json", json.dumps(outline_payload, ensure_ascii=False, indent=2))
-            final_review = (
-                db.query(NovelSpecification)
-                .filter(NovelSpecification.novel_id == novel.id, NovelSpecification.spec_type == "final_book_review")
-                .first()
+            final_stmt = select(NovelSpecification).where(
+                NovelSpecification.novel_id == novel.id,
+                NovelSpecification.spec_type == "final_book_review",
             )
+            final_review = db.execute(final_stmt).scalar_one_or_none()
             if final_review and isinstance(final_review.content, dict):
                 zf.writestr("02_final_book_review.json", json.dumps(final_review.content, ensure_ascii=False, indent=2))
             zf.writestr(f"{novel.title}.md", _build_txt(novel, chapters))

@@ -4,6 +4,7 @@ import asyncio
 import logging
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 import redis
 
@@ -36,6 +37,11 @@ def _novel_key(novel_id: str) -> str:
     return f"generation:novel:{novel_id}"
 
 
+def _sse_status_event(payload: dict) -> str:
+    """Build unified SSE status envelope."""
+    return f"data: {json.dumps({'type': 'status', 'payload': payload}, ensure_ascii=False)}\n\n"
+
+
 @router.post("/{novel_id}/generate", response_model=GenerateResponse)
 def submit_generation(novel_id: str, req: GenerateRequest, db: Session = Depends(get_db)):
     """Submit novel generation task. Persists generation_tasks row."""
@@ -43,14 +49,11 @@ def submit_generation(novel_id: str, req: GenerateRequest, db: Session = Depends
     novel = resolve_novel(db, novel_id)
     if not novel:
         raise HTTPException(404, "Novel not found")
-    active_task = (
-        db.query(GenerationTask)
-        .filter(
-            GenerationTask.novel_id == novel.id,
-            GenerationTask.status.in_(["submitted", "running", "awaiting_outline_confirmation"]),
-        )
-        .first()
+    active_stmt = select(GenerationTask).where(
+        GenerationTask.novel_id == novel.id,
+        GenerationTask.status.in_(["submitted", "running", "awaiting_outline_confirmation"]),
     )
+    active_task = db.execute(active_stmt).scalar_one_or_none()
     if active_task:
         raise HTTPException(409, f"已有进行中的生成任务: {active_task.task_id}")
     task = submit_generation_task.delay(novel.id, req.num_chapters, req.start_chapter)
@@ -81,7 +84,8 @@ def cancel_generation(novel_id: str, task_id: str, db: Session = Depends(get_db)
     if not novel:
         raise HTTPException(404, "Novel not found")
 
-    gt = db.query(GenerationTask).filter(GenerationTask.task_id == task_id).first()
+    gt_stmt = select(GenerationTask).where(GenerationTask.task_id == task_id)
+    gt = db.execute(gt_stmt).scalar_one_or_none()
     if not gt:
         raise HTTPException(404, "Task not found")
 
@@ -109,14 +113,11 @@ def confirm_outline_generation(novel_id: str, task_id: str, db: Session = Depend
     novel = resolve_novel(db, novel_id)
     if not novel:
         raise HTTPException(404, "Novel not found")
-    gt = (
-        db.query(GenerationTask)
-        .filter(
-            GenerationTask.task_id == task_id,
-            GenerationTask.novel_id == novel.id,
-        )
-        .first()
+    gt_stmt = select(GenerationTask).where(
+        GenerationTask.task_id == task_id,
+        GenerationTask.novel_id == novel.id,
     )
+    gt = db.execute(gt_stmt).scalar_one_or_none()
     if not gt:
         raise HTTPException(404, "Task not found")
     if gt.status != "awaiting_outline_confirmation":
@@ -146,7 +147,8 @@ def get_generation_status(novel_id: str, task_id: str | None = None, db: Session
     from app.core.database import resolve_novel
     novel = resolve_novel(db, novel_id)
     if task_id:
-        gt = db.query(GenerationTask).filter(GenerationTask.task_id == task_id).first()
+        gt_stmt = select(GenerationTask).where(GenerationTask.task_id == task_id)
+        gt = db.execute(gt_stmt).scalar_one_or_none()
         if gt:
             return GenerationStatusResponse(
                 status=gt.status,
@@ -177,6 +179,8 @@ def get_generation_status(novel_id: str, task_id: str | None = None, db: Session
             token_usage_input=d.get("token_usage_input", 0),
             token_usage_output=d.get("token_usage_output", 0),
             estimated_cost=d.get("estimated_cost", 0.0),
+            volume_no=d.get("volume_no"),
+            volume_size=d.get("volume_size"),
             message=d.get("message"),
             error=d.get("error"),
         )
@@ -193,7 +197,8 @@ def llm_debug(novel_id: str, task_id: str, db: Session = Depends(get_db)):
     novel = resolve_novel(db, novel_id)
     if not novel:
         raise HTTPException(404, "Novel not found")
-    gt = db.query(GenerationTask).filter(GenerationTask.task_id == task_id, GenerationTask.novel_id == novel.id).first()
+    gt_stmt = select(GenerationTask).where(GenerationTask.task_id == task_id, GenerationTask.novel_id == novel.id)
+    gt = db.execute(gt_stmt).scalar_one_or_none()
     if not gt:
         raise HTTPException(404, "Task not found")
     strategy = novel.strategy or "web-novel"
@@ -222,13 +227,13 @@ def stream_generation_progress(novel_id: str, task_id: str):
                 payload = json.dumps(d)
                 if payload != last:
                     last = payload
-                    yield f"data: {payload}\n\n"
+                    yield _sse_status_event(d)
                 if d.get("status") in ("completed", "failed"):
                     break
             else:
                 no_data_count += 1
                 if no_data_count >= 60:  # 30 seconds without data
-                    yield f"data: {json.dumps({'status': 'unknown', 'error': 'Task not found or expired'})}\n\n"
+                    yield _sse_status_event({"status": "unknown", "error": "Task not found or expired"})
                     break
             await asyncio.sleep(0.5)
 

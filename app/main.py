@@ -2,7 +2,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import novels, chapters, export, presets, generation
+from app.api.routes import novels, chapters, export, presets, generation, longform
 
 app = FastAPI(title="AI-JinShu API", version="0.1.0")
 
@@ -19,6 +19,7 @@ app.include_router(chapters.router, prefix="/api/novels", tags=["chapters"])
 app.include_router(export.router, prefix="/api/novels", tags=["export"])
 app.include_router(presets.router, prefix="/api/presets", tags=["presets"])
 app.include_router(generation.router, prefix="/api/novels", tags=["generation"])
+app.include_router(longform.router, prefix="/api/novels", tags=["longform"])
 
 
 @app.get("/health")

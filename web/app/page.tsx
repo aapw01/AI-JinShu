@@ -18,11 +18,11 @@ export default function Home() {
         >
           <div className="inline-flex items-center gap-2 rounded-full px-3 py-1 mb-4 text-xs bg-[#EAF3FF] text-[#0062CC] border border-[#CFE2FF]">
             <Sparkles className="w-3.5 h-3.5" />
-            Apple-inspired 创作工作台
+            云中谁寄锦书来
           </div>
-          <h1 className="text-4xl md:text-5xl font-semibold tracking-tight text-[#1D1D1F]">AI-JinShu</h1>
+          <h1 className="text-4xl md:text-5xl font-semibold tracking-tight text-[#1D1D1F]">锦书</h1>
           <p className="mt-4 text-[#6E6E73] text-lg max-w-2xl">
-            用更克制、专业、可追踪的方式生成长篇小说。从大纲到章节，再到导出与复审，全程可视化。
+            取意李清照“云中谁寄锦书来”，用更克制、专业、可追踪的方式生成长篇小说。从大纲到章节，再到导出与复审，全程可视化。
           </p>
           <div className="mt-8 flex flex-wrap gap-3">
             <Link href="/create">

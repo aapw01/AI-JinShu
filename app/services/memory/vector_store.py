@@ -1,8 +1,11 @@
 """Vector store wrapper using pgvector."""
 import logging
+import re
 from typing import Optional
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.llm import embed_query
 from app.core.database import SessionLocal
 from app.models.novel import KnowledgeChunk
 
@@ -15,6 +18,7 @@ class VectorStoreWrapper:
     def search(
         self,
         novel_id: int,
+        query_text: Optional[str] = None,
         query_embedding: Optional[list[float]] = None,
         limit: int = 5,
         db: Optional[Session] = None,
@@ -23,15 +27,21 @@ class VectorStoreWrapper:
         should_close = db is None
         db = db or SessionLocal()
         try:
-            query = db.query(KnowledgeChunk).filter(KnowledgeChunk.novel_id == novel_id)
+            stmt = select(KnowledgeChunk).where(KnowledgeChunk.novel_id == novel_id)
+            if query_embedding is None and query_text:
+                query_embedding = embed_query(query_text)
             if query_embedding is not None:
                 try:
-                    query = query.order_by(
+                    stmt = stmt.order_by(
                         KnowledgeChunk.embedding.cosine_distance(query_embedding)
                     )
                 except Exception as e:
                     logger.warning(f"Vector search failed: {e}")
-            rows = query.limit(limit).all()
+            rows = db.execute(stmt.limit(max(limit * 8, 20))).scalars().all()
+            if query_embedding is None and query_text:
+                rows = _lexical_rank(rows, query_text, limit)
+            else:
+                rows = rows[:limit]
             return [{"content": r.content, "chunk_type": r.chunk_type} for r in rows]
         finally:
             if should_close:
@@ -54,7 +64,7 @@ class VectorStoreWrapper:
                 novel_id=novel_id,
                 content=content,
                 chunk_type=chunk_type,
-                embedding=embedding,
+                embedding=embedding if embedding is not None else embed_query(content[:2000]),
                 metadata_=metadata or {},
             ))
             db.commit()
@@ -64,3 +74,24 @@ class VectorStoreWrapper:
         finally:
             if should_close:
                 db.close()
+
+
+def _tokenize(text: str) -> set[str]:
+    lowered = text.lower()
+    words = set(re.findall(r"[a-z0-9_]{2,}", lowered))
+    cjk = {ch for ch in lowered if "\u4e00" <= ch <= "\u9fff"}
+    return words | cjk
+
+
+def _lexical_rank(rows: list[KnowledgeChunk], query_text: str, limit: int) -> list[KnowledgeChunk]:
+    q_tokens = _tokenize(query_text)
+    if not q_tokens:
+        return rows[:limit]
+
+    def score(item: KnowledgeChunk) -> tuple[int, int]:
+        text_tokens = _tokenize(item.content or "")
+        overlap = len(q_tokens & text_tokens)
+        return overlap, len(item.content or "")
+
+    ranked = sorted(rows, key=score, reverse=True)
+    return ranked[:limit]

@@ -85,5 +85,7 @@ class GenerationStatusResponse(BaseModel):
     token_usage_input: int = 0
     token_usage_output: int = 0
     estimated_cost: float = 0.0
+    volume_no: int | None = None
+    volume_size: int | None = None
     message: str | None = None
     error: str | None = None

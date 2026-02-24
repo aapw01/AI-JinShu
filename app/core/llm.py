@@ -2,6 +2,7 @@
 import logging
 from langchain_core.language_models import BaseChatModel
 from langchain_openai import ChatOpenAI
+from langchain_openai import OpenAIEmbeddings
 from langchain_anthropic import ChatAnthropic
 from langchain_google_genai import ChatGoogleGenerativeAI
 
@@ -87,3 +88,24 @@ def get_llm_with_fallback(provider: str | None, model: str | None) -> BaseChatMo
             continue
     logger.error("All LLM providers failed, using openai as last resort")
     return get_llm("openai")
+
+
+def get_embedding_model() -> OpenAIEmbeddings:
+    """Get embeddings model (OpenAI-compatible endpoint)."""
+    return OpenAIEmbeddings(
+        model="text-embedding-3-small",
+        api_key=_resolve_api_key("openai"),
+        base_url=_resolve_base_url("openai") or "https://api.openai.com/v1",
+    )
+
+
+def embed_query(text: str) -> list[float] | None:
+    """Best-effort query embedding. Returns None when embedding is unavailable."""
+    if not text.strip():
+        return None
+    try:
+        model = get_embedding_model()
+        return model.embed_query(text)
+    except Exception as exc:
+        logger.warning("Embedding query failed, fallback to lexical search: %s", exc)
+        return None

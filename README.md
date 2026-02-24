@@ -35,6 +35,15 @@ AI-JinShu/
 - Health: `GET /health`
 - Novels CRUD: `GET/POST /api/novels`, `GET/PUT/DELETE /api/novels/{id}`
 - Generation: `POST /api/novels/{id}/generate`, `GET /api/novels/{id}/generation/status`
+- Longform reports: `GET /api/novels/{id}/quality-reports`, `GET /api/novels/{id}/checkpoints`, `GET /api/novels/{id}/volumes/summary`, `GET /api/novels/{id}/volumes/{volume_no}/gate-report`
+- Feedback loop: `GET/POST /api/novels/{id}/feedback`
+- Observability: `GET /api/novels/{id}/observability`
 - Chapters: `GET /api/novels/{id}/chapters`, `GET /api/novels/{id}/chapters/{num}`
 - Export: `GET /api/novels/{id}/export?format=txt|md|zip`
 - Presets: `GET /api/presets`
+
+## Docs
+
+- Longform technical plan: `docs/longform-novel-technical-plan.md`
+- API details: `docs/api.md`
+- Database notes: `docs/database.md`

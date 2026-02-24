@@ -8,7 +8,20 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.core.database import Base
-from app.models.novel import Novel, Chapter, NovelPreset, ChapterSummary, KnowledgeChunk
+from app.models.novel import (
+    Novel,
+    Chapter,
+    NovelPreset,
+    ChapterSummary,
+    KnowledgeChunk,
+    StoryEntity,
+    StoryFact,
+    StoryEvent,
+    StoryForeshadow,
+    StorySnapshot,
+    GenerationCheckpoint,
+    QualityReport,
+)
 from app.core.config import get_settings
 
 config = context.config

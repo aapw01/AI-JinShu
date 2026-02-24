@@ -98,14 +98,23 @@ def evaluate_language_quality(text: str, lang_code: str) -> Tuple[float, str]:
 
     # 2) Detect language when langdetect is available
     try:
-        from langdetect import detect  # type: ignore
+        from langdetect import detect_langs  # type: ignore
 
-        detected = _normalize_lang_code(detect(text[:3000]))
+        candidates = detect_langs(text[:4000])
+        top = candidates[0] if candidates else None
+        detected = _normalize_lang_code(str(top.lang)) if top else "unknown"
+        target_prob = 0.0
+        for item in candidates:
+            if _normalize_lang_code(str(item.lang)) == lang_code:
+                target_prob = float(item.prob)
+                break
         if detected != lang_code:
-            score -= 0.3
-            report_parts.append(f"自动检测语言为 `{detected}`，与目标 `{lang_code}` 不一致。")
-        else:
-            report_parts.append(f"自动检测语言为 `{detected}`，与目标 `{lang_code}` 一致。")
+            score -= 0.18
+        if target_prob < 0.6:
+            score -= 0.2
+        report_parts.append(
+            f"自动检测语言 `{detected}`，目标语言概率 {target_prob:.2f}。"
+        )
     except Exception:
         report_parts.append("未启用自动语言检测（langdetect 不可用），跳过该项。")
 
@@ -119,6 +128,11 @@ def evaluate_language_quality(text: str, lang_code: str) -> Tuple[float, str]:
     if avg_len > 180:
         score -= 0.1
         report_parts.append("句长偏高，阅读节奏可能不自然。")
+    if len(sentence_like) >= 6:
+        repeated_sentences = len(sentence_like) - len(set(s.strip() for s in sentence_like))
+        if repeated_sentences >= 2:
+            score -= 0.08
+            report_parts.append("句子重复率偏高，表达可能机械。")
 
     # 4) Optional grammar check with language_tool_python
     try:

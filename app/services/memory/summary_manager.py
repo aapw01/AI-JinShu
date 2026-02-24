@@ -1,5 +1,6 @@
 """Summary manager - chapter summaries for context."""
 from typing import Optional
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
@@ -16,12 +17,12 @@ class SummaryManager:
         should_close = db is None
         db = db or SessionLocal()
         try:
-            rows = (
-                db.query(ChapterSummary)
-                .filter(ChapterSummary.novel_id == novel_id, ChapterSummary.chapter_num < before_chapter)
+            stmt = (
+                select(ChapterSummary)
+                .where(ChapterSummary.novel_id == novel_id, ChapterSummary.chapter_num < before_chapter)
                 .order_by(ChapterSummary.chapter_num)
-                .all()
             )
+            rows = db.execute(stmt).scalars().all()
             return [{"chapter_num": r.chapter_num, "summary": r.summary} for r in rows]
         finally:
             if should_close:
@@ -44,15 +45,15 @@ class SummaryManager:
         should_close = db is None
         db = db or SessionLocal()
         try:
-            rows = (
-                db.query(ChapterSummary)
-                .filter(
+            stmt = (
+                select(ChapterSummary)
+                .where(
                     ChapterSummary.novel_id == novel_id,
                     ChapterSummary.chapter_num < cutoff,
                 )
                 .order_by(ChapterSummary.chapter_num)
-                .all()
             )
+            rows = db.execute(stmt).scalars().all()
             if not rows:
                 return ""
 
@@ -82,11 +83,8 @@ class SummaryManager:
         should_close = db is None
         db = db or SessionLocal()
         try:
-            existing = (
-                db.query(ChapterSummary)
-                .filter(ChapterSummary.novel_id == novel_id, ChapterSummary.chapter_num == chapter_num)
-                .first()
-            )
+            stmt = select(ChapterSummary).where(ChapterSummary.novel_id == novel_id, ChapterSummary.chapter_num == chapter_num)
+            existing = db.execute(stmt).scalar_one_or_none()
             if existing:
                 existing.summary = summary
             else:

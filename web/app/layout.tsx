@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "AI-JinShu - AI 小说生成平台",
-  description: "基于 AI 的智能小说创作平台，让创意变为现实",
+  title: "锦书 - AI 小说生成平台",
+  description: "取意“云中谁寄锦书来”的 AI 长篇小说创作平台",
 };
 
 export default function RootLayout({

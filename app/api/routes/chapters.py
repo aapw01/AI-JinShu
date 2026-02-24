@@ -1,6 +1,7 @@
 """Chapters routes."""
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db, resolve_novel
@@ -43,7 +44,8 @@ def list_chapters(novel_id: str, db: Session = Depends(get_db)):
     novel = resolve_novel(db, novel_id)
     if not novel:
         raise HTTPException(404, "Novel not found")
-    chapters = db.query(Chapter).filter(Chapter.novel_id == novel.id).order_by(Chapter.chapter_num).all()
+    stmt = select(Chapter).where(Chapter.novel_id == novel.id).order_by(Chapter.chapter_num)
+    chapters = db.execute(stmt).scalars().all()
     uuid_str = novel.uuid or str(novel.id)
     return [_to_response(c, uuid_str) for c in chapters]
 
@@ -54,11 +56,8 @@ def get_chapter(novel_id: str, chapter_num: int, db: Session = Depends(get_db)):
     novel = resolve_novel(db, novel_id)
     if not novel:
         raise HTTPException(404, "Novel not found")
-    chapter = (
-        db.query(Chapter)
-        .filter(Chapter.novel_id == novel.id, Chapter.chapter_num == chapter_num)
-        .first()
-    )
+    stmt = select(Chapter).where(Chapter.novel_id == novel.id, Chapter.chapter_num == chapter_num)
+    chapter = db.execute(stmt).scalar_one_or_none()
     if not chapter:
         raise HTTPException(404, "Chapter not found")
     return _to_response(chapter, novel.uuid or str(novel.id))
@@ -71,29 +70,21 @@ def get_chapter_progress(novel_id: str, db: Session = Depends(get_db)):
     if not novel:
         raise HTTPException(404, "Novel not found")
 
-    outlines = (
-        db.query(ChapterOutline)
-        .filter(ChapterOutline.novel_id == novel.id)
-        .order_by(ChapterOutline.chapter_num)
-        .all()
-    )
-    chapters = (
-        db.query(Chapter)
-        .filter(Chapter.novel_id == novel.id)
-        .order_by(Chapter.chapter_num)
-        .all()
-    )
+    outlines_stmt = select(ChapterOutline).where(ChapterOutline.novel_id == novel.id).order_by(ChapterOutline.chapter_num)
+    outlines = db.execute(outlines_stmt).scalars().all()
+    chapters_stmt = select(Chapter).where(Chapter.novel_id == novel.id).order_by(Chapter.chapter_num)
+    chapters = db.execute(chapters_stmt).scalars().all()
     generated_map = {c.chapter_num: c for c in chapters}
 
-    active_task = (
-        db.query(GenerationTask)
-        .filter(
+    active_stmt = (
+        select(GenerationTask)
+        .where(
             GenerationTask.novel_id == novel.id,
             GenerationTask.status.in_(["submitted", "running"]),
         )
         .order_by(GenerationTask.updated_at.desc())
-        .first()
     )
+    active_task = db.execute(active_stmt).scalar_one_or_none()
     generating_chapter = active_task.current_chapter if active_task else None
 
     result: list[ChapterProgressItem] = []
@@ -128,11 +119,8 @@ def update_chapter(
     novel = resolve_novel(db, novel_id)
     if not novel:
         raise HTTPException(404, "Novel not found")
-    chapter = (
-        db.query(Chapter)
-        .filter(Chapter.novel_id == novel.id, Chapter.chapter_num == chapter_num)
-        .first()
-    )
+    stmt = select(Chapter).where(Chapter.novel_id == novel.id, Chapter.chapter_num == chapter_num)
+    chapter = db.execute(stmt).scalar_one_or_none()
     if not chapter:
         raise HTTPException(404, "Chapter not found")
     if data.title is not None:
