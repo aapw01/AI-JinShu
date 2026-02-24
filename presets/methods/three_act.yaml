@@ -1,0 +1,13 @@
+# Three-act structure
+name: 三幕式
+acts:
+  - name: 第一幕
+    setup: 建立设定
+    inciting: 激励事件
+  - name: 第二幕
+    rising: 上升行动
+    midpoint: 中点
+    crisis: 危机
+  - name: 第三幕
+    climax: 高潮
+    resolution: 结局

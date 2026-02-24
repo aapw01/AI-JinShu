@@ -1,0 +1,27 @@
+- id: xuanhuan
+  label: 玄幻
+  description: 修仙、玄幻、异界
+- id: dushi
+  label: 都市
+  description: 现代都市、职场、生活
+- id: wuxia
+  label: 武侠
+  description: 江湖、武功、侠义
+- id: kehuan
+  label: 科幻
+  description: 未来、科技、星际
+- id: yanqing
+  label: 言情
+  description: 爱情、情感、甜宠
+- id: lishi
+  label: 历史
+  description: 古代、穿越、权谋
+- id: lingyi
+  label: 灵异
+  description: 悬疑、恐怖、 supernatural
+- id: youxi
+  label: 游戏
+  description: 网游、电竞、虚拟
+- id: qita
+  label: 其他
+  description: 其他类型

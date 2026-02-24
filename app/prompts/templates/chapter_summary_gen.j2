@@ -1,0 +1,21 @@
+{# Generate a concise summary from actual chapter content #}
+请基于以下章节正文，生成一份精练的章节摘要（200-400字）。
+
+第{{ chapter_num }}章 {{ title or '' }}
+
+章节正文（截取）：
+{{ content[:4000] if content else '' }}
+
+大纲参考：
+{{ outline | default({}) | tojson }}
+
+摘要须包含：
+1. 本章核心事件（按时间线）
+2. 角色状态变化（谁做了什么、关系变化）
+3. 新信息/新设定的揭示
+4. 章节末尾钩子/悬念
+5. 与前文的因果承接
+
+语言：{{ language or 'zh' }}
+
+仅输出摘要文本，不要使用JSON或Markdown格式。

@@ -1,0 +1,13 @@
+{# Summary update - update memory after chapter #}
+Update the story summary after chapter {{ chapter_num }}.
+
+**Previous summary**: {{ previous_summary or 'None' }}
+**New chapter content**: {{ content[:1500] if content else '' }}
+
+**Update**:
+- Add new chapter summary
+- Update overall story arc if needed
+- Note character state changes
+- Flag foreshadowing for future chapters
+
+Output updated summary structure.

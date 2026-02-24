@@ -1,0 +1,25 @@
+请把以下创意扩展为“故事规格”（specification），采用资深作家可执行的结构。
+
+输入：
+- 标题：{{ novel.title or "未命名" }}
+- 创意：{{ novel.user_idea or "无" }}
+- 类型：{{ novel.genre or "未指定" }}
+- 风格：{{ novel.style or "未指定" }}
+- 目标章节：{{ num_chapters }}
+- 语言：{{ language }}
+
+输出 JSON：
+{
+  "logline": "一句话故事核心",
+  "theme": "核心主题",
+  "target_reader": "目标读者画像",
+  "characters": [{"name": "角色名", "goal": "目标", "conflict": "冲突"}],
+  "worldview": "世界观摘要",
+  "main_conflict": "主冲突",
+  "sub_conflicts": ["支线冲突A", "支线冲突B"],
+  "plotlines": [{"id": "PL-01", "name": "线索名", "start": 1, "end": {{ num_chapters }} }],
+  "foreshadowing": [{"id": "F-001", "plant_chapter": 1, "resolve_chapter": 3, "content": "伏笔内容"}],
+  "volume_map": [{"volume": 1, "chapter_range": "1-30", "main_goal": "本卷核心目标"}],
+  "climax_plan": [{"chapter_range": "1-5", "level": "small", "objective": "小高潮目标"}],
+  "constraints": ["必须遵守的约束"]
+}

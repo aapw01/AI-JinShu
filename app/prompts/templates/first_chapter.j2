@@ -1,0 +1,40 @@
+{# First chapter writing prompt - uses layered context #}
+Write the first chapter of the novel.
+
+---
+
+## 全局设定（Global Bible）
+{{ context.global_bible | default('无') }}
+
+## 本章大纲
+- 标题: {{ outline.title | default('') }}
+- 大纲: {{ outline.outline | default('') }}
+- 角色: {{ outline.role | default('') }}
+- 目的: {{ outline.purpose | default('') }}
+- 埋设伏笔: {{ outline.foreshadowing | default('无') }}
+- 钩子: {{ outline.hook | default('') }}
+
+---
+
+**语言**: {{ language or 'zh' }}
+**母语风格**: {{ native_style_profile or '' }}
+
+**Anti-AI 写作规则**（严格执行）:
+- 30-50% 单句段落，50-100字/段
+- 禁用: 弥漫着、唯一的、不禁、宛如、仿佛、渐渐地、缓缓地
+- 短句为主（15-25字），长短交替
+- 对话呈现情感，而非叙述情感
+
+**黄金开篇**（必须遵守）:
+- 从动态场景切入（动作/冲突/对话），禁止静态描写开篇
+- 第1章内暴露核心矛盾
+- 禁止信息倾倒：世界观通过角色行动/对话自然展开
+- 开篇最多3个有名字的关键角色
+- 1-3章内展示"核心金手指/信息差"
+
+**网文连载节奏**:
+- 至少一个清晰的章末悬念/钩子
+- 推拉节奏: 压力 → 反应 → 升级 → 钩子
+- 保持场景连贯性和因果链
+
+用 {{ language or 'zh' }} 输出完整章节正文，严格遵循母语写作风格。

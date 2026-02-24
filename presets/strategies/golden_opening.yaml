@@ -1,0 +1,15 @@
+# Golden opening strategy
+rules:
+  - 动态场景切入
+  - 核心冲突前置
+  - 避免信息轰炸
+  - 限制出场人数(3人内)
+  - 快速展现金手指
+chapters: 3
+max_chars_first_chapter: 4000
+stages:
+  architect: { provider: openai, model: gpt-4o-mini }
+  outliner: { provider: openai, model: gpt-4o }
+  writer: { provider: openai, model: gpt-4o }
+  reviewer: { provider: openai, model: gpt-4o-mini }
+  finalizer: { provider: openai, model: gpt-4o-mini }

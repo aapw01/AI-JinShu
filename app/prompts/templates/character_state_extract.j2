@@ -1,0 +1,24 @@
+{# Extract character state changes from written chapter content #}
+基于以下章节内容，提取角色状态变化。
+
+已知角色列表：{{ character_names | join(', ') }}
+
+第{{ chapter_num }}章内容（截取）：
+{{ content[:3000] if content else '' }}
+
+请输出JSON，仅包含本章实际出场或受影响的角色：
+{
+  "updates": [
+    {
+      "name": "角色名",
+      "status": "alive/injured/dead/unknown",
+      "location": "当前所在位置",
+      "new_items": ["新获得物品"],
+      "lost_items": ["失去的物品"],
+      "relationship_changes": ["关系变化描述"],
+      "key_action": "本章关键行为一句话概括"
+    }
+  ]
+}
+
+仅输出纯JSON。

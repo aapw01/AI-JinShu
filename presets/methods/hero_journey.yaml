@@ -1,0 +1,15 @@
+# Hero's Journey method
+name: 英雄之旅
+stages:
+  - ordinary_world
+  - call_to_adventure
+  - refusal
+  - meeting_mentor
+  - crossing_threshold
+  - tests_allies_enemies
+  - approach_cave
+  - ordeal
+  - reward
+  - road_back
+  - resurrection
+  - return_elixir

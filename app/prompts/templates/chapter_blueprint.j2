@@ -1,0 +1,21 @@
+{# Chapter blueprint - detailed outline #}
+Create a detailed chapter blueprint for chapter {{ chapter_num }}.
+
+**Plan from architect**:
+{{ plan | default({}) | tojson }}
+
+**Context**:
+{{ context | default({}) | tojson }}
+
+**Word count target**: {{ word_count or 3000 }}
+
+**Style requirements**:
+- Pace: {{ pace or 'medium' }}
+- Focus: {{ focus or 'balanced' }}
+
+Output:
+1. Chapter title (compelling, not spoiler)
+2. Scene breakdown (3-4 scenes)
+3. Key dialogue moments
+4. Sensory anchors per scene
+5. POV and transitions

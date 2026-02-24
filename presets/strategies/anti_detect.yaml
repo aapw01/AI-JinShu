@@ -1,0 +1,12 @@
+# Anti-AI detection strategy
+source: spec/presets/anti-ai-detection.md
+key_metrics:
+  single_sentence_ratio: 0.3
+  paragraph_length: 50-100
+  banned_words: strict
+stages:
+  architect: { provider: openai, model: gpt-4o-mini }
+  outliner: { provider: openai, model: gpt-4o-mini }
+  writer: { provider: openai, model: gpt-4o }
+  reviewer: { provider: openai, model: gpt-4o-mini }
+  finalizer: { provider: openai, model: gpt-4o-mini }

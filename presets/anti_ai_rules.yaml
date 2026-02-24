@@ -1,0 +1,27 @@
+# Anti-AI detection rules (Tencent Zhuque standard)
+paragraph:
+  single_sentence_ratio: 0.3  # 30-50%
+  max_chars_per_paragraph: 100
+  min_chars_per_paragraph: 50
+
+banned_words:
+  - 弥漫着
+  - 唯一的
+  - 摇摇欲坠
+  - 宛如
+  - 仿佛
+  - 犹如
+  - 直到
+  - 猛地
+  - 话音未落
+  - 不禁
+  - 心中暗想
+  - 顿时
+  - 内心涌起
+  - 不由得
+  - 空气凝固
+  - 皱起眉头
+
+sentence:
+  target_length: 15  # 15-25 chars
+  max_length: 25
