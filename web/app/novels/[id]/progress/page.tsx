@@ -35,6 +35,30 @@ const STEP_ALIASES: Record<string, string> = {
   memory_update: "finalizer",
 };
 
+const SUBTASK_LABELS: Record<string, string> = {
+  queued: "任务已入队",
+  book_planning: "拆分卷任务",
+  volume_dispatch: "调度卷任务",
+  constitution: "生成创作宪法",
+  specify_plan_tasks: "生成规格/计划/任务分解",
+  full_outline_ready: "全书大纲已完成",
+  outline_waiting_confirmation: "等待大纲确认",
+  volume_replan: "分卷策略重规划",
+  context: "加载上下文",
+  consistency: "一致性检查",
+  chapter_blocked: "一致性未通过（跳过）",
+  beats: "生成节拍卡",
+  writer: "写作章节草稿",
+  reviewer: "章节质量审校",
+  revise: "按反馈修订",
+  rollback_rerun: "回滚并重跑",
+  finalizer: "章节定稿",
+  memory_update: "更新记忆与摘要",
+  chapter_done: "章节完成",
+  final_book_review: "全书终审",
+  done: "全书完成",
+};
+
 export default function ProgressPage() {
   const params = useParams();
   const router = useRouter();
@@ -152,7 +176,7 @@ export default function ProgressPage() {
   if (!novel) {
     return (
       <div className="min-h-screen flex items-center justify-center">
-        <div className="animate-spin w-8 h-8 border-2 border-[#007AFF] border-t-transparent rounded-full" />
+        <div className="animate-spin w-8 h-8 border-2 border-[#C8211B] border-t-transparent rounded-full" />
       </div>
     );
   }
@@ -161,6 +185,7 @@ export default function ProgressPage() {
   const isFailed = status?.status === "failed";
   const isAwaitingOutline = status?.status === "awaiting_outline_confirmation";
   const isRunning = status?.status === "generating" || status?.status === "running";
+  const activeSubtaskLabel = status?.subtask_label || (status?.step ? SUBTASK_LABELS[status.step] || status.step : "");
 
   return (
     <main className="min-h-screen">
@@ -169,7 +194,7 @@ export default function ProgressPage() {
         subtitle={novel.title}
         backHref={`/novels/${id}`}
         icon={<ArrowLeft className="w-5 h-5" />}
-        maxWidthClassName="max-w-4xl"
+        maxWidthClassName="max-w-[1280px]"
         actions={
           isComplete ? (
             <Link href={`/novels/${id}`}>
@@ -182,7 +207,7 @@ export default function ProgressPage() {
         }
       />
 
-      <div className="max-w-4xl mx-auto px-4 py-8 space-y-8">
+      <div className="max-w-[1280px] mx-auto px-4 py-6 space-y-8">
         {isComplete && (
           <div className="p-4 rounded-[12px] bg-[#E9F9EF] border border-[#CDEFD8] flex items-center gap-3">
             <div className="w-10 h-10 rounded-full bg-white flex items-center justify-center">
@@ -211,17 +236,17 @@ export default function ProgressPage() {
         <Card className="p-6">
           <SectionTitle
             title="整体进度"
-            right={<span className="text-2xl font-semibold text-[#007AFF]">{Math.round(status?.progress || 0)}%</span>}
+            right={<span className="text-xl font-semibold text-[#C8211B]">{Math.round(status?.progress || 0)}%</span>}
           />
 
-          <div className="h-3 bg-[#F2F2F4] rounded-full overflow-hidden mb-6">
+          <div className="h-3 bg-[#F6F3EF] rounded-full overflow-hidden mb-6">
             <div
               className={`h-full transition-all duration-500 rounded-full ${
                 isFailed
                   ? "bg-[#C4372D]"
                   : isComplete
                   ? "bg-[#18864B]"
-                  : "bg-[#007AFF]"
+                  : "bg-[#C8211B]"
               }`}
               style={{ width: `${status?.progress || 0}%` }}
             />
@@ -229,11 +254,11 @@ export default function ProgressPage() {
 
           {/* Chapter Progress */}
           {status?.current_chapter && status?.total_chapters && (
-            <p className="text-sm text-[#6E6E73]">
+            <p className="text-sm text-[#7E756D]">
               正在生成第 {status.current_chapter} / {status.total_chapters} 章
             </p>
           )}
-          <p className="text-xs text-[#6E6E73] mt-2">
+          <p className="text-xs text-[#7E756D] mt-2">
             估算 Token：输入 {status?.token_usage_input || 0} / 输出 {status?.token_usage_output || 0}，预估费用 $
             {(status?.estimated_cost || 0).toFixed(4)}
           </p>
@@ -279,7 +304,7 @@ export default function ProgressPage() {
         {gateReport && (
           <Card className="p-6">
             <SectionTitle title={`第 ${gateReport.volume_no} 卷 Gate 报告`} subtitle={`结论: ${gateReport.verdict}`} />
-            <div className="text-sm text-[#6E6E73] space-y-1">
+            <div className="text-sm text-[#7E756D] space-y-1">
               {(gateReport.evidence_chain || []).slice(0, 6).map((e, idx) => (
                 <p key={idx}>
                   {String(e.metric || "metric")} = {String(e.value ?? "")} (阈值 {String(e.threshold ?? "")})
@@ -298,70 +323,81 @@ export default function ProgressPage() {
           </div>
         )}
 
-        <Card className="p-6">
-          <SectionTitle title="生成流程" subtitle="阶段化可观测，便于定位问题" />
-          <div className="space-y-4">
-            {PIPELINE_STEPS.map((step, index) => {
-              const stepStatus = getStepStatus(index);
-              return (
-                <div key={step.id} className="flex items-start gap-4">
-                  {/* Step Indicator */}
-                  <div className="relative">
-                    <div
-                      className={`
-                        w-10 h-10 rounded-full flex items-center justify-center transition-all
-                        ${stepStatus === "completed" ? "bg-[#E9F9EF] border-2 border-[#18864B]" : ""}
-                        ${stepStatus === "active" ? "bg-[#EAF3FF] border-2 border-[#007AFF]" : ""}
-                        ${stepStatus === "failed" ? "bg-[#FFECEB] border-2 border-[#C4372D]" : ""}
-                        ${stepStatus === "pending" ? "bg-white border border-[rgba(60,60,67,0.14)]" : ""}
-                      `}
-                    >
-                      {stepStatus === "completed" ? (
-                        <CheckCircle2 className="w-5 h-5 text-[#18864B]" />
-                      ) : stepStatus === "active" ? (
-                        <LoaderCircle className="w-4 h-4 text-[#007AFF] animate-spin" />
-                      ) : stepStatus === "failed" ? (
-                        <XCircle className="w-5 h-5 text-[#C4372D]" />
-                      ) : (
-                        <span className="text-sm text-[#8E8E93]">{index + 1}</span>
-                      )}
-                    </div>
-                    {index < PIPELINE_STEPS.length - 1 && (
+        <Card className="p-5">
+          <SectionTitle
+            title="生成流程"
+            subtitle={isRunning && activeSubtaskLabel ? `当前子任务：${activeSubtaskLabel}` : "单轴节点视图，节点下方显示详情"}
+          />
+          <div className="relative">
+            <div className="absolute left-0 right-0 top-4 h-[2px] bg-[#E6E1DC]" />
+            <div className="grid grid-cols-8 gap-2">
+              {PIPELINE_STEPS.map((step, index) => {
+                const stepStatus = getStepStatus(index);
+                const showActiveSubtask = stepStatus === "active" && isRunning;
+                return (
+                  <div key={step.id} className="relative pt-0">
+                    <div className="flex justify-center relative z-10">
                       <div
                         className={`
-                          absolute left-1/2 top-10 w-0.5 h-8 -translate-x-1/2
-                          ${stepStatus === "completed" ? "bg-[#CDEFD8]" : "bg-[rgba(60,60,67,0.14)]"}
+                          w-8 h-8 rounded-full flex items-center justify-center transition-all
+                          ${stepStatus === "completed" ? "bg-[#E9F9EF] border-2 border-[#18864B]" : ""}
+                          ${stepStatus === "active" ? "bg-[#F8ECEA] border-2 border-[#C8211B]" : ""}
+                          ${stepStatus === "failed" ? "bg-[#FFECEB] border-2 border-[#C4372D]" : ""}
+                          ${stepStatus === "pending" ? "bg-white border border-[rgba(60,60,67,0.20)]" : ""}
                         `}
-                      />
-                    )}
-                  </div>
+                      >
+                        {stepStatus === "completed" ? (
+                          <CheckCircle2 className="w-4 h-4 text-[#18864B]" />
+                        ) : stepStatus === "active" ? (
+                          <LoaderCircle className="w-4 h-4 text-[#C8211B] animate-spin" />
+                        ) : stepStatus === "failed" ? (
+                          <XCircle className="w-4 h-4 text-[#C4372D]" />
+                        ) : (
+                          <span className="text-xs text-[#8E8E93]">{index + 1}</span>
+                        )}
+                      </div>
+                    </div>
 
-                  <div className="flex-1 pb-8">
-                    <h3
-                      className={`
-                        font-medium
-                        ${stepStatus === "completed" ? "text-[#18864B]" : ""}
-                        ${stepStatus === "active" ? "text-[#007AFF]" : ""}
-                        ${stepStatus === "failed" ? "text-[#C4372D]" : ""}
-                        ${stepStatus === "pending" ? "text-[#6E6E73]" : ""}
-                      `}
-                    >
-                      {step.label}
-                    </h3>
-                    <p className="text-sm text-[#6E6E73]">{step.desc}</p>
+                    <div className="mt-3 px-1 text-center">
+                      <p
+                        className={`
+                          text-[13px] font-medium leading-5
+                          ${stepStatus === "completed" ? "text-[#18864B]" : ""}
+                          ${stepStatus === "active" ? "text-[#C8211B]" : ""}
+                          ${stepStatus === "failed" ? "text-[#C4372D]" : ""}
+                          ${stepStatus === "pending" ? "text-[#6F665F]" : ""}
+                        `}
+                      >
+                        {step.label}
+                      </p>
+                      <p className="text-[11px] leading-4 text-[#7E756D] mt-1 line-clamp-2">{step.desc}</p>
+                      {showActiveSubtask && activeSubtaskLabel ? (
+                        <div className="mt-1.5 inline-flex max-w-full items-center gap-1 rounded-full border border-[#EED1CC] bg-[#FDF1EF] px-2 py-0.5">
+                          <LoaderCircle className="w-3 h-3 text-[#C8211B] animate-spin shrink-0" />
+                          <span className="text-[11px] leading-4 text-[#A52A25] truncate" title={activeSubtaskLabel}>
+                            {activeSubtaskLabel}
+                          </span>
+                        </div>
+                      ) : null}
+                      {showActiveSubtask && status?.message ? (
+                        <p className="text-[10px] leading-4 text-[#9A9086] mt-1 line-clamp-1" title={status.message}>
+                          {status.message}
+                        </p>
+                      ) : null}
+                    </div>
                   </div>
-                </div>
-              );
-            })}
+                );
+              })}
+            </div>
           </div>
         </Card>
 
         {logs.length > 0 && (
           <Card className="p-6">
-            <h2 className="text-lg font-semibold text-[#1D1D1F] mb-4">生成日志</h2>
-            <div className="bg-[#F2F2F4] rounded-[8px] p-4 max-h-64 overflow-y-auto font-mono text-xs">
+            <h2 className="text-lg font-semibold text-[#1F1B18] mb-4">生成日志</h2>
+            <div className="bg-[#F6F3EF] rounded-[8px] p-4 max-h-64 overflow-y-auto font-mono text-xs">
               {logs.map((log, i) => (
-                <div key={i} className="text-[#6E6E73] py-0.5">
+                <div key={i} className="text-[#7E756D] py-0.5">
                   <span className="text-[#8E8E93] mr-2">[{String(i + 1).padStart(3, "0")}]</span>
                   {log}
                 </div>
@@ -371,9 +407,6 @@ export default function ProgressPage() {
           </Card>
         )}
 
-        {status?.message && (
-          <div className="text-center text-[#6E6E73] text-sm">{status.message}</div>
-        )}
       </div>
     </main>
   );

@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db, resolve_novel
+from app.core.time_utils import to_utc_iso_z
 from app.models.novel import Chapter, ChapterOutline, GenerationTask
 from app.schemas.novel import ChapterResponse
 
@@ -34,7 +35,7 @@ def _to_response(c: Chapter, novel_uuid: str) -> ChapterResponse:
         review_score=c.review_score,
         language_quality_score=c.language_quality_score,
         language_quality_report=c.language_quality_report,
-        created_at=c.created_at.isoformat() if c.created_at else "",
+        created_at=to_utc_iso_z(c.created_at),
     )
 
 

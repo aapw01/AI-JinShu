@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     celery_broker_url: str = "redis://localhost:6379/1"
     default_llm_provider: str = "openai"
     default_llm_model: str = "gpt-4o-mini"
+    default_embedding_model: str = "text-embedding-3-small"
     llm_base_url: str | None = None
     llm_api_key: str | None = None
     # Backward-compatible provider-specific fields.

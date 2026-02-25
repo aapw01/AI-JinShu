@@ -198,12 +198,12 @@ export default function CreatePage() {
     <main className="min-h-screen">
       <TopBar title="创建小说" backHref="/" icon={<ArrowLeft className="w-5 h-5" />} maxWidthClassName="max-w-4xl" />
 
-      <div className="max-w-4xl mx-auto px-4 py-8">
+      <div className="max-w-4xl mx-auto px-4 py-6">
         <motion.div
           initial={{ opacity: 0, y: 16 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.4, ease: [0.25, 0.1, 0.25, 1] }}
-          className="glass-card p-6 md:p-8"
+          className="rounded-[16px] border border-[#DDD8D3] bg-[#FBFAF8] p-6 md:p-8 shadow-none"
         >
         <div className="flex items-center justify-between mb-10">
           {STEPS.map((s, i) => (
@@ -213,13 +213,13 @@ export default function CreatePage() {
                 disabled={s.id > step}
                 className={`
                   flex flex-col items-center gap-2 transition-all
-                  ${s.id === step ? "text-[#007AFF]" : s.id < step ? "text-[#6E6E73] cursor-pointer hover:text-[#1D1D1F]" : "text-[#B0B0B5] cursor-not-allowed"}
+                  ${s.id === step ? "text-[#C8211B]" : s.id < step ? "text-[#7E756D] cursor-pointer hover:text-[#1F1B18]" : "text-[#B0B0B5] cursor-not-allowed"}
                 `}
               >
                 <div
                   className={`
                     w-10 h-10 rounded-full flex items-center justify-center text-sm font-medium transition-all
-                    ${s.id === step ? "bg-[#EAF3FF] border-2 border-[#007AFF]" : s.id < step ? "bg-[#E9F9EF] border border-[#CDEFD8]" : "bg-white border border-[rgba(60,60,67,0.14)]"}
+                    ${s.id === step ? "bg-[#F8ECEA] border-2 border-[#C8211B]" : s.id < step ? "bg-[#E9F9EF] border border-[#CDEFD8]" : "bg-white border border-[rgba(60,60,67,0.14)]"}
                   `}
                 >
                   {s.id < step ? (
@@ -243,12 +243,12 @@ export default function CreatePage() {
           {step === 1 && (
             <div className="space-y-6">
               <div className="mb-8">
-                <div className="inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs bg-[#EAF3FF] text-[#0062CC] border border-[#CFE2FF] mb-3">
+                <div className="inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs bg-[#F8ECEA] text-[#A52A25] border border-[#EED1CC] mb-3">
                   <PenSquare className="w-3.5 h-3.5" />
                   Story Seed
                 </div>
-                <h2 className="text-2xl font-semibold text-[#1D1D1F] mb-1">你的故事从这里开始</h2>
-                <p className="text-[#6E6E73]">给小说命名，并写下核心创意。</p>
+                <h2 className="text-xl font-semibold text-[#1F1B18] mb-1">你的故事从这里开始</h2>
+                <p className="text-[#7E756D]">给小说命名，并写下核心创意。</p>
               </div>
               <Input
                 label="小说标题"
@@ -270,12 +270,12 @@ export default function CreatePage() {
           {step === 2 && (
             <div className="space-y-6">
               <div className="mb-8">
-                <div className="inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs bg-[#EAF3FF] text-[#0062CC] border border-[#CFE2FF] mb-3">
+                <div className="inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs bg-[#F8ECEA] text-[#A52A25] border border-[#EED1CC] mb-3">
                   <Globe className="w-3.5 h-3.5" />
                   Language
                 </div>
-                <h2 className="text-2xl font-semibold text-[#1D1D1F] mb-1">选择创作语言</h2>
-                <p className="text-[#6E6E73]">AI 会按该语言的母语风格生成文本。</p>
+                <h2 className="text-xl font-semibold text-[#1F1B18] mb-1">选择创作语言</h2>
+                <p className="text-[#7E756D]">AI 会按该语言的母语风格生成文本。</p>
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 {LANGUAGES.map((lang) => (
@@ -285,8 +285,8 @@ export default function CreatePage() {
                     className={`
                       p-4 rounded-xl border text-center transition-all
                       ${form.language === lang.value
-                        ? "bg-[#EAF3FF] border-[#CFE2FF] text-[#0062CC]"
-                        : "bg-white border-[rgba(60,60,67,0.14)] text-[#6E6E73] hover:text-[#1D1D1F] hover:border-[rgba(60,60,67,0.26)]"
+                        ? "bg-[#F8ECEA] border-[#EED1CC] text-[#A52A25]"
+                        : "bg-white border-[rgba(60,60,67,0.14)] text-[#7E756D] hover:text-[#1F1B18] hover:border-[rgba(60,60,67,0.26)]"
                       }
                     `}
                   >
@@ -300,8 +300,8 @@ export default function CreatePage() {
           {step === 3 && (
             <div className="space-y-6">
               <div className="mb-8">
-                <h2 className="text-2xl font-semibold text-[#1D1D1F] mb-1">选择小说类型</h2>
-                <p className="text-[#6E6E73]">类型决定主要叙事节奏与读者期待。</p>
+                <h2 className="text-xl font-semibold text-[#1F1B18] mb-1">选择小说类型</h2>
+                <p className="text-[#7E756D]">类型决定主要叙事节奏与读者期待。</p>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 {genres.map((genre) => (
@@ -311,15 +311,15 @@ export default function CreatePage() {
                     className={`
                       p-4 rounded-xl border text-left transition-all
                       ${form.genre === genre.id
-                        ? "bg-[#EAF3FF] border-[#CFE2FF]"
+                        ? "bg-[#F8ECEA] border-[#EED1CC]"
                         : "bg-white border-[rgba(60,60,67,0.14)] hover:border-[rgba(60,60,67,0.26)]"
                       }
                     `}
                   >
-                    <div className={`font-medium mb-1 ${form.genre === genre.id ? "text-[#0062CC]" : "text-[#1D1D1F]"}`}>
+                    <div className={`font-medium mb-1 ${form.genre === genre.id ? "text-[#A52A25]" : "text-[#1F1B18]"}`}>
                       {genre.label}
                     </div>
-                    <div className="text-sm text-[#6E6E73]">{genre.desc}</div>
+                    <div className="text-sm text-[#7E756D]">{genre.desc}</div>
                   </button>
                 ))}
               </div>
@@ -329,8 +329,8 @@ export default function CreatePage() {
           {step === 4 && (
             <div className="space-y-6">
               <div className="mb-8">
-                <h2 className="text-2xl font-semibold text-[#1D1D1F] mb-1">选择写作风格</h2>
-                <p className="text-[#6E6E73]">风格会直接影响文本节奏与语气。</p>
+                <h2 className="text-xl font-semibold text-[#1F1B18] mb-1">选择写作风格</h2>
+                <p className="text-[#7E756D]">风格会直接影响文本节奏与语气。</p>
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {styles.map((style) => (
@@ -340,15 +340,15 @@ export default function CreatePage() {
                     className={`
                       p-5 rounded-xl border text-left transition-all
                       ${form.style === style.id
-                        ? "bg-[#EAF3FF] border-[#CFE2FF]"
+                        ? "bg-[#F8ECEA] border-[#EED1CC]"
                         : "bg-white border-[rgba(60,60,67,0.14)] hover:border-[rgba(60,60,67,0.26)]"
                       }
                     `}
                   >
-                    <div className={`font-medium mb-1 ${form.style === style.id ? "text-[#0062CC]" : "text-[#1D1D1F]"}`}>
+                    <div className={`font-medium mb-1 ${form.style === style.id ? "text-[#A52A25]" : "text-[#1F1B18]"}`}>
                       {style.label}
                     </div>
-                    <div className="text-sm text-[#6E6E73]">{style.desc}</div>
+                    <div className="text-sm text-[#7E756D]">{style.desc}</div>
                   </button>
                 ))}
               </div>
@@ -358,12 +358,12 @@ export default function CreatePage() {
           {step === 5 && (
             <div className="space-y-6">
               <div className="mb-8">
-                <div className="inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs bg-[#EAF3FF] text-[#0062CC] border border-[#CFE2FF] mb-3">
+                <div className="inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs bg-[#F8ECEA] text-[#A52A25] border border-[#EED1CC] mb-3">
                   <Sparkles className="w-3.5 h-3.5" />
                   Final Setup
                 </div>
-                <h2 className="text-2xl font-semibold text-[#1D1D1F] mb-1">最后的设置</h2>
-                <p className="text-[#6E6E73]">确定篇幅与叙事结构后即可开始。</p>
+                <h2 className="text-xl font-semibold text-[#1F1B18] mb-1">最后的设置</h2>
+                <p className="text-[#7E756D]">确定篇幅与叙事结构后即可开始。</p>
               </div>
               <Select
                 label="小说长度"
@@ -397,32 +397,32 @@ export default function CreatePage() {
               />
 
               {/* Summary */}
-              <div className="mt-8 p-6 rounded-[12px] bg-[#F2F2F4] border border-[rgba(60,60,67,0.12)]">
-                <h3 className="text-sm font-medium text-[#6E6E73] mb-4">创作摘要</h3>
+              <div className="mt-8 p-6 rounded-[12px] bg-[#F6F3EF] border border-[rgba(60,60,67,0.12)]">
+                <h3 className="text-sm font-medium text-[#7E756D] mb-4">创作摘要</h3>
                 <div className="space-y-2 text-sm">
                   <div className="flex justify-between">
-                    <span className="text-[#6E6E73]">标题</span>
-                    <span className="text-[#1D1D1F]">{form.title}</span>
+                    <span className="text-[#7E756D]">标题</span>
+                    <span className="text-[#1F1B18]">{form.title}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-[#6E6E73]">语言</span>
-                    <span className="text-[#1D1D1F]">{LANGUAGES.find((l) => l.value === form.language)?.label}</span>
+                    <span className="text-[#7E756D]">语言</span>
+                    <span className="text-[#1F1B18]">{LANGUAGES.find((l) => l.value === form.language)?.label}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-[#6E6E73]">类型</span>
-                    <span className="text-[#1D1D1F]">{genres.find((g) => g.id === form.genre)?.label}</span>
+                    <span className="text-[#7E756D]">类型</span>
+                    <span className="text-[#1F1B18]">{genres.find((g) => g.id === form.genre)?.label}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-[#6E6E73]">风格</span>
-                    <span className="text-[#1D1D1F]">{styles.find((s) => s.id === form.style)?.label}</span>
+                    <span className="text-[#7E756D]">风格</span>
+                    <span className="text-[#1F1B18]">{styles.find((s) => s.id === form.style)?.label}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-[#6E6E73]">读者</span>
-                    <span className="text-[#1D1D1F]">{audiences.find((a) => a.id === form.audience)?.label}</span>
+                    <span className="text-[#7E756D]">读者</span>
+                    <span className="text-[#1F1B18]">{audiences.find((a) => a.id === form.audience)?.label}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-[#6E6E73]">目标章节</span>
-                    <span className="text-[#1D1D1F]">{form.chapterTarget} 章</span>
+                    <span className="text-[#7E756D]">目标章节</span>
+                    <span className="text-[#1F1B18]">{form.chapterTarget} 章</span>
                   </div>
                 </div>
               </div>

@@ -16,6 +16,50 @@ from app.services.generation.pipeline import run_generation_pipeline
 
 logger = logging.getLogger(__name__)
 
+SUBTASK_LABELS: dict[str, str] = {
+    "queued": "任务已入队",
+    "prewrite": "预写准备",
+    "outline_ready": "大纲就绪",
+    "chapter_writing": "章节写作中",
+    "chapter_review": "章节审校中",
+    "chapter_finalizing": "章节定稿中",
+    "full_book_review": "全书终审中",
+    "completed": "任务已完成",
+    "failed": "任务失败",
+    "cancelled": "任务已取消",
+    "book_planning": "拆分卷任务",
+    "volume_dispatch": "调度卷任务",
+    "constitution": "生成创作宪法",
+    "specify_plan_tasks": "生成规格/计划/任务分解",
+    "full_outline_ready": "全书大纲已完成",
+    "outline_waiting_confirmation": "等待大纲确认",
+    "volume_replan": "分卷策略重规划",
+    "context": "加载上下文",
+    "consistency": "一致性检查",
+    "chapter_blocked": "一致性未通过（跳过）",
+    "beats": "生成节拍卡",
+    "writer": "写作章节草稿",
+    "reviewer": "章节质量审校",
+    "revise": "按反馈修订",
+    "rollback_rerun": "回滚并重跑",
+    "finalizer": "章节定稿",
+    "memory_update": "更新记忆与摘要",
+    "chapter_done": "章节完成",
+    "final_book_review": "全书终审",
+    "done": "全书完成",
+}
+
+
+def _with_subtask(payload: dict[str, Any]) -> dict[str, Any]:
+    step = str(payload.get("step") or payload.get("current_phase") or "").strip()
+    if not step:
+        return payload
+    merged = dict(payload)
+    merged.setdefault("subtask_key", step)
+    merged.setdefault("subtask_label", SUBTASK_LABELS.get(step, step))
+    merged.setdefault("subtask_progress", float(payload.get("progress") or 0.0))
+    return merged
+
 
 def _volume_chunks(start_chapter: int, num_chapters: int, volume_size: int) -> list[tuple[int, int, int]]:
     """Return [(volume_no, chunk_start, chunk_len), ...]."""
@@ -35,8 +79,9 @@ def _volume_chunks(start_chapter: int, num_chapters: int, volume_size: int) -> l
 
 
 def _set_status(r: redis.Redis, key: str, novel_key: str, payload: dict[str, Any]) -> None:
-    r.setex(key, 86400, json.dumps(payload, ensure_ascii=False))
-    r.setex(novel_key, 86400, json.dumps(payload, ensure_ascii=False))
+    data = _with_subtask(payload)
+    r.setex(key, 86400, json.dumps(data, ensure_ascii=False))
+    r.setex(novel_key, 86400, json.dumps(data, ensure_ascii=False))
 
 
 def _persist_generation_task(
@@ -84,9 +129,31 @@ def _run_volume_generation(
     r = redis.from_url(settings.redis_url)
     key = f"generation:{parent_task_id}"
     novel_key = f"generation:novel:{novel_id}"
+    metric_state = {
+        "token_usage_input": 0,
+        "token_usage_output": 0,
+        "estimated_cost": 0.0,
+    }
+    try:
+        cached_raw = r.get(key)
+        if cached_raw:
+            cached = json.loads(cached_raw)
+            if isinstance(cached, dict):
+                metric_state["token_usage_input"] = int(cached.get("token_usage_input") or 0)
+                metric_state["token_usage_output"] = int(cached.get("token_usage_output") or 0)
+                metric_state["estimated_cost"] = float(cached.get("estimated_cost") or 0.0)
+    except Exception:
+        pass
 
     def progress_cb(step: str, chapter: int, pct: float, msg: str = "", meta: dict | None = None):
         meta = meta or {}
+        # Preserve last known usage/cost to avoid resetting to 0 on non-metric phases.
+        if meta.get("token_usage_input") is not None:
+            metric_state["token_usage_input"] = int(meta.get("token_usage_input") or 0)
+        if meta.get("token_usage_output") is not None:
+            metric_state["token_usage_output"] = int(meta.get("token_usage_output") or 0)
+        if meta.get("estimated_cost") is not None:
+            metric_state["estimated_cost"] = float(meta.get("estimated_cost") or 0.0)
         # Map chunk progress to global progress window [20, 95].
         chunk_ratio = max(0.0, min(1.0, pct / 100.0))
         chunks = max(1, (total_chapters + volume_size - 1) // volume_size)
@@ -98,9 +165,9 @@ def _run_volume_generation(
             "current_chapter": chapter,
             "total_chapters": total_chapters,
             "progress": round(global_pct, 2),
-            "token_usage_input": meta.get("token_usage_input", 0),
-            "token_usage_output": meta.get("token_usage_output", 0),
-            "estimated_cost": meta.get("estimated_cost", 0.0),
+            "token_usage_input": metric_state["token_usage_input"],
+            "token_usage_output": metric_state["token_usage_output"],
+            "estimated_cost": metric_state["estimated_cost"],
             "volume_no": volume_no,
             "volume_size": volume_size,
             "message": msg,
@@ -117,7 +184,7 @@ def _run_volume_generation(
     return {"ok": True, "volume_no": volume_no, "start": chunk_start, "num_chapters": chunk_chapters}
 
 
-@app.task(bind=True)
+@app.task(bind=True, acks_late=True, reject_on_worker_lost=True)
 def submit_volume_generation_task(
     self,
     novel_id: int,
@@ -142,7 +209,7 @@ def submit_volume_generation_task(
     )
 
 
-@app.task(bind=True)
+@app.task(bind=True, acks_late=True, reject_on_worker_lost=True)
 def submit_book_generation_task(self, novel_id: str, num_chapters: int, start_chapter: int):
     """Book-level orchestrator: split into volume tasks and execute sequentially."""
     from app.core.config import get_settings
@@ -157,6 +224,14 @@ def submit_book_generation_task(self, novel_id: str, num_chapters: int, start_ch
     db = SessionLocal()
 
     try:
+        from app.models.novel import GenerationTask
+
+        gt_stmt = select(GenerationTask).where(GenerationTask.task_id == task_id)
+        gt = db.execute(gt_stmt).scalar_one_or_none()
+        if gt and gt.status in {"completed", "cancelled"}:
+            logger.info("Skip replay for task %s because status=%s", task_id, gt.status)
+            return task_id
+
         novel_stmt = select(Novel).where(Novel.id == novel_id)
         novel = db.execute(novel_stmt).scalar_one_or_none()
         volume_size = int(((novel.config or {}).get("volume_size") or 30)) if novel else 30

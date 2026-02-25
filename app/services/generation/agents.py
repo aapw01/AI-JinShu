@@ -2,6 +2,7 @@
 import json
 import logging
 import re
+import time
 from typing import Any
 from pydantic import BaseModel, ValidationError
 from langchain_core.output_parsers import PydanticOutputParser
@@ -10,6 +11,31 @@ from app.core.llm import get_llm_with_fallback
 from app.prompts import render_prompt
 
 logger = logging.getLogger(__name__)
+
+
+def _timed_invoke(llm: Any, prompt: str, op: str, meta: dict[str, Any] | None = None):
+    started = time.perf_counter()
+    try:
+        resp = llm.invoke(prompt)
+        elapsed = time.perf_counter() - started
+        logger.info(
+            "LLM invoke success op=%s elapsed=%.2fs prompt_chars=%s meta=%s",
+            op,
+            elapsed,
+            len(prompt),
+            meta or {},
+        )
+        return resp
+    except Exception:
+        elapsed = time.perf_counter() - started
+        logger.exception(
+            "LLM invoke failed op=%s elapsed=%.2fs prompt_chars=%s meta=%s",
+            op,
+            elapsed,
+            len(prompt),
+            meta or {},
+        )
+        raise
 
 
 def _parse_json_response(content: str) -> dict:
@@ -58,7 +84,16 @@ def _invoke_json_with_schema(llm: Any, prompt: str, schema_cls: type[BaseModel],
     error = ""
     for attempt in range(retries + 1):
         try:
+            started = time.perf_counter()
             resp = llm.invoke(prompt)
+            elapsed = time.perf_counter() - started
+            logger.info(
+                "LLM structured invoke success schema=%s attempt=%s elapsed=%.2fs prompt_chars=%s",
+                schema_cls.__name__,
+                attempt + 1,
+                elapsed,
+                len(prompt),
+            )
             content = str(resp.content).strip()
             try:
                 parsed = parser.parse(content)
@@ -70,6 +105,12 @@ def _invoke_json_with_schema(llm: Any, prompt: str, schema_cls: type[BaseModel],
                 return validated.model_dump()
         except (json.JSONDecodeError, ValidationError) as exc:
             error = str(exc)
+            logger.warning(
+                "LLM structured parse retry schema=%s attempt=%s error=%s",
+                schema_cls.__name__,
+                attempt + 1,
+                error,
+            )
             prompt = (
                 f"{prompt}\n\n上一次输出不符合JSON结构约束，错误为: {error}\n"
                 "请只输出符合要求的纯JSON，不要包含解释、Markdown或代码块。"
@@ -138,7 +179,12 @@ class ArchitectAgent:
         llm = get_llm_with_fallback(provider, model)
         prompt = render_prompt("plot_architecture", novel_id=novel_id, chapter_num=chapter_num)
         try:
-            response = llm.invoke(prompt)
+            response = _timed_invoke(
+                llm,
+                prompt,
+                "architect",
+                {"novel_id": novel_id, "chapter_num": chapter_num, "provider": provider, "model": model},
+            )
             result = _parse_json_response(response.content)
             logger.info(f"ArchitectAgent completed for novel {novel_id} chapter {chapter_num}")
             return result
@@ -166,6 +212,7 @@ class PrewritePlannerAgent:
             ("creative_plan", "plan_story"),
             ("tasks", "tasks_breakdown"),
         ]
+        started_all = time.perf_counter()
         for key, tpl in templates:
             try:
                 prompt = render_prompt(
@@ -174,12 +221,18 @@ class PrewritePlannerAgent:
                     num_chapters=num_chapters,
                     language=language,
                 )
-                resp = llm.invoke(prompt)
+                resp = _timed_invoke(
+                    llm,
+                    prompt,
+                    f"prewrite.{key}",
+                    {"num_chapters": num_chapters, "provider": provider, "model": model},
+                )
                 parsed = _parse_json_response(resp.content)
                 result[key] = parsed if isinstance(parsed, dict) else {"raw": str(parsed)}
             except Exception as e:
                 logger.error(f"PrewritePlannerAgent {key} failed: {e}")
                 result[key] = {"raw": f"fallback-{key}"}
+        logger.info("PrewritePlannerAgent finished elapsed=%.2fs", time.perf_counter() - started_all)
         return result
 
 
@@ -198,7 +251,12 @@ class OutlinerAgent:
         llm = get_llm_with_fallback(provider, model)
         prompt = render_prompt("chapter_blueprint", novel_id=novel_id, chapter_num=chapter_num, plan=plan)
         try:
-            response = llm.invoke(prompt)
+            response = _timed_invoke(
+                llm,
+                prompt,
+                "outliner.single",
+                {"novel_id": novel_id, "chapter_num": chapter_num, "provider": provider, "model": model},
+            )
             result = _parse_json_response(response.content)
             if "title" not in result:
                 result["title"] = f"Chapter {chapter_num}"
@@ -317,7 +375,12 @@ class WriterAgent:
             native_style_profile=native_style_profile,
         )
         try:
-            response = llm.invoke(prompt)
+            response = _timed_invoke(
+                llm,
+                prompt,
+                "writer",
+                {"novel_id": novel_id, "chapter_num": chapter_num, "provider": provider, "model": model, "template": template},
+            )
             content = response.content.strip()
             logger.info(f"WriterAgent completed for novel {novel_id} chapter {chapter_num}, length: {len(content)}")
             return content
@@ -440,7 +503,12 @@ Original content:
 Please provide the improved version. Keep the same language ({language}) and maintain the story flow."""
 
         try:
-            response = llm.invoke(prompt)
+            response = _timed_invoke(
+                llm,
+                prompt,
+                "finalizer",
+                {"provider": provider, "model": model, "language": language},
+            )
             content = response.content.strip()
             logger.info(f"FinalizerAgent completed, length: {len(content)}")
             return content

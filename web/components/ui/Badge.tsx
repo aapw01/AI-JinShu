@@ -13,7 +13,7 @@ export const Badge = forwardRef<HTMLSpanElement, BadgeProps>(
       success: "bg-[#E9F9EF] text-[#18864B] border border-[#CDEFD8]",
       warning: "bg-[#FFF7E7] text-[#A96700] border border-[#FFE6B3]",
       error: "bg-[#FFECEB] text-[#C4372D] border border-[#FFD4D2]",
-      info: "bg-[#EAF3FF] text-[#0062CC] border border-[#CFE2FF]",
+      info: "bg-[#F8ECEA] text-[#A52A25] border border-[#EED1CC]",
     };
 
     return (

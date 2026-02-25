@@ -92,8 +92,9 @@ def get_llm_with_fallback(provider: str | None, model: str | None) -> BaseChatMo
 
 def get_embedding_model() -> OpenAIEmbeddings:
     """Get embeddings model (OpenAI-compatible endpoint)."""
+    settings = get_settings()
     return OpenAIEmbeddings(
-        model="text-embedding-3-small",
+        model=settings.default_embedding_model,
         api_key=_resolve_api_key("openai"),
         base_url=_resolve_base_url("openai") or "https://api.openai.com/v1",
     )

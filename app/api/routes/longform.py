@@ -1,9 +1,10 @@
 """Long-form generation support routes."""
 from fastapi import APIRouter, Body, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db, resolve_novel
+from app.core.time_utils import to_utc_iso_z
 from app.models.novel import QualityReport, GenerationCheckpoint, Chapter, StorySnapshot, NovelFeedback
 
 router = APIRouter()
@@ -34,7 +35,7 @@ def list_quality_reports(
             "scope_id": r.scope_id,
             "verdict": r.verdict,
             "metrics": r.metrics_json or {},
-            "created_at": r.created_at.isoformat() if r.created_at else "",
+            "created_at": to_utc_iso_z(r.created_at),
         }
         for r in rows
     ]
@@ -67,7 +68,7 @@ def list_generation_checkpoints(
             "chapter_num": r.chapter_num,
             "node": r.node,
             "state": r.state_json or {},
-            "created_at": r.created_at.isoformat() if r.created_at else "",
+            "created_at": to_utc_iso_z(r.created_at),
         }
         for r in rows
     ]
@@ -180,7 +181,7 @@ def get_volume_gate_report(
         "evidence_chain": evidence_chain,
         "checkpoint_id": cp.id if cp else None,
         "checkpoint_state": cp_state,
-        "created_at": (q_report.created_at.isoformat() if q_report and q_report.created_at else ""),
+        "created_at": to_utc_iso_z(q_report.created_at if q_report else None),
     }
 
 
@@ -209,7 +210,7 @@ def list_feedback(
             "rating": r.rating,
             "tags": r.tags or [],
             "comment": r.comment or "",
-            "created_at": r.created_at.isoformat() if r.created_at else "",
+            "created_at": to_utc_iso_z(r.created_at),
         }
         for r in rows
     ]
@@ -281,14 +282,30 @@ def get_observability(
     checkpoint_rows = db.execute(c_stmt).scalars().all()
     feedback_rows = db.execute(f_stmt).scalars().all()
 
-    volume_quality = [r for r in quality_rows if r.scope == "volume"]
-    warning_volumes = [r for r in volume_quality if r.verdict in ("warning", "fail")]
+    total_quality_reports = db.execute(
+        select(func.count()).select_from(QualityReport).where(QualityReport.novel_id == novel.id)
+    ).scalar_one()
+    total_checkpoints = db.execute(
+        select(func.count()).select_from(GenerationCheckpoint).where(GenerationCheckpoint.novel_id == novel.id)
+    ).scalar_one()
+    total_feedback = db.execute(
+        select(func.count()).select_from(NovelFeedback).where(NovelFeedback.novel_id == novel.id)
+    ).scalar_one()
+    total_warning_or_fail_volumes = db.execute(
+        select(func.count())
+        .select_from(QualityReport)
+        .where(
+            QualityReport.novel_id == novel.id,
+            QualityReport.scope == "volume",
+            QualityReport.verdict.in_(("warning", "fail")),
+        )
+    ).scalar_one()
     return {
         "summary": {
-            "quality_reports": len(quality_rows),
-            "checkpoints": len(checkpoint_rows),
-            "feedback_count": len(feedback_rows),
-            "warning_or_fail_volumes": len(warning_volumes),
+            "quality_reports": int(total_quality_reports or 0),
+            "checkpoints": int(total_checkpoints or 0),
+            "feedback_count": int(total_feedback or 0),
+            "warning_or_fail_volumes": int(total_warning_or_fail_volumes or 0),
         },
         "quality_reports": [
             {
@@ -297,7 +314,7 @@ def get_observability(
                 "scope_id": r.scope_id,
                 "verdict": r.verdict,
                 "metrics": r.metrics_json or {},
-                "created_at": r.created_at.isoformat() if r.created_at else "",
+                "created_at": to_utc_iso_z(r.created_at),
             }
             for r in quality_rows
         ],
@@ -309,7 +326,7 @@ def get_observability(
                 "chapter_num": r.chapter_num,
                 "node": r.node,
                 "state": r.state_json or {},
-                "created_at": r.created_at.isoformat() if r.created_at else "",
+                "created_at": to_utc_iso_z(r.created_at),
             }
             for r in checkpoint_rows
         ],
@@ -322,7 +339,7 @@ def get_observability(
                 "rating": r.rating,
                 "tags": r.tags or [],
                 "comment": r.comment or "",
-                "created_at": r.created_at.isoformat() if r.created_at else "",
+                "created_at": to_utc_iso_z(r.created_at),
             }
             for r in feedback_rows
         ],

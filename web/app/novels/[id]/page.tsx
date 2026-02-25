@@ -77,7 +77,7 @@ export default function NovelPage() {
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
-        <div className="animate-spin w-8 h-8 border-2 border-[#007AFF] border-t-transparent rounded-full" />
+        <div className="animate-spin w-8 h-8 border-2 border-[#C8211B] border-t-transparent rounded-full" />
       </div>
     );
   }
@@ -119,7 +119,7 @@ export default function NovelPage() {
                         key={format}
                         href={api.getExportUrl(id, format)}
                         download
-                        className="block px-4 py-2.5 text-sm text-[#3A3A3C] hover:bg-[#F2F2F4] transition-colors"
+                        className="block px-4 py-2.5 text-sm text-[#3A3A3C] hover:bg-[#F6F3EF] transition-colors"
                         onClick={() => setShowExport(false)}
                       >
                         导出为 .{format}
@@ -138,7 +138,7 @@ export default function NovelPage() {
         )}
       />
 
-      <div className="max-w-6xl mx-auto px-4 py-8">
+      <div className="max-w-6xl mx-auto px-4 py-6">
         {chapterProgress.length === 0 ? (
           <EmptyState
             icon={(
@@ -163,7 +163,7 @@ export default function NovelPage() {
           >
             <aside className="lg:col-span-1">
               <Card className="p-4 sticky top-24">
-                <h3 className="text-sm font-medium text-[#6E6E73] mb-4">章节目录</h3>
+                <h3 className="text-sm font-medium text-[#7E756D] mb-4">章节目录</h3>
                 <div className="space-y-1 max-h-[60vh] overflow-y-auto">
                   {chapterProgress.map((chapter) => (
                     <button
@@ -172,8 +172,8 @@ export default function NovelPage() {
                       className={`
                         w-full text-left px-3 py-2 rounded-lg text-sm transition-all
                         ${selectedChapterNum === chapter.chapter_num
-                          ? "bg-[#EAF3FF] text-[#0062CC] border border-[#CFE2FF]"
-                          : "text-[#6E6E73] hover:bg-[#F2F2F4] hover:text-[#1D1D1F]"
+                          ? "bg-[#F8ECEA] text-[#A52A25] border border-[#EED1CC]"
+                          : "text-[#7E756D] hover:bg-[#F6F3EF] hover:text-[#1F1B18]"
                         }
                       `}
                     >
@@ -196,12 +196,12 @@ export default function NovelPage() {
               <Card className="p-8">
                 {selectedChapter ? (
                   <article className="max-w-none">
-                    <h2 className="text-2xl font-semibold text-[#1D1D1F] mb-2">
+                    <h2 className="text-xl font-semibold text-[#1F1B18] mb-2">
                       第 {selectedChapter.chapter_num} 章
                       {selectedChapter.title && ` · ${selectedChapter.title}`}
                     </h2>
                     {selectedChapter.word_count && (
-                      <p className="text-sm text-[#6E6E73] mb-6">
+                      <p className="text-sm text-[#7E756D] mb-6">
                         {selectedChapter.word_count.toLocaleString()} 字
                       </p>
                     )}
@@ -209,18 +209,18 @@ export default function NovelPage() {
                       {selectedChapter.content || "暂无内容"}
                     </div>
                     {(selectedChapter.language_quality_score !== undefined || selectedChapter.language_quality_report) && (
-                      <div className="mt-6 border-t border-[rgba(60,60,67,0.12)] pt-4 text-xs text-[#6E6E73]">
+                      <div className="mt-6 border-t border-[rgba(60,60,67,0.12)] pt-4 text-xs text-[#7E756D]">
                         语言质量：{selectedChapter.language_quality_score !== undefined
                           ? (selectedChapter.language_quality_score * 10).toFixed(1)
                           : "-"} / 10
                         {selectedChapter.language_quality_report && (
-                          <p className="mt-2 text-[#6E6E73] whitespace-pre-wrap">{selectedChapter.language_quality_report}</p>
+                          <p className="mt-2 text-[#7E756D] whitespace-pre-wrap">{selectedChapter.language_quality_report}</p>
                         )}
                       </div>
                     )}
                   </article>
                 ) : (
-                  <div className="text-center py-12 text-[#6E6E73]">
+                  <div className="text-center py-12 text-[#7E756D]">
                     {selectedChapterMeta?.status === "pending" && "该章节待生成"}
                     {selectedChapterMeta?.status === "generating" && "该章节生成中"}
                     {!selectedChapterMeta && "选择一个章节开始阅读"}
