@@ -45,6 +45,7 @@ class NovelResponse(BaseModel):
     style: str | None
     status: str
     created_at: str
+    updated_at: str | None = None
 
 
 class ChapterResponse(BaseModel):
@@ -79,6 +80,9 @@ class GenerationStatusResponse(BaseModel):
     status: str
     step: str | None = None
     current_phase: str | None = None
+    subtask_key: str | None = None
+    subtask_label: str | None = None
+    subtask_progress: float | None = None
     current_chapter: int = 0
     total_chapters: int = 0
     progress: float = 0.0

@@ -104,8 +104,20 @@ def _volume_no_for_chapter(state: GenerationState, chapter: int) -> int:
 
 def _progress(state: GenerationState, step: str, chapter: int, pct: float, msg: str, meta: dict | None = None) -> None:
     cb = state.get("progress_callback")
+    payload = dict(meta or {})
+    payload.setdefault("task_id", state.get("task_id"))
+    payload.setdefault("novel_id", state.get("novel_id"))
+    logger.info(
+        "PIPELINE progress task_id=%s novel_id=%s step=%s chapter=%s pct=%.2f msg=%s meta=%s",
+        payload.get("task_id"),
+        payload.get("novel_id"),
+        step,
+        chapter,
+        pct,
+        msg,
+        payload,
+    )
     if cb:
-        payload = dict(meta or {})
         if chapter > 0:
             payload.setdefault("volume_no", _volume_no_for_chapter(state, chapter))
             payload.setdefault("volume_size", int(state.get("volume_size") or 30))
@@ -1231,23 +1243,60 @@ def _node_final_book_review(state: GenerationState) -> GenerationState:
 # ---------------------------------------------------------------------------
 
 def _build_generation_graph():
+    def _timed_node(name: str, fn):
+        def _wrapped(state: GenerationState):
+            started = time.perf_counter()
+            chapter = int(state.get("current_chapter") or 0)
+            task_id = state.get("task_id")
+            novel_id = state.get("novel_id")
+            logger.info(
+                "PIPELINE node_start name=%s task_id=%s novel_id=%s chapter=%s",
+                name,
+                task_id,
+                novel_id,
+                chapter,
+            )
+            try:
+                out = fn(state)
+                elapsed = time.perf_counter() - started
+                logger.info(
+                    "PIPELINE node_done name=%s task_id=%s novel_id=%s chapter=%s elapsed=%.2fs",
+                    name,
+                    task_id,
+                    novel_id,
+                    chapter,
+                    elapsed,
+                )
+                return out
+            except Exception:
+                elapsed = time.perf_counter() - started
+                logger.exception(
+                    "PIPELINE node_failed name=%s task_id=%s novel_id=%s chapter=%s elapsed=%.2fs",
+                    name,
+                    task_id,
+                    novel_id,
+                    chapter,
+                    elapsed,
+                )
+                raise
+
     graph = StateGraph(GenerationState)
-    graph.add_node("init", _node_init)
-    graph.add_node("prewrite", _node_prewrite)
-    graph.add_node("outline", _node_outline)
-    graph.add_node("confirmation_gate", _node_confirmation_gate)
-    graph.add_node("volume_replan", _node_volume_replan)
-    graph.add_node("load_context", _node_load_context)
-    graph.add_node("consistency_check", _node_consistency_check)
-    graph.add_node("save_blocked", _node_save_blocked)
-    graph.add_node("beats", _node_beats)
-    graph.add_node("writer", _node_writer)
-    graph.add_node("reviewer", _node_review)
-    graph.add_node("revise", _node_revise)
-    graph.add_node("rollback_rerun", _node_rollback_rerun)
-    graph.add_node("finalizer", _node_finalize)
-    graph.add_node("advance_chapter", _node_advance_chapter)
-    graph.add_node("final_book_review", _node_final_book_review)
+    graph.add_node("init", _timed_node("init", _node_init))
+    graph.add_node("prewrite", _timed_node("prewrite", _node_prewrite))
+    graph.add_node("outline", _timed_node("outline", _node_outline))
+    graph.add_node("confirmation_gate", _timed_node("confirmation_gate", _node_confirmation_gate))
+    graph.add_node("volume_replan", _timed_node("volume_replan", _node_volume_replan))
+    graph.add_node("load_context", _timed_node("load_context", _node_load_context))
+    graph.add_node("consistency_check", _timed_node("consistency_check", _node_consistency_check))
+    graph.add_node("save_blocked", _timed_node("save_blocked", _node_save_blocked))
+    graph.add_node("beats", _timed_node("beats", _node_beats))
+    graph.add_node("writer", _timed_node("writer", _node_writer))
+    graph.add_node("reviewer", _timed_node("reviewer", _node_review))
+    graph.add_node("revise", _timed_node("revise", _node_revise))
+    graph.add_node("rollback_rerun", _timed_node("rollback_rerun", _node_rollback_rerun))
+    graph.add_node("finalizer", _timed_node("finalizer", _node_finalize))
+    graph.add_node("advance_chapter", _timed_node("advance_chapter", _node_advance_chapter))
+    graph.add_node("final_book_review", _timed_node("final_book_review", _node_final_book_review))
 
     graph.set_entry_point("init")
     graph.add_edge("init", "prewrite")

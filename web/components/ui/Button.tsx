@@ -11,13 +11,13 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
   ({ className = "", variant = "primary", size = "md", loading, disabled, children, ...props }, ref) => {
     const baseStyles =
-      "inline-flex items-center justify-center font-medium transition-all disabled:opacity-55 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#007AFF]/40";
+      "inline-flex items-center justify-center font-medium transition-all disabled:opacity-55 disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#C8211B]/30";
 
     const variants = {
       primary:
-        "bg-[#007AFF] text-white hover:bg-[#0062CC] shadow-[0_6px_20px_rgba(0,122,255,0.28)] hover:shadow-[0_10px_24px_rgba(0,122,255,0.3)]",
-      secondary: "bg-white text-[#1D1D1F] border border-[rgba(60,60,67,0.18)] hover:bg-[#F2F2F4] shadow-[0_2px_10px_rgba(0,0,0,0.06)]",
-      ghost: "text-[#6E6E73] hover:text-[#1D1D1F] hover:bg-[#F2F2F4]",
+        "bg-[#C8211B] text-white hover:bg-[#AD1B16] shadow-[0_6px_20px_rgba(200,33,27,0.24)] hover:shadow-[0_10px_24px_rgba(173,27,22,0.26)]",
+      secondary: "bg-white text-[#1F1B18] border border-[#DDD8D3] hover:bg-[#F6F3EF] shadow-[0_2px_10px_rgba(0,0,0,0.04)]",
+      ghost: "text-[#7E756D] hover:text-[#1F1B18] hover:bg-[#F6F3EF]",
       destructive: "bg-[#FFE9E8] text-[#C4372D] border border-[#FFD4D2] hover:bg-[#FFDCDC]",
     };
 

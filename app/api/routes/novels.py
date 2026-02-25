@@ -4,6 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db, resolve_novel
+from app.core.time_utils import to_utc_iso_z
 from app.models.novel import Novel
 from app.schemas.novel import NovelCreate, NovelUpdate, NovelResponse
 
@@ -18,7 +19,8 @@ def _to_response(novel: Novel) -> NovelResponse:
         genre=novel.genre,
         style=novel.style,
         status=novel.status,
-        created_at=novel.created_at.isoformat() if novel.created_at else "",
+        created_at=to_utc_iso_z(novel.created_at),
+        updated_at=to_utc_iso_z(novel.updated_at),
     )
 
 

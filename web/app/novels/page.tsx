@@ -21,6 +21,25 @@ const STATUS_MAP: Record<string, { label: string; variant: "default" | "success"
   failed: { label: "失败", variant: "error" },
 };
 
+const GENRE_LABELS: Record<string, string> = {
+  xuanhuan: "玄幻",
+  yanqing: "言情",
+  xuanyi: "悬疑",
+  kehuan: "科幻",
+  lishi: "历史",
+  wuxia: "武侠",
+  dushi: "都市",
+};
+
+const STYLE_LABELS: Record<string, string> = {
+  "tomato-hot": "番茄爆款节奏",
+  "web-power": "热血爽文",
+  "web-emotion": "情绪爽文",
+  "mystery-thriller": "悬疑惊悚",
+  literary: "细腻唯美",
+  "web-novel": "网文通用",
+};
+
 export default function NovelsPage() {
   const [novels, setNovels] = useState<Novel[]>([]);
   const [loading, setLoading] = useState(true);
@@ -66,13 +85,27 @@ export default function NovelsPage() {
     return n.status === filter;
   });
 
-  const formatDate = (dateStr: string) => {
-    const date = new Date(dateStr);
-    return date.toLocaleDateString("zh-CN", {
+  const parseServerTime = (dateStr: string) => {
+    const raw = (dateStr || "").trim();
+    if (!raw) return new Date(NaN);
+    // Backend commonly returns UTC-naive ISO strings; treat them as UTC.
+    const hasTz = /([zZ]|[+\-]\d{2}:\d{2})$/.test(raw);
+    return new Date(hasTz ? raw : `${raw}Z`);
+  };
+
+  const formatDateTime = (dateStr: string) => {
+    const date = parseServerTime(dateStr);
+    if (Number.isNaN(date.getTime())) return dateStr;
+    const formatter = new Intl.DateTimeFormat("zh-CN", {
       year: "numeric",
-      month: "short",
-      day: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
     });
+    const formatted = formatter.format(date);
+    return formatted.replace(/\//g, "年").replace(",", "").replace(/^(\d{4})年(\d{2})年(\d{2})/, "$1年$2月$3日");
   };
 
   return (
@@ -91,9 +124,9 @@ export default function NovelsPage() {
         )}
       />
 
-      <div className="max-w-6xl mx-auto px-4 py-8">
-        <div className="glass-card p-3 mb-6 flex items-center gap-2 overflow-x-auto">
-          <div className="shrink-0 px-2 text-[#6E6E73]">
+      <div className="max-w-6xl mx-auto px-4 py-6">
+        <div className="rounded-[14px] border border-[#DDD8D3] bg-[#FBFAF8] p-3 mb-6 flex items-center gap-2 overflow-x-auto">
+          <div className="shrink-0 px-2 text-[#7E756D]">
             <Filter className="w-4 h-4" />
           </div>
           {(["all", "draft", "generating", "completed"] as FilterStatus[]).map((status) => (
@@ -102,8 +135,8 @@ export default function NovelsPage() {
               onClick={() => setFilter(status)}
               className={`px-4 py-2 text-sm rounded-full border whitespace-nowrap transition-all ${
                 filter === status
-                  ? "bg-[#007AFF] text-white border-[#007AFF]"
-                  : "bg-white text-[#6E6E73] border-[rgba(60,60,67,0.14)] hover:text-[#1D1D1F] hover:border-[rgba(60,60,67,0.28)]"
+                  ? "bg-[#C8211B] text-white border-[#C8211B]"
+                  : "bg-white text-[#7E756D] border-[rgba(60,60,67,0.14)] hover:text-[#1F1B18] hover:border-[rgba(60,60,67,0.28)]"
               }`}
             >
               {status === "all" ? "全部" : STATUS_MAP[status]?.label || status}
@@ -113,7 +146,7 @@ export default function NovelsPage() {
 
         {loading ? (
           <div className="flex items-center justify-center py-20">
-            <div className="animate-spin w-8 h-8 border-2 border-[#007AFF] border-t-transparent rounded-full" />
+            <div className="animate-spin w-8 h-8 border-2 border-[#C8211B] border-t-transparent rounded-full" />
           </div>
         ) : error ? (
           <div className="text-center py-20">
@@ -152,25 +185,25 @@ export default function NovelsPage() {
               <Card hover className="group relative p-5">
                 <Link href={`/novels/${novel.id}`} className="block">
                   <div className="flex items-start justify-between mb-3">
-                    <h3 className="font-semibold text-[#1D1D1F] line-clamp-1 pr-3">{novel.title}</h3>
+                    <h3 className="font-semibold text-[#1F1B18] line-clamp-1 pr-3">{novel.title}</h3>
                     <Badge variant={STATUS_MAP[novel.status]?.variant || "default"}>
                       {STATUS_MAP[novel.status]?.label || novel.status}
                     </Badge>
                   </div>
-                  <div className="flex items-center gap-2 text-sm text-[#6E6E73] mb-1">
+                  <div className="flex items-center gap-2 text-sm text-[#7E756D] mb-1">
                     {novel.genre && (
                       <>
-                        <span>{novel.genre}</span>
+                        <span>{GENRE_LABELS[novel.genre] || novel.genre}</span>
                         <span>·</span>
                       </>
                     )}
                     {novel.style && (
                       <>
-                        <span>{novel.style}</span>
+                        <span>{STYLE_LABELS[novel.style] || novel.style}</span>
                         <span>·</span>
                       </>
                     )}
-                    <span>{formatDate(novel.created_at)}</span>
+                    <span>{formatDateTime(novel.updated_at || novel.created_at)}</span>
                   </div>
                 </Link>
                 <div className="absolute top-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity">

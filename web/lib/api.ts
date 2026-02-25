@@ -36,6 +36,9 @@ export interface GenerationStatus {
   progress: number;
   current_phase?: string;
   step?: string;
+  subtask_key?: string;
+  subtask_label?: string;
+  subtask_progress?: number;
   current_chapter?: number;
   total_chapters?: number;
   volume_no?: number;

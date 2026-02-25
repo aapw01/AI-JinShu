@@ -150,7 +150,13 @@ def evaluate_language_quality(text: str, lang_code: str) -> Tuple[float, str]:
             "ar": "ar",
         }
         tool_lang = tool_lang_map.get(lang_code, "en-US")
-        tool = language_tool_python.LanguageToolPublicAPI(tool_lang)
+        tool = None
+        # Prefer local LanguageTool to avoid public API throttling.
+        try:
+            tool = language_tool_python.LanguageTool(tool_lang)
+        except Exception:
+            # Fallback to public API when local server is unavailable.
+            tool = language_tool_python.LanguageToolPublicAPI(tool_lang)
         matches = tool.check(text[:4000])
         if matches:
             density = len(matches) / max(len(text[:4000]), 1) * 1000
