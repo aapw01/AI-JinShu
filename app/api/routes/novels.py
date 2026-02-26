@@ -6,7 +6,14 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db, resolve_novel
 from app.core.time_utils import to_utc_iso_z
 from app.models.novel import Novel
-from app.schemas.novel import NovelCreate, NovelUpdate, NovelResponse
+from app.schemas.novel import (
+    IdeaFrameworkRequest,
+    IdeaFrameworkResponse,
+    NovelCreate,
+    NovelUpdate,
+    NovelResponse,
+)
+from app.services.generation.idea_framework import generate_idea_framework
 
 router = APIRouter()
 
@@ -55,6 +62,36 @@ def create_novel(data: NovelCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(novel)
     return _to_response(novel)
+
+
+@router.post("/idea-framework", response_model=IdeaFrameworkResponse)
+def generate_idea(data: IdeaFrameworkRequest):
+    """Generate editable idea framework from title."""
+    framework = generate_idea_framework(
+        title=data.title,
+        language=data.target_language,
+        genre=data.genre,
+        style=data.style,
+        strategy=data.strategy,
+    )
+    editable = "\n".join(
+        [
+            f"一句话创意：{framework['one_liner']}",
+            f"背景设定：{framework['premise']}",
+            f"核心冲突：{framework['conflict']}",
+            f"开篇钩子：{framework['hook']}",
+            f"连载卖点：{framework['selling_point']}",
+        ]
+    )
+    return IdeaFrameworkResponse(
+        title=data.title,
+        one_liner=framework["one_liner"],
+        premise=framework["premise"],
+        conflict=framework["conflict"],
+        hook=framework["hook"],
+        selling_point=framework["selling_point"],
+        editable_framework=editable[:600],
+    )
 
 
 @router.get("/{novel_id}", response_model=NovelResponse)

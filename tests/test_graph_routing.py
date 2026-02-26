@@ -5,10 +5,8 @@ from app.services.generation.consistency import ConsistencyReport, ConsistencyIs
 from app.services.generation.langgraph_pipeline import (
     _node_volume_replan,
     _node_review,
-    _route_chapter_or_final,
     _route_consistency,
     _route_after_confirmation,
-    _route_after_advance,
     _route_finalize,
     _route_review,
 )
@@ -27,19 +25,6 @@ def _base_state(**overrides):
     }
     state.update(overrides)
     return state
-
-
-# ---- _route_chapter_or_final ------------------------------------------------
-
-class TestRouteChapterOrFinal:
-    def test_continues_when_within_range(self):
-        assert _route_chapter_or_final(_base_state(current_chapter=3, end_chapter=5)) == "load_context"
-
-    def test_continues_on_last_chapter(self):
-        assert _route_chapter_or_final(_base_state(current_chapter=5, end_chapter=5)) == "load_context"
-
-    def test_final_review_after_last_chapter(self):
-        assert _route_chapter_or_final(_base_state(current_chapter=6, end_chapter=5)) == "final_book_review"
 
 
 # ---- _route_consistency ------------------------------------------------------
@@ -63,6 +48,9 @@ class TestRouteReview:
     def test_finalize_on_good_score(self):
         assert _route_review(_base_state(score=0.8)) == "finalizer"
 
+    def test_finalize_when_gate_accepts_minor_polish(self):
+        assert _route_review(_base_state(score=0.3, review_gate={"decision": "accept_with_minor_polish"})) == "finalizer"
+
     def test_finalize_on_exact_threshold(self):
         assert _route_review(_base_state(score=0.7)) == "finalizer"
 
@@ -80,14 +68,6 @@ class TestVolumeRouting:
     def test_after_confirmation_volume_replan_on_volume_start(self):
         state = _base_state(current_chapter=1, end_chapter=10, volume_size=3, start_chapter=1)
         assert _route_after_confirmation(state) == "volume_replan"
-
-    def test_after_advance_load_context_inside_volume(self):
-        state = _base_state(current_chapter=2, end_chapter=10, volume_size=3, start_chapter=1)
-        assert _route_after_advance(state) == "load_context"
-
-    def test_after_advance_volume_replan_on_new_volume(self):
-        state = _base_state(current_chapter=4, end_chapter=10, volume_size=3, start_chapter=1)
-        assert _route_after_advance(state) == "volume_replan"
 
     def test_finalize_route_to_rerun_when_quality_failed(self):
         state = _base_state(quality_passed=False, rerun_count=0)

@@ -1,9 +1,13 @@
 """Chapters routes."""
+import json
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+import redis
 
+from app.core.config import get_settings
 from app.core.database import get_db, resolve_novel
 from app.core.time_utils import to_utc_iso_z
 from app.models.novel import Chapter, ChapterOutline, GenerationTask
@@ -21,6 +25,32 @@ class ChapterProgressItem(BaseModel):
     chapter_num: int
     title: str | None = None
     status: str  # pending | generating | completed
+
+
+def _get_generating_chapter_from_redis(novel_db_id: int) -> int | None:
+    """Get real-time generating chapter from Redis status cache."""
+    try:
+        r = redis.from_url(get_settings().redis_url)
+        raw = r.get(f"generation:novel:{novel_db_id}")
+        if not raw:
+            return None
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        payload = json.loads(raw)
+        if not isinstance(payload, dict):
+            return None
+        status = str(payload.get("status") or "")
+        current_phase = str(payload.get("current_phase") or payload.get("step") or "")
+        chapter = int(payload.get("current_chapter") or 0)
+        if chapter <= 0:
+            return None
+        if status in {"running", "generating", "submitted", "awaiting_outline_confirmation"}:
+            return chapter
+        if current_phase in {"chapter_writing", "chapter_review", "chapter_finalizing", "consistency_check"}:
+            return chapter
+    except Exception:
+        return None
+    return None
 
 
 def _to_response(c: Chapter, novel_uuid: str) -> ChapterResponse:
@@ -86,7 +116,9 @@ def get_chapter_progress(novel_id: str, db: Session = Depends(get_db)):
         .order_by(GenerationTask.updated_at.desc())
     )
     active_task = db.execute(active_stmt).scalar_one_or_none()
-    generating_chapter = active_task.current_chapter if active_task else None
+    generating_chapter = _get_generating_chapter_from_redis(novel.id)
+    if generating_chapter is None:
+        generating_chapter = active_task.current_chapter if active_task else None
 
     result: list[ChapterProgressItem] = []
     if outlines:

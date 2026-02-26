@@ -48,6 +48,24 @@ class NovelResponse(BaseModel):
     updated_at: str | None = None
 
 
+class IdeaFrameworkRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    target_language: str | None = None
+    genre: str | None = None
+    style: str | None = None
+    strategy: str | None = None
+
+
+class IdeaFrameworkResponse(BaseModel):
+    title: str
+    one_liner: str
+    premise: str
+    conflict: str
+    hook: str
+    selling_point: str
+    editable_framework: str
+
+
 class ChapterResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -76,6 +94,10 @@ class GenerateResponse(BaseModel):
     status: str = "submitted"
 
 
+class RetryGenerationRequest(BaseModel):
+    task_id: str | None = None
+
+
 class GenerationStatusResponse(BaseModel):
     status: str
     step: str | None = None
@@ -83,6 +105,7 @@ class GenerationStatusResponse(BaseModel):
     subtask_key: str | None = None
     subtask_label: str | None = None
     subtask_progress: float | None = None
+    current_subtask: dict | None = None
     current_chapter: int = 0
     total_chapters: int = 0
     progress: float = 0.0
@@ -91,5 +114,11 @@ class GenerationStatusResponse(BaseModel):
     estimated_cost: float = 0.0
     volume_no: int | None = None
     volume_size: int | None = None
+    pacing_mode: str | None = None
+    low_progress_streak: int | None = None
+    progress_signal: float | None = None
+    decision_state: dict | None = None
+    eta_seconds: int | None = None
+    eta_label: str | None = None
     message: str | None = None
     error: str | None = None

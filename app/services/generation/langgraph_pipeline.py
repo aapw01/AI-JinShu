@@ -13,7 +13,7 @@ from sqlalchemy import select
 from app.core.database import SessionLocal
 from app.core.i18n import evaluate_language_quality, get_native_style_profile
 from app.core.strategy import get_model_for_stage
-from app.models.novel import Chapter, GenerationTask, Novel, GenerationCheckpoint, NovelFeedback
+from app.models.novel import Chapter, GenerationTask, Novel, GenerationCheckpoint, NovelFeedback, StoryForeshadow
 from app.services.generation.agents import (
     FactExtractorAgent,
     FinalizerAgent,
@@ -33,6 +33,12 @@ from app.services.generation.common import (
     save_prewrite_artifacts,
     update_character_states_from_content,
 )
+from app.services.generation.policies import (
+    ClosurePolicyEngine,
+    ClosurePolicyInput,
+    PacingController,
+    PacingInput,
+)
 from app.services.memory.character_state import CharacterStateManager
 from app.services.memory.summary_manager import SummaryManager
 from app.services.memory.story_bible import StoryBibleStore, CheckpointStore, QualityReportStore
@@ -45,6 +51,9 @@ from app.services.memory.story_bible import StoryBibleStore, CheckpointStore, Qu
 class GenerationState(TypedDict, total=False):
     novel_id: int
     num_chapters: int
+    target_chapters: int
+    min_total_chapters: int
+    max_total_chapters: int
     start_chapter: int
     current_chapter: int
     end_chapter: int
@@ -89,6 +98,16 @@ class GenerationState(TypedDict, total=False):
     quality_passed: bool
     volume_no: int
     volume_plan: dict[str, Any]
+    decision_state: dict[str, Any]
+    closure_state: dict[str, Any]
+    consistency_soft_fail: bool
+    tail_rewrite_attempts: int
+    bridge_attempts: int
+    low_progress_streak: int
+    pacing_mode: str
+    review_suggestions: dict[str, Any]
+    consistency_scorecard: dict[str, Any]
+    review_gate: dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +157,146 @@ def _is_volume_start(state: GenerationState, chapter: int) -> bool:
     return (chapter - start) % volume_size == 0
 
 
+def _closure_phase_mode(remaining_ratio: float) -> str:
+    if remaining_ratio > 0.35:
+        return "expand"
+    if remaining_ratio > 0.15:
+        return "converge"
+    if remaining_ratio > 0.05:
+        return "closing"
+    return "finale"
+
+
+def _build_closure_state(state: GenerationState) -> dict[str, Any]:
+    chapter_num = int(state.get("current_chapter") or 1)
+    start_chapter = int(state.get("start_chapter") or 1)
+    end_chapter = int(state.get("end_chapter") or chapter_num)
+    target_chapters = int(state.get("target_chapters") or state.get("num_chapters") or 1)
+    min_total = int(state.get("min_total_chapters") or target_chapters)
+    max_total = int(state.get("max_total_chapters") or target_chapters)
+    generated = max(0, chapter_num - start_chapter)
+    remaining = max(0, end_chapter - chapter_num + 1)
+    remaining_ratio = remaining / max(target_chapters, 1)
+    phase_mode = _closure_phase_mode(remaining_ratio)
+
+    constraints = state["bible_store"].get_chapter_constraints(state["novel_id"], chapter_num)
+    unresolved_foreshadows = constraints.get("unresolved_foreshadows") or []
+    resolved_foreshadows = 0
+    total_foreshadows = 0
+    db = SessionLocal()
+    try:
+        fs_rows = db.execute(
+            select(StoryForeshadow).where(
+                StoryForeshadow.novel_id == state["novel_id"],
+                StoryForeshadow.planted_chapter <= end_chapter,
+            )
+        ).scalars().all()
+        total_foreshadows = len(fs_rows)
+        resolved_foreshadows = len([f for f in fs_rows if (f.state or "") == "resolved"])
+    finally:
+        db.close()
+
+    plotlines = (((state.get("prewrite") or {}).get("specification") or {}).get("plotlines") or [])
+    open_plotlines: list[dict[str, Any]] = []
+    total_plotlines = 0
+    resolved_plotlines = 0
+    if isinstance(plotlines, list):
+        for item in plotlines[:80]:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or item.get("id") or "").strip()
+            if not name:
+                continue
+            try:
+                plot_end = int(item.get("end") or target_chapters)
+            except Exception:
+                plot_end = target_chapters
+            total_plotlines += 1
+            if generated >= plot_end:
+                resolved_plotlines += 1
+            if plot_end <= end_chapter and generated < plot_end:
+                open_plotlines.append(
+                    {
+                        "id": str(item.get("id") or name),
+                        "name": name[:120],
+                        "expected_end": plot_end,
+                    }
+                )
+
+    must_close_items = [
+        {
+            "type": "foreshadow",
+            "id": str(x.get("foreshadow_id") or ""),
+            "title": str(x.get("title") or "")[:160],
+            "introduced_chapter": int(x.get("planted_chapter") or 0),
+        }
+        for x in unresolved_foreshadows[:30]
+        if x
+    ] + [
+        {
+            "type": "plotline",
+            "id": str(x.get("id") or ""),
+            "title": str(x.get("name") or "")[:160],
+            "introduced_chapter": 0,
+        }
+        for x in open_plotlines[:20]
+    ]
+    unresolved_count = len(must_close_items)
+    total_close_units = max(1, total_foreshadows + total_plotlines)
+    resolved_units = min(total_close_units, resolved_foreshadows + resolved_plotlines)
+    must_close_coverage = max(0.0, min(1.0, resolved_units / total_close_units))
+    closure_score = max(0.0, min(1.0, (must_close_coverage * 0.75) + (0.25 if unresolved_count == 0 else 0.0)))
+    rewrite_attempts = int(state.get("tail_rewrite_attempts") or 0)
+    bridge_attempts = int(state.get("bridge_attempts") or 0)
+    closure_threshold = float(((state.get("novel_info") or {}).get("closure_threshold")) or 0.95)
+    bridge_budget_total = max(0, max_total - target_chapters)
+    bridge_budget_left = max(0, bridge_budget_total - bridge_attempts)
+    decision = ClosurePolicyEngine.decide(
+        ClosurePolicyInput(
+            generated_chapters=generated,
+            target_chapters=target_chapters,
+            min_total_chapters=min_total,
+            max_total_chapters=max_total,
+            remaining_chapters=remaining,
+            remaining_ratio=remaining_ratio,
+            phase_mode=phase_mode,
+            unresolved_count=unresolved_count,
+            must_close_coverage=must_close_coverage,
+            closure_threshold=closure_threshold,
+            tail_rewrite_attempts=rewrite_attempts,
+            bridge_attempts=bridge_attempts,
+        )
+    )
+    action = decision.action
+
+    return {
+        "generated_chapters": generated,
+        "target_chapters": target_chapters,
+        "min_total_chapters": min_total,
+        "max_total_chapters": max_total,
+        "remaining_chapters": remaining,
+        "remaining_ratio": round(remaining_ratio, 4),
+        "phase_mode": phase_mode,
+        "unresolved_count": unresolved_count,
+        "closure_score": round(closure_score, 4),
+        "must_close_coverage": round(must_close_coverage, 4),
+        "closure_threshold": round(closure_threshold, 4),
+        "total_foreshadows": total_foreshadows,
+        "resolved_foreshadows": resolved_foreshadows,
+        "total_plotlines": total_plotlines,
+        "resolved_plotlines": resolved_plotlines,
+        "tail_rewrite_attempts": rewrite_attempts,
+        "bridge_attempts": bridge_attempts,
+        "bridge_budget_total": int(decision.next_limits.get("bridge_budget_total") or bridge_budget_total),
+        "bridge_budget_left": int(decision.next_limits.get("bridge_budget_left") or bridge_budget_left),
+        "reason_codes": decision.reason_codes,
+        "confidence": round(float(decision.confidence), 4),
+        "next_limits": decision.next_limits,
+        "must_close_items": must_close_items[:20],
+        "action": action,
+    }
+
+
 def _aesthetic_score(text: str) -> float:
     """Heuristic readability/aesthetic score in 0-1."""
     if not text:
@@ -175,6 +334,190 @@ def _extract_item_mentions(text: str) -> list[str]:
         if x and x not in dedup:
             dedup.append(x)
     return dedup[:10]
+
+
+def _chapter_progress_signal(
+    outline: dict[str, Any],
+    summary_text: str,
+    final_content: str,
+    extracted_facts: dict[str, Any] | None,
+    review_score: float,
+    factual_score: float,
+) -> float:
+    """Heuristic chapter progression signal in 0-1."""
+    events = extracted_facts.get("events") if isinstance(extracted_facts, dict) else []
+    events_count = len(events or [])
+    summary_len = len((summary_text or "").strip())
+    payoff = str(outline.get("payoff") or "").strip()
+    purpose = str(outline.get("purpose") or "").strip()
+    mini_climax = str(outline.get("mini_climax") or "").strip().lower()
+    suspense = str(outline.get("suspense_level") or "").strip()
+    has_conflict_word = any(k in final_content for k in ["冲突", "对峙", "反转", "危机", "爆发", "背叛", "抉择"])
+
+    signal = 0.0
+    signal += min(events_count / 6.0, 1.0) * 0.30
+    signal += min(summary_len / 260.0, 1.0) * 0.15
+    signal += (0.15 if payoff else 0.0)
+    signal += (0.10 if purpose else 0.0)
+    signal += (0.10 if mini_climax not in {"", "none", "无"} else 0.0)
+    signal += (0.08 if suspense in {"中", "高", "高强"} else 0.03 if suspense else 0.0)
+    signal += (0.07 if has_conflict_word else 0.0)
+    signal += max(0.0, min(1.0, review_score)) * 0.03
+    signal += max(0.0, min(1.0, factual_score)) * 0.02
+    return max(0.0, min(1.0, signal))
+
+
+def _safe_issue(item: Any, severity: str = "should_fix") -> dict[str, Any]:
+    if not isinstance(item, dict):
+        return {"category": "general", "severity": severity, "claim": str(item or ""), "evidence": "", "confidence": 0.55}
+    return {
+        "category": str(item.get("category") or "general")[:40],
+        "severity": str(item.get("severity") or severity)[:20],
+        "claim": str(item.get("claim") or "")[:220],
+        "evidence": str(item.get("evidence") or "")[:120],
+        "confidence": max(0.0, min(1.0, float(item.get("confidence", 0.55) or 0.55))),
+    }
+
+
+def _evidence_valid(issue: dict[str, Any], draft: str) -> bool:
+    evidence = str(issue.get("evidence") or "").strip()
+    if not evidence:
+        return False
+    if len(evidence) < 2:
+        return False
+    return evidence in draft
+
+
+def _build_consistency_scorecard(report: Any) -> dict[str, Any]:
+    issues = list(getattr(report, "issues", []) or [])
+    blockers = list(getattr(report, "blockers", []) or [])
+    warnings = list(getattr(report, "warnings", []) or [])
+    category_counts: dict[str, int] = {}
+    for i in issues:
+        key = str(getattr(i, "category", "unknown") or "unknown")
+        category_counts[key] = category_counts.get(key, 0) + 1
+    score = max(0.0, min(1.0, 1.0 - (len(blockers) * 0.32) - (len(warnings) * 0.08)))
+    reason_codes: list[str] = []
+    for cat, n in sorted(category_counts.items()):
+        if n > 0:
+            reason_codes.append(f"{cat}:{n}")
+    return {
+        "score": round(score, 4),
+        "passed": bool(getattr(report, "passed", False)),
+        "blockers": len(blockers),
+        "warnings": len(warnings),
+        "categories": category_counts,
+        "reason_codes": reason_codes[:8],
+        "issues": [
+            {
+                "level": str(getattr(i, "level", "")),
+                "category": str(getattr(i, "category", "")),
+                "message": str(getattr(i, "message", ""))[:220],
+            }
+            for i in issues[:12]
+        ],
+    }
+
+
+def _normalize_reviewer_payload(result: Any, default_feedback: str = "") -> dict[str, Any]:
+    if isinstance(result, dict):
+        score = float(result.get("score", 0.75) or 0.75)
+        return {
+            "score": max(0.0, min(1.0, score)),
+            "confidence": max(0.0, min(1.0, float(result.get("confidence", 0.6) or 0.6))),
+            "feedback": str(result.get("feedback", default_feedback or "")),
+            "must_fix": [_safe_issue(x, "must_fix") for x in (result.get("must_fix") or [])][:4],
+            "should_fix": [_safe_issue(x, "should_fix") for x in (result.get("should_fix") or [])][:4],
+            "positives": [str(x)[:120] for x in (result.get("positives") or result.get("highlights") or []) if str(x).strip()][:6],
+            "risks": [str(x)[:120] for x in (result.get("risks") or []) if str(x).strip()][:6],
+            "contradictions": [str(x)[:180] for x in (result.get("contradictions") or []) if str(x).strip()][:10],
+            "raw": result,
+        }
+    if isinstance(result, tuple):
+        if len(result) >= 3:
+            score, feedback, third = result[0], result[1], result[2]
+            extra = [str(x) for x in (third or [])][:6] if isinstance(third, list) else []
+            return {
+                "score": max(0.0, min(1.0, float(score or 0.75))),
+                "confidence": 0.55,
+                "feedback": str(feedback or default_feedback),
+                "must_fix": [],
+                "should_fix": [],
+                "positives": extra,
+                "risks": [],
+                "contradictions": extra,
+                "raw": {},
+            }
+        if len(result) >= 2:
+            score, feedback = result[0], result[1]
+            return {
+                "score": max(0.0, min(1.0, float(score or 0.75))),
+                "confidence": 0.55,
+                "feedback": str(feedback or default_feedback),
+                "must_fix": [],
+                "should_fix": [],
+                "positives": [],
+                "risks": [],
+                "contradictions": [],
+                "raw": {},
+            }
+    return {
+        "score": 0.75,
+        "confidence": 0.4,
+        "feedback": default_feedback,
+        "must_fix": [],
+        "should_fix": [],
+        "positives": [],
+        "risks": ["invalid_reviewer_payload"],
+        "contradictions": [],
+        "raw": {},
+    }
+
+
+def _build_review_gate(
+    draft: str,
+    struct_payload: dict[str, Any],
+    factual_payload: dict[str, Any],
+    aesthetic_payload: dict[str, Any],
+) -> dict[str, Any]:
+    all_must_fix = list(struct_payload.get("must_fix") or []) + list(factual_payload.get("must_fix") or []) + list(aesthetic_payload.get("must_fix") or [])
+    validated: list[dict[str, Any]] = []
+    weak: list[dict[str, Any]] = []
+    for issue in all_must_fix:
+        conf = float(issue.get("confidence", 0.0) or 0.0)
+        if _evidence_valid(issue, draft) and conf >= 0.6:
+            validated.append(issue)
+        else:
+            weak.append(issue)
+    evidence_coverage = len(validated) / max(1, len(all_must_fix))
+    over_correction_risk = bool(len(all_must_fix) >= 3 and evidence_coverage < 0.34)
+    avg_confidence = (
+        float(struct_payload.get("confidence", 0.0) or 0.0)
+        + float(factual_payload.get("confidence", 0.0) or 0.0)
+        + float(aesthetic_payload.get("confidence", 0.0) or 0.0)
+    ) / 3.0
+    min_score = min(
+        float(struct_payload.get("score", 0.0) or 0.0),
+        float(factual_payload.get("score", 0.0) or 0.0),
+        float(aesthetic_payload.get("score", 0.0) or 0.0),
+    )
+    gate_decision = "rewrite"
+    if len(all_must_fix) == 0 and avg_confidence >= 0.72 and min_score >= 0.68:
+        gate_decision = "accept_with_minor_polish"
+    elif len(validated) == 0 and evidence_coverage < 0.25 and avg_confidence >= 0.8:
+        gate_decision = "accept_with_minor_polish"
+    return {
+        "must_fix_total": len(all_must_fix),
+        "must_fix_validated": len(validated),
+        "must_fix_weak": len(weak),
+        "evidence_coverage": round(evidence_coverage, 4),
+        "avg_confidence": round(avg_confidence, 4),
+        "min_score": round(min_score, 4),
+        "over_correction_risk": over_correction_risk,
+        "decision": gate_decision,
+        "validated_issues": validated[:4],
+        "weak_issues": weak[:4],
+    }
 
 
 def _write_longform_artifacts(
@@ -374,6 +717,8 @@ def _write_longform_artifacts(
             "aesthetic_score": aesthetic_score,
             "revision_count": revision_count,
             "volume_no": volume_no,
+            "consistency_scorecard": state.get("consistency_scorecard") or {},
+            "review_gate": state.get("review_gate") or {},
         },
         verdict=verdict,
     )
@@ -390,6 +735,8 @@ def _write_longform_artifacts(
                 "volume_no": volume_no,
                 "review_score": state.get("score", 0.0),
                 "language_score": language_score,
+                "consistency_scorecard": state.get("consistency_scorecard") or {},
+                "review_gate": state.get("review_gate") or {},
                 "summary": summary_text[:400],
                 "content_preview": final_content[:400],
             },
@@ -520,7 +867,15 @@ def _node_init(state: GenerationState) -> GenerationState:
             raise ValueError(f"Novel {state['novel_id']} not found")
         strategy = novel.strategy or "web-novel"
         target_language = novel.target_language or "zh"
-        volume_size = int(((novel.config or {}).get("volume_size") or 30))
+        config = novel.config or {}
+        volume_size = int((config.get("volume_size") or 30))
+        flex_abs = max(0, int(config.get("chapter_flex_max_abs", 2) or 2))
+        flex_ratio = float(config.get("chapter_flex_max_ratio", 0.1) or 0.1)
+        target_total = int(state["num_chapters"])
+        flex_by_ratio = max(0, int(round(target_total * max(flex_ratio, 0.0))))
+        flex_window = min(flex_abs, flex_by_ratio if flex_by_ratio > 0 else flex_abs)
+        min_total = max(1, target_total - flex_window)
+        max_total = max(target_total, target_total + flex_window)
         return {
             "strategy": strategy,
             "target_language": target_language,
@@ -533,6 +888,7 @@ def _node_init(state: GenerationState) -> GenerationState:
                 "target_length": novel.target_length,
                 "writing_method": novel.writing_method,
                 "user_idea": novel.user_idea,
+                "closure_threshold": float(config.get("closure_threshold", 0.95) or 0.95),
             },
             "summary_mgr": SummaryManager(),
             "char_mgr": CharacterStateManager(),
@@ -545,6 +901,9 @@ def _node_init(state: GenerationState) -> GenerationState:
             "fact_extractor": FactExtractorAgent(),
             "current_chapter": state["start_chapter"],
             "end_chapter": state["start_chapter"] + state["num_chapters"] - 1,
+            "target_chapters": target_total,
+            "min_total_chapters": min_total,
+            "max_total_chapters": max_total,
             "total_input_tokens": 0,
             "total_output_tokens": 0,
             "estimated_cost": 0.0,
@@ -556,6 +915,15 @@ def _node_init(state: GenerationState) -> GenerationState:
             "quality_store": QualityReportStore(),
             "volume_no": 1,
             "volume_plan": {},
+            "decision_state": {"closure": {}, "pacing": {"mode": "normal"}, "quality": {}},
+            "closure_state": {},
+            "tail_rewrite_attempts": 0,
+            "bridge_attempts": 0,
+            "low_progress_streak": 0,
+            "pacing_mode": "normal",
+            "review_suggestions": {},
+            "consistency_scorecard": {},
+            "review_gate": {},
         }
     finally:
         db.close()
@@ -758,15 +1126,16 @@ def _node_confirmation_gate(state: GenerationState) -> GenerationState:
 # Routing helpers
 # ---------------------------------------------------------------------------
 
-def _route_chapter_or_final(state: GenerationState) -> str:
-    return "final_book_review" if state["current_chapter"] > state["end_chapter"] else "load_context"
-
-
 def _route_consistency(state: GenerationState) -> str:
-    return "save_blocked" if not state["consistency_report"].passed else "beats"
+    if not state["consistency_report"].passed and not state.get("consistency_soft_fail"):
+        return "save_blocked"
+    return "beats"
 
 
 def _route_review(state: GenerationState) -> str:
+    review_gate = state.get("review_gate") or {}
+    if review_gate.get("decision") == "accept_with_minor_polish":
+        return "finalizer"
     if state["score"] >= REVIEW_SCORE_THRESHOLD:
         return "finalizer"
     if state.get("review_attempt", 0) < MAX_RETRIES:
@@ -790,7 +1159,18 @@ def _route_finalize(state: GenerationState) -> str:
     return "advance_chapter"
 
 
-def _route_after_advance(state: GenerationState) -> str:
+def _route_after_closure_gate(state: GenerationState) -> str:
+    action = str((state.get("closure_state") or {}).get("action") or "")
+    if action == "rewrite_tail":
+        return "tail_rewrite"
+    if action == "bridge_chapter":
+        return "bridge_chapter"
+    if state["current_chapter"] > state["end_chapter"]:
+        return "final_book_review"
+    return "volume_replan" if _is_volume_start(state, state["current_chapter"]) else "load_context"
+
+
+def _route_after_tail_rewrite(state: GenerationState) -> str:
     if state["current_chapter"] > state["end_chapter"]:
         return "final_book_review"
     return "volume_replan" if _is_volume_start(state, state["current_chapter"]) else "load_context"
@@ -815,7 +1195,29 @@ def _node_load_context(state: GenerationState) -> GenerationState:
         ctx["prewrite"] = state["prewrite"]
         ctx["chapter_outline"] = outline
         ctx["volume_plan"] = state.get("volume_plan") or {}
-        ctx["hard_constraints"] = state["bible_store"].get_chapter_constraints(state["novel_id"], chapter_num, db=db)
+        ctx["closure_state"] = state.get("closure_state") or {}
+        ctx["decision_state"] = state.get("decision_state") or {}
+        ctx["prompt_contract"] = {
+            "NarrativeIntent": {
+                "chapter_goal": str(outline.get("purpose") or "推进主线并形成阶段性兑现"),
+                "conflict_target": str(outline.get("plot_twist_level") or "中"),
+                "payoff_target": str(outline.get("payoff") or "无"),
+            },
+            "ClosureIntent": {
+                "phase_mode": str((state.get("closure_state") or {}).get("phase_mode") or ""),
+                "must_close_items": (state.get("closure_state") or {}).get("must_close_items") or [],
+                "suppress_new_mainline": str((state.get("closure_state") or {}).get("phase_mode") or "") in {"closing", "finale"},
+            },
+            "PacingIntent": {
+                "mode": str(state.get("pacing_mode") or "normal"),
+                "min_progress_signal": 0.45,
+                "streak": int(state.get("low_progress_streak") or 0),
+            },
+            "HardConstraints": {
+                "consistency": state["bible_store"].get_chapter_constraints(state["novel_id"], chapter_num, db=db),
+            },
+        }
+        ctx["hard_constraints"] = ctx["prompt_contract"]["HardConstraints"]["consistency"]
         ctx["character_states"] = state["char_mgr"].get_states(state["novel_id"], chapter_num, db=db)
         ctx["summaries"] = state["summary_mgr"].get_summaries_before(state["novel_id"], chapter_num, db=db)
     finally:
@@ -853,8 +1255,42 @@ def _node_beats(state: GenerationState) -> GenerationState:
         beats.append({"name": "quality_fix", "target": "；".join(str(x) for x in quality_focus[:2])})
     if replan_actions:
         beats.append({"name": "replan_action", "target": "；".join(str(x) for x in replan_actions[:2])})
+    closure_state = state.get("closure_state") or {}
+    closure_items = closure_state.get("must_close_items") or []
+    closure_phase = str(closure_state.get("phase_mode") or "")
+    pacing_mode = str(state.get("pacing_mode") or "normal")
+    low_progress_streak = int(state.get("low_progress_streak") or 0)
+    if closure_phase in {"closing", "finale"}:
+        beats.append({"name": "ending_mode", "target": "收官阶段：减少新支线，优先闭环主线冲突与高优先伏笔。"})
+    if pacing_mode in {"accelerated", "closing_accelerated"}:
+        beats.append({"name": "pace_boost", "target": "连续低推进触发加速：本章必须出现不可逆变化与冲突升级。"})
+        beats.append({"name": "payoff_boost", "target": "至少兑现1个既有伏笔/矛盾，禁止空转铺垫。"})
+        if low_progress_streak >= 3:
+            beats.append({"name": "hard_hook", "target": "章末必须形成强钩子，且直接连接下一章主冲突。"})
+    if closure_items:
+        labels = [str(x.get("title") or x.get("id") or "") for x in closure_items[:2] if x]
+        if labels:
+            beats.append({"name": "closure_target", "target": "本章优先回收：" + "；".join(labels)})
     ctx = dict(state["context"])
     ctx["beat_sheet"] = beats
+    contract = dict(ctx.get("prompt_contract") or {})
+    contract["NarrativeIntent"] = {
+        "chapter_goal": str(outline.get("purpose") or "推进主线并形成阶段兑现"),
+        "conflict_target": str(outline.get("plot_twist_level") or "中"),
+        "payoff_target": str(outline.get("payoff") or "无"),
+        "beats": beats,
+    }
+    contract["PacingIntent"] = {
+        "mode": pacing_mode,
+        "streak": low_progress_streak,
+        "min_progress_signal": 0.45,
+    }
+    contract["ClosureIntent"] = {
+        "phase_mode": closure_phase,
+        "must_close_items": closure_items[:3],
+        "suppress_new_mainline": closure_phase in {"closing", "finale"},
+    }
+    ctx["prompt_contract"] = contract
     _progress(
         state,
         "beats",
@@ -872,9 +1308,23 @@ def _node_consistency_check(state: GenerationState) -> GenerationState:
     chapter_num = state["current_chapter"]
     _progress(state, "consistency", chapter_num, _chapter_progress(state, 0.15), "一致性检查...", {"current_phase": "consistency_check", "total_chapters": state["num_chapters"]})
     report = check_consistency(state["novel_id"], chapter_num, state["outline"], state["context"], state["prewrite"])
+    scorecard = _build_consistency_scorecard(report)
     if report.passed:
-        return {"consistency_report": report, "context": inject_consistency_context(state["context"], report)}
-    return {"consistency_report": report}
+        return {
+            "consistency_report": report,
+            "consistency_scorecard": scorecard,
+            "context": inject_consistency_context(state["context"], report),
+            "consistency_soft_fail": False,
+        }
+    closure_phase = str((state.get("closure_state") or {}).get("phase_mode") or "")
+    if closure_phase in {"closing", "finale"}:
+        return {
+            "consistency_report": report,
+            "consistency_scorecard": scorecard,
+            "context": inject_consistency_context(state["context"], report),
+            "consistency_soft_fail": True,
+        }
+    return {"consistency_report": report, "consistency_scorecard": scorecard, "consistency_soft_fail": False}
 
 
 def _node_save_blocked(state: GenerationState) -> GenerationState:
@@ -908,6 +1358,7 @@ def _node_save_blocked(state: GenerationState) -> GenerationState:
             "blocked": True,
             "volume_no": volume_no,
             "reason": report.summary(),
+            "consistency_scorecard": state.get("consistency_scorecard") or {},
         },
         verdict="fail",
     )
@@ -918,7 +1369,10 @@ def _node_save_blocked(state: GenerationState) -> GenerationState:
             volume_no=volume_no,
             chapter_num=chapter_num,
             node="consistency_blocked",
-            state_json={"reason": report.summary()},
+            state_json={
+                "reason": report.summary(),
+                "consistency_scorecard": state.get("consistency_scorecard") or {},
+            },
         )
     _progress(state, "chapter_blocked", chapter_num, _chapter_progress(state, 1.0), f"第{chapter_num}章因一致性检查未通过已跳过", {"current_phase": "chapter_blocked", "total_chapters": state["num_chapters"]})
     return {}
@@ -929,9 +1383,12 @@ def _node_writer(state: GenerationState) -> GenerationState:
     attempt = state.get("review_attempt", 0) + 1
     _progress(state, "writer", chapter_num, _chapter_progress(state, 0.35), f"写作第{chapter_num}章（尝试{attempt}）...", {"current_phase": "chapter_writing", "total_chapters": state["num_chapters"]})
     w_provider, w_model = get_model_for_stage(state["strategy"], "writer")
+    pacing_mode = str(state.get("pacing_mode") or "normal")
     ctx_a = dict(state["context"])
     ctx_a["ab_variant"] = "A"
     ctx_a["ab_goal"] = "稳健推进主线，保持事实一致。"
+    if pacing_mode in {"accelerated", "closing_accelerated"}:
+        ctx_a["ab_goal"] = "加速推进主线，减少铺垫，必须输出明确冲突升级与阶段兑现。"
     draft_a = state["writer"].run(
         state["novel_id"],
         chapter_num,
@@ -945,6 +1402,8 @@ def _node_writer(state: GenerationState) -> GenerationState:
     ctx_b = dict(state["context"])
     ctx_b["ab_variant"] = "B"
     ctx_b["ab_goal"] = "增强情绪张力和节奏反转，保持硬约束不变。"
+    if pacing_mode in {"accelerated", "closing_accelerated"}:
+        ctx_b["ab_goal"] = "强化反转与高压冲突，提升推进效率并压缩无效叙述。"
     draft_b = state["writer"].run(
         state["novel_id"],
         chapter_num,
@@ -971,30 +1430,68 @@ def _node_review(state: GenerationState) -> GenerationState:
     best = None
     for c in candidates:
         text = str(c.get("draft") or "")
-        struct_score, struct_feedback = state["reviewer"].run(
-            text,
-            chapter_num,
-            state["target_language"],
-            state["native_style_profile"],
-            r_provider,
-            r_model,
-        )
-        factual_score, factual_feedback, contradictions = state["reviewer"].run_factual(
-            text,
-            chapter_num,
-            state.get("context") or {},
-            state["target_language"],
-            r_provider,
-            r_model,
-        )
-        aesthetic_score, aesthetic_feedback, highlights = state["reviewer"].run_aesthetic(
-            text,
-            chapter_num,
-            state["target_language"],
-            r_provider,
-            r_model,
-        )
+        if hasattr(state["reviewer"], "run_structured"):
+            struct_raw = state["reviewer"].run_structured(
+                text,
+                chapter_num,
+                state["target_language"],
+                state["native_style_profile"],
+                r_provider,
+                r_model,
+            )
+        else:
+            struct_raw = state["reviewer"].run(
+                text,
+                chapter_num,
+                state["target_language"],
+                state["native_style_profile"],
+                r_provider,
+                r_model,
+            )
+        if hasattr(state["reviewer"], "run_factual_structured"):
+            factual_raw = state["reviewer"].run_factual_structured(
+                text,
+                chapter_num,
+                state.get("context") or {},
+                state["target_language"],
+                r_provider,
+                r_model,
+            )
+        else:
+            factual_raw = state["reviewer"].run_factual(
+                text,
+                chapter_num,
+                state.get("context") or {},
+                state["target_language"],
+                r_provider,
+                r_model,
+            )
+        if hasattr(state["reviewer"], "run_aesthetic_structured"):
+            aesthetic_raw = state["reviewer"].run_aesthetic_structured(
+                text,
+                chapter_num,
+                state["target_language"],
+                r_provider,
+                r_model,
+            )
+        else:
+            aesthetic_raw = state["reviewer"].run_aesthetic(
+                text,
+                chapter_num,
+                state["target_language"],
+                r_provider,
+                r_model,
+            )
+        struct_pack = _normalize_reviewer_payload(struct_raw, "结构审校结果")
+        factual_pack = _normalize_reviewer_payload(factual_raw, "事实审校结果")
+        aesthetic_pack = _normalize_reviewer_payload(aesthetic_raw, "审美审校结果")
+        struct_score = float(struct_pack.get("score", 0.75))
+        factual_score = float(factual_pack.get("score", 0.75))
+        aesthetic_score = float(aesthetic_pack.get("score", 0.75))
         combined = (struct_score * 0.45) + (factual_score * 0.35) + (aesthetic_score * 0.20)
+        review_gate = _build_review_gate(text, struct_pack, factual_pack, aesthetic_pack)
+        if review_gate.get("over_correction_risk"):
+            combined = min(1.0, combined + 0.05)
         item = {
             "variant": c.get("variant"),
             "draft": text,
@@ -1002,16 +1499,54 @@ def _node_review(state: GenerationState) -> GenerationState:
             "struct_score": struct_score,
             "factual_score": factual_score,
             "aesthetic_score": aesthetic_score,
-            "feedback": struct_feedback,
-            "factual_feedback": factual_feedback,
-            "aesthetic_feedback": aesthetic_feedback,
-            "contradictions": contradictions,
-            "highlights": highlights,
+            "feedback": str(struct_pack.get("feedback") or ""),
+            "factual_feedback": str(factual_pack.get("feedback") or ""),
+            "aesthetic_feedback": str(aesthetic_pack.get("feedback") or ""),
+            "contradictions": factual_pack.get("contradictions") or [],
+            "highlights": aesthetic_pack.get("positives") or [],
+            "struct_pack": struct_pack,
+            "factual_pack": factual_pack,
+            "aesthetic_pack": aesthetic_pack,
+            "review_gate": review_gate,
         }
         if best is None or item["combined"] > best["combined"]:
             best = item
     if best is None:
         return {"score": 0.0, "feedback": "review failed", "factual_score": 0.0, "aesthetic_review_score": 0.0}
+    suggestions = {
+        "missing_payoff": [],
+        "weak_conflict": [],
+        "timeline_gap": [],
+        "closure_risk": [],
+        "scorecards": {
+            "structure": best.get("struct_pack") or {},
+            "factual": best.get("factual_pack") or {},
+            "aesthetic": best.get("aesthetic_pack") or {},
+        },
+        "review_gate": best.get("review_gate") or {},
+    }
+    for c in (best.get("contradictions") or [])[:8]:
+        txt = str(c).strip()
+        if txt:
+            suggestions["timeline_gap"].append(txt[:180])
+    factual_fb = str(best.get("factual_feedback") or "")
+    if "伏笔" in factual_fb or "回收" in factual_fb:
+        suggestions["missing_payoff"].append(factual_fb[:180])
+        suggestions["closure_risk"].append("存在伏笔回收风险")
+    aesthetic_fb = str(best.get("aesthetic_feedback") or "")
+    if any(k in aesthetic_fb for k in ["节奏", "平", "张力不足", "冲突弱"]):
+        suggestions["weak_conflict"].append(aesthetic_fb[:180])
+    for issue in ((best.get("review_gate") or {}).get("validated_issues") or [])[:2]:
+        cat = str(issue.get("category") or "")
+        claim = str(issue.get("claim") or "")
+        if not claim:
+            continue
+        if cat in {"timeline", "continuity"}:
+            suggestions["timeline_gap"].append(claim[:180])
+        elif cat in {"closure", "payoff"}:
+            suggestions["missing_payoff"].append(claim[:180])
+        else:
+            suggestions["weak_conflict"].append(claim[:180])
     combined_feedback = "\n".join(
         [
             f"[结构] {best['feedback']}",
@@ -1027,13 +1562,35 @@ def _node_review(state: GenerationState) -> GenerationState:
         "aesthetic_feedback": best["aesthetic_feedback"],
         "factual_score": best["factual_score"],
         "aesthetic_review_score": best["aesthetic_score"],
+        "review_suggestions": suggestions,
+        "review_gate": best.get("review_gate") or {},
     }
 
 
 def _node_revise(state: GenerationState) -> GenerationState:
     review_attempt = state.get("review_attempt", 0) + 1
     ctx = dict(state["context"])
+    suggestions = state.get("review_suggestions") or {}
     ctx["review_feedback"] = state["feedback"]
+    ctx["review_suggestions"] = suggestions
+    if suggestions:
+        structured = []
+        for key in ["missing_payoff", "weak_conflict", "timeline_gap", "closure_risk"]:
+            vals = [str(v) for v in (suggestions.get(key) or []) if str(v).strip()]
+            if vals:
+                structured.append(f"{key}: " + "；".join(vals[:2]))
+        gate = suggestions.get("review_gate") or {}
+        validated = [
+            str(x.get("claim") or "")
+            for x in (gate.get("validated_issues") or [])
+            if isinstance(x, dict) and str(x.get("claim") or "").strip()
+        ]
+        if validated:
+            structured.append("validated_issues: " + "；".join(validated[:2]))
+        if gate.get("over_correction_risk"):
+            structured.append("guardrail: 低证据批评较多，保持主线与结构，不要大改无关段落。")
+        if structured:
+            ctx["review_feedback"] = f"{ctx['review_feedback']}\n[结构化修正]\n" + "\n".join(structured)
     return {"review_attempt": review_attempt, "context": ctx}
 
 
@@ -1041,7 +1598,10 @@ def _node_rollback_rerun(state: GenerationState) -> GenerationState:
     chapter_num = state["current_chapter"]
     snap = state.get("chapter_token_snapshot", {})
     ctx = dict(state["context"])
+    suggestions = state.get("review_suggestions") or {}
     ctx["review_feedback"] = f"{state.get('feedback', '')}\n请彻底重写该章，修复上述问题并保持连续性。"
+    if suggestions:
+        ctx["review_suggestions"] = suggestions
     _progress(state, "rollback_rerun", chapter_num, _chapter_progress(state, 0.60), f"第{chapter_num}章审校未通过，回滚并重跑一次...", {"current_phase": "rollback_rerun", "total_chapters": state["num_chapters"]})
     return {
         "rerun_count": state.get("rerun_count", 0) + 1,
@@ -1134,6 +1694,47 @@ def _node_finalize(state: GenerationState) -> GenerationState:
 
     total_input_tokens = state["total_input_tokens"] + estimate_tokens(str(state["outline"]) + str(state["context"]) + (state.get("feedback") or ""))
     estimated_cost = round((total_input_tokens / 1000) * 0.0015 + (state["total_output_tokens"] / 1000) * 0.002, 6)
+    factual_score = float(state.get("factual_score", 0.0) or 0.0)
+    progress_signal = _chapter_progress_signal(
+        outline=state.get("outline") or {},
+        summary_text=summary_text,
+        final_content=final_content,
+        extracted_facts=extracted_facts,
+        review_score=float(state.get("score", 0.0) or 0.0),
+        factual_score=factual_score,
+    )
+    pacing = PacingController.decide(
+        PacingInput(
+            phase_mode=str((state.get("closure_state") or {}).get("phase_mode") or ""),
+            low_progress_streak=int(state.get("low_progress_streak") or 0),
+            progress_signal=progress_signal,
+        )
+    )
+    pacing_mode = pacing.mode
+    next_streak = pacing.low_progress_streak
+    decision_state = dict(state.get("decision_state") or {})
+    decision_state["pacing"] = {
+        "mode": pacing.mode,
+        "low_progress_streak": pacing.low_progress_streak,
+        "progress_signal": round(pacing.progress_signal, 4),
+        "reasons": pacing.reason_codes,
+    }
+    decision_state["quality"] = {
+        "review_score": round(float(state.get("score", 0.0) or 0.0), 4),
+        "factual_score": round(float(factual_score), 4),
+        "language_score": round(float(language_score), 4),
+        "aesthetic_score": round(float(aesthetic_score), 4),
+        "consistency_scorecard": state.get("consistency_scorecard") or {},
+        "review_gate": state.get("review_gate") or {},
+        "quality_passed": bool(
+            state.get("score", 0.0) >= REVIEW_SCORE_THRESHOLD
+            and factual_score >= 0.65
+            and language_score >= 0.6
+            and float(state.get("aesthetic_review_score", 0.0) or 0.0) >= 0.6
+            and aesthetic_score >= 0.6
+        ),
+        "review_suggestions": state.get("review_suggestions") or {},
+    }
     _progress(
         state,
         "chapter_done",
@@ -1146,6 +1747,10 @@ def _node_finalize(state: GenerationState) -> GenerationState:
             "token_usage_input": total_input_tokens,
             "token_usage_output": state["total_output_tokens"],
             "estimated_cost": estimated_cost,
+            "pacing_mode": pacing_mode,
+            "low_progress_streak": next_streak,
+            "progress_signal": round(progress_signal, 4),
+            "decision_state": decision_state,
         },
     )
     factual_score = float(state.get("factual_score", 0.0) or 0.0)
@@ -1178,12 +1783,177 @@ def _node_finalize(state: GenerationState) -> GenerationState:
         "total_input_tokens": total_input_tokens,
         "estimated_cost": estimated_cost,
         "quality_passed": quality_passed,
+        "low_progress_streak": next_streak,
+        "pacing_mode": pacing_mode,
+        "decision_state": decision_state,
         "feedback": fail_reason if fail_reason else state.get("feedback", ""),
     }
 
 
 def _node_advance_chapter(state: GenerationState) -> GenerationState:
     return {"current_chapter": state["current_chapter"] + 1}
+
+
+def _node_closure_gate(state: GenerationState) -> GenerationState:
+    closure_state = _build_closure_state(state)
+    chapter_num = int(state.get("current_chapter") or 1)
+    action = str(closure_state.get("action") or "continue")
+    decision_state = dict(state.get("decision_state") or {})
+    decision_state["closure"] = {
+        "phase_mode": closure_state.get("phase_mode"),
+        "action": closure_state.get("action"),
+        "closure_score": closure_state.get("closure_score"),
+        "must_close_coverage": closure_state.get("must_close_coverage"),
+        "threshold": closure_state.get("closure_threshold"),
+        "unresolved_count": closure_state.get("unresolved_count"),
+        "bridge_budget_left": closure_state.get("bridge_budget_left"),
+        "bridge_budget_total": closure_state.get("bridge_budget_total"),
+        "min_total_chapters": closure_state.get("min_total_chapters"),
+        "max_total_chapters": closure_state.get("max_total_chapters"),
+        "must_close_items": closure_state.get("must_close_items") or [],
+        "tail_rewrite_attempts": closure_state.get("tail_rewrite_attempts"),
+        "reasons": closure_state.get("reason_codes") or [],
+        "confidence": closure_state.get("confidence"),
+    }
+    updates: dict[str, Any] = {"closure_state": closure_state, "decision_state": decision_state}
+    progress_meta = {
+        "current_phase": "closure_gate",
+        "total_chapters": state["num_chapters"],
+        "action": action,
+        "reason_codes": closure_state.get("reason_codes") or [],
+        "remaining_ratio": closure_state.get("remaining_ratio"),
+        "unresolved_count": closure_state.get("unresolved_count"),
+        "decision_state": decision_state,
+    }
+
+    if action == "bridge_chapter":
+        updates["end_chapter"] = int(state["end_chapter"]) + 1
+        updates["num_chapters"] = int(state["num_chapters"]) + 1
+        updates["bridge_attempts"] = int(state.get("bridge_attempts") or 0) + 1
+        progress_meta["total_chapters"] = updates["num_chapters"]
+        _progress(
+            state,
+            "closure_gate",
+            chapter_num,
+            min(96.0, _chapter_progress(state, 0.95)),
+            "收官检查未通过，自动扩展1章进行补完",
+            progress_meta,
+        )
+    elif action in {"finalize", "force_finalize"}:
+        finalized_end = max(int(state.get("start_chapter") or 1), chapter_num - 1)
+        updates["end_chapter"] = finalized_end
+        updates["num_chapters"] = finalized_end - int(state.get("start_chapter") or 1) + 1
+        updates["current_chapter"] = finalized_end + 1
+        progress_meta["total_chapters"] = updates["num_chapters"]
+        _progress(
+            state,
+            "closure_gate",
+            chapter_num,
+            min(97.0, _chapter_progress(state, 0.98)),
+            "收官门禁通过，进入终审",
+            progress_meta,
+        )
+    elif action == "rewrite_tail":
+        _progress(
+            state,
+            "closure_gate",
+            chapter_num,
+            min(96.5, _chapter_progress(state, 0.96)),
+            "收官检查发现未闭环项，准备回退重写尾部章节",
+            progress_meta,
+        )
+    else:
+        _progress(
+            state,
+            "closure_gate",
+            chapter_num,
+            min(95.0, _chapter_progress(state, 0.92)),
+            "收官检查通过，继续写作",
+            progress_meta,
+        )
+
+    if state.get("task_id"):
+        state["checkpoint_store"].save_checkpoint(
+            task_id=state["task_id"],
+            novel_id=state["novel_id"],
+            volume_no=_volume_no_for_chapter(state, max(chapter_num - 1, int(state.get("start_chapter") or 1))),
+            chapter_num=max(chapter_num - 1, int(state.get("start_chapter") or 1)),
+            node="closure_gate",
+            state_json=closure_state,
+        )
+    return updates
+
+
+def _node_tail_rewrite(state: GenerationState) -> GenerationState:
+    start_chapter = int(state.get("start_chapter") or 1)
+    current = int(state.get("current_chapter") or start_chapter)
+    rewind_to = max(start_chapter, current - 2)
+    attempts = int(state.get("tail_rewrite_attempts") or 0) + 1
+    closure_state = state.get("closure_state") or {}
+    _progress(
+        state,
+        "tail_rewrite",
+        rewind_to,
+        min(96.8, _chapter_progress(state, 0.97)),
+        f"进入第{attempts}轮尾章重写（回退到第{rewind_to}章）",
+        {
+            "current_phase": "tail_rewrite",
+            "total_chapters": state["num_chapters"],
+            "rewrite_attempts": attempts,
+            "remaining_ratio": closure_state.get("remaining_ratio"),
+            "unresolved_count": closure_state.get("unresolved_count"),
+        },
+    )
+    if state.get("task_id"):
+        state["checkpoint_store"].save_checkpoint(
+            task_id=state["task_id"],
+            novel_id=state["novel_id"],
+            volume_no=_volume_no_for_chapter(state, rewind_to),
+            chapter_num=rewind_to,
+            node="tail_rewrite",
+            state_json={
+                "rewrite_attempts": attempts,
+                "rewind_to": rewind_to,
+                "closure_state": closure_state,
+            },
+        )
+    return {
+        "current_chapter": rewind_to,
+        "tail_rewrite_attempts": attempts,
+        "decision_state": {
+            **(state.get("decision_state") or {}),
+            "closure": {
+                **((state.get("decision_state") or {}).get("closure") or {}),
+                "action": "continue",
+            },
+        },
+        "closure_state": {**closure_state, "action": "continue"},
+    }
+
+
+def _node_bridge_chapter(state: GenerationState) -> GenerationState:
+    chapter_num = int(state.get("current_chapter") or 1)
+    _progress(
+        state,
+        "bridge_chapter",
+        chapter_num,
+        min(96.2, _chapter_progress(state, 0.95)),
+        "已追加桥接章节预算，继续推进主线收束",
+        {
+            "current_phase": "bridge_chapter",
+            "total_chapters": state["num_chapters"],
+        },
+    )
+    return {
+        "closure_state": {**(state.get("closure_state") or {}), "action": "continue"},
+        "decision_state": {
+            **(state.get("decision_state") or {}),
+            "closure": {
+                **((state.get("decision_state") or {}).get("closure") or {}),
+                "action": "continue",
+            },
+        },
+    }
 
 
 def _node_final_book_review(state: GenerationState) -> GenerationState:
@@ -1279,6 +2049,7 @@ def _build_generation_graph():
                     elapsed,
                 )
                 raise
+        return _wrapped
 
     graph = StateGraph(GenerationState)
     graph.add_node("init", _timed_node("init", _node_init))
@@ -1296,6 +2067,9 @@ def _build_generation_graph():
     graph.add_node("rollback_rerun", _timed_node("rollback_rerun", _node_rollback_rerun))
     graph.add_node("finalizer", _timed_node("finalizer", _node_finalize))
     graph.add_node("advance_chapter", _timed_node("advance_chapter", _node_advance_chapter))
+    graph.add_node("closure_gate", _timed_node("closure_gate", _node_closure_gate))
+    graph.add_node("bridge_chapter", _timed_node("bridge_chapter", _node_bridge_chapter))
+    graph.add_node("tail_rewrite", _timed_node("tail_rewrite", _node_tail_rewrite))
     graph.add_node("final_book_review", _timed_node("final_book_review", _node_final_book_review))
 
     graph.set_entry_point("init")
@@ -1313,7 +2087,10 @@ def _build_generation_graph():
     graph.add_edge("revise", "writer")
     graph.add_edge("rollback_rerun", "writer")
     graph.add_conditional_edges("finalizer", _route_finalize, {"rollback_rerun": "rollback_rerun", "advance_chapter": "advance_chapter"})
-    graph.add_conditional_edges("advance_chapter", _route_after_advance, {"volume_replan": "volume_replan", "load_context": "load_context", "final_book_review": "final_book_review"})
+    graph.add_edge("advance_chapter", "closure_gate")
+    graph.add_conditional_edges("closure_gate", _route_after_closure_gate, {"volume_replan": "volume_replan", "load_context": "load_context", "bridge_chapter": "bridge_chapter", "tail_rewrite": "tail_rewrite", "final_book_review": "final_book_review"})
+    graph.add_conditional_edges("bridge_chapter", _route_after_tail_rewrite, {"volume_replan": "volume_replan", "load_context": "load_context", "final_book_review": "final_book_review"})
+    graph.add_conditional_edges("tail_rewrite", _route_after_tail_rewrite, {"volume_replan": "volume_replan", "load_context": "load_context", "final_book_review": "final_book_review"})
     graph.add_edge("final_book_review", END)
     return graph.compile()
 

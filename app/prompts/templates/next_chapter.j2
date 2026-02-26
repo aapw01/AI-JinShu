@@ -22,6 +22,38 @@ Write chapter {{ chapter_num }} of the novel.
 {{ context.consistency_warnings }}
 {% endif %}
 
+{% if context.prompt_contract %}
+## Prompt Contract（结构化写作契约）
+### NarrativeIntent
+{{ context.prompt_contract.NarrativeIntent | default({}) }}
+
+### ClosureIntent
+{{ context.prompt_contract.ClosureIntent | default({}) }}
+
+### PacingIntent
+{{ context.prompt_contract.PacingIntent | default({}) }}
+
+### HardConstraints
+{{ context.prompt_contract.HardConstraints | default({}) }}
+{% endif %}
+
+{% if context.closure_state and context.closure_state.phase_mode %}
+## 收官约束（Closure Guardrails）
+- 当前阶段: {{ context.closure_state.phase_mode }}
+- 门禁动作: {{ context.closure_state.action | default('continue') }}
+- 闭环覆盖率: {{ context.closure_state.must_close_coverage | default(0) }}
+- 未闭环数量: {{ context.closure_state.unresolved_count | default(0) }}
+{% if context.closure_state.bridge_budget_left is defined %}
+- 桥接章剩余额度: {{ context.closure_state.bridge_budget_left }}
+{% endif %}
+{% if context.closure_state.must_close_items and context.closure_state.must_close_items|length > 0 %}
+- 本章优先处理（最多3项）:
+{% for item in context.closure_state.must_close_items[:3] %}
+  - {{ item.type | default('item') }}: {{ item.title | default(item.id | default('unknown')) }}
+{% endfor %}
+{% endif %}
+{% endif %}
+
 ---
 
 ## 本章大纲
@@ -54,5 +86,9 @@ Write chapter {{ chapter_num }} of the novel.
 - 非结尾章必须有章末悬念/钩子
 - 遵循长篇节奏: 每3-5章小高潮，每10-15章中高潮
 - 所有角色行为必须与 Global Bible 和 Thread Ledger 一致
+{% if context.closure_state and context.closure_state.phase_mode in ['closing', 'finale'] %}
+- 收官阶段禁止新增无回收价值的新主线；优先回收高优先级伏笔与主线冲突
+- 若本章仍非终章，必须制造可在1-2章内兑现的收束钩子，不可发散
+{% endif %}
 
 用 {{ language or 'zh' }} 输出完整章节正文，严格遵循母语写作风格。

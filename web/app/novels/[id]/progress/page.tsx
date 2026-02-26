@@ -5,7 +5,7 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { motion } from "framer-motion";
 import { ArrowLeft, CheckCircle2, LoaderCircle, XCircle } from "lucide-react";
-import { api, Novel, GenerationStatus, ObservabilityPayload, VolumeGateReport } from "@/lib/api";
+import { api, Novel, GenerationStatus, ObservabilityPayload, VolumeGateReport, ClosureReport } from "@/lib/api";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { SectionTitle } from "@/components/ui/SectionTitle";
@@ -33,6 +33,9 @@ const STEP_ALIASES: Record<string, string> = {
   chapter_review: "reviewer",
   chapter_finalizing: "finalizer",
   memory_update: "finalizer",
+  closure_gate: "finalizer",
+  bridge_chapter: "finalizer",
+  tail_rewrite: "finalizer",
 };
 
 const SUBTASK_LABELS: Record<string, string> = {
@@ -44,6 +47,9 @@ const SUBTASK_LABELS: Record<string, string> = {
   full_outline_ready: "全书大纲已完成",
   outline_waiting_confirmation: "等待大纲确认",
   volume_replan: "分卷策略重规划",
+  closure_gate: "收官完整性检查",
+  bridge_chapter: "追加桥接章节",
+  tail_rewrite: "尾章重写补完",
   context: "加载上下文",
   consistency: "一致性检查",
   chapter_blocked: "一致性未通过（跳过）",
@@ -59,6 +65,21 @@ const SUBTASK_LABELS: Record<string, string> = {
   done: "全书完成",
 };
 
+const CLOSURE_PHASE_LABELS: Record<string, string> = {
+  expand: "展开期",
+  converge: "聚合期",
+  closing: "收官期",
+  finale: "终章期",
+};
+
+const CLOSURE_ACTION_LABELS: Record<string, string> = {
+  continue: "继续写作",
+  bridge_chapter: "自动扩1章补完",
+  rewrite_tail: "尾章重写补完",
+  finalize: "进入终审",
+  force_finalize: "强制终审",
+};
+
 export default function ProgressPage() {
   const params = useParams();
   const router = useRouter();
@@ -70,7 +91,9 @@ export default function ProgressPage() {
   const [status, setStatus] = useState<GenerationStatus | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
+  const [retrying, setRetrying] = useState(false);
   const [gateReport, setGateReport] = useState<VolumeGateReport | null>(null);
+  const [closureReport, setClosureReport] = useState<ClosureReport | null>(null);
   const [observability, setObservability] = useState<ObservabilityPayload | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
@@ -103,6 +126,13 @@ export default function ProgressPage() {
   }, [id, status?.volume_no]);
 
   useEffect(() => {
+    const loadClosure = () => api.getClosureReport(id, taskId || undefined).then(setClosureReport).catch(() => undefined);
+    loadClosure();
+    const timer = setInterval(loadClosure, 5000);
+    return () => clearInterval(timer);
+  }, [id, taskId]);
+
+  useEffect(() => {
     const timer = setInterval(() => {
       api.getObservability(id).then(setObservability).catch(() => undefined);
     }, 5000);
@@ -123,9 +153,9 @@ export default function ProgressPage() {
           const data = JSON.parse(event.data);
           if (data && typeof data === "object" && "status" in data) {
             // Backward compatibility: older backend sent raw status payload.
-            setStatus(data as GenerationStatus);
+            setStatus((prev) => ({ ...(prev || {}), ...(data as GenerationStatus) }));
           } else if (data.type === "status") {
-            setStatus(data.payload);
+            setStatus((prev) => ({ ...(prev || {}), ...(data.payload as GenerationStatus) }));
           } else if (data.type === "log") {
             setLogs((prev) => [...prev, data.payload]);
           }
@@ -185,7 +215,12 @@ export default function ProgressPage() {
   const isFailed = status?.status === "failed";
   const isAwaitingOutline = status?.status === "awaiting_outline_confirmation";
   const isRunning = status?.status === "generating" || status?.status === "running";
-  const activeSubtaskLabel = status?.subtask_label || (status?.step ? SUBTASK_LABELS[status.step] || status.step : "");
+  const activeSubtaskLabel =
+    status?.current_subtask?.label ||
+    status?.subtask_label ||
+    (status?.step ? SUBTASK_LABELS[status.step] || status.step : "");
+  const closureState = status?.decision_state?.closure || closureReport?.state;
+  const pacingState = status?.decision_state?.pacing;
 
   return (
     <main className="min-h-screen">
@@ -225,10 +260,26 @@ export default function ProgressPage() {
             <div className="w-10 h-10 rounded-full bg-white flex items-center justify-center">
               <XCircle className="w-5 h-5 text-[#C4372D]" />
             </div>
-            <div>
+            <div className="flex-1">
               <p className="font-medium text-[#C4372D]">生成失败</p>
               <p className="text-sm text-[#C4372D]">{status?.error || "发生未知错误"}</p>
             </div>
+            <Button
+              loading={retrying}
+              onClick={async () => {
+                try {
+                  setRetrying(true);
+                  const res = await api.retryGeneration(id, taskId || undefined);
+                  router.replace(`/novels/${id}/progress?task_id=${res.task_id}`);
+                } catch (e) {
+                  setLogs((prev) => [...prev, "重试提交失败，请稍后重试"]);
+                } finally {
+                  setRetrying(false);
+                }
+              }}
+            >
+              失败重试
+            </Button>
           </div>
         )}
 
@@ -258,10 +309,18 @@ export default function ProgressPage() {
               正在生成第 {status.current_chapter} / {status.total_chapters} 章
             </p>
           )}
+          {isRunning && status?.eta_label ? (
+            <p className="text-xs text-[#7E756D] mt-1">预计剩余时间：{status.eta_label}</p>
+          ) : null}
           <p className="text-xs text-[#7E756D] mt-2">
             估算 Token：输入 {status?.token_usage_input || 0} / 输出 {status?.token_usage_output || 0}，预估费用 $
             {(status?.estimated_cost || 0).toFixed(4)}
           </p>
+          {status?.pacing_mode === "accelerated" || status?.pacing_mode === "closing_accelerated" ? (
+            <p className="text-xs text-[#C8211B] mt-1">
+              已启用自动节奏加速（连续低推进 {status?.low_progress_streak || 0} 章，信号 {Math.round((status?.progress_signal || 0) * 100)}%，原因 {(pacingState?.reasons || []).join(" / ") || "low_progress_streak"}）
+            </p>
+          ) : null}
           {isAwaitingOutline && taskId && (
             <div className="mt-4">
               <Button
@@ -300,6 +359,61 @@ export default function ProgressPage() {
             hint={`$${(status?.estimated_cost || 0).toFixed(4)}`}
           />
         </div>
+
+        {(closureReport?.available || status?.decision_state?.closure) && closureState ? (
+          <Card className="p-5">
+            <SectionTitle
+              title="收官状态"
+              subtitle={`阶段：${CLOSURE_PHASE_LABELS[closureState.phase_mode || ""] || closureState.phase_mode || "-"} · 动作：${CLOSURE_ACTION_LABELS[closureState.action || ""] || closureState.action || "-"}${closureState.confidence ? ` · 置信度 ${Math.round(closureState.confidence * 100)}%` : ""}`}
+            />
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3">
+              <StatsCard label="未闭环项" value={`${closureState.unresolved_count || 0}`} hint="must close" />
+              <StatsCard
+                label="收官分"
+                value={`${Math.round((closureState.closure_score || 0) * 100)}%`}
+                hint="closure score"
+              />
+              <StatsCard
+                label="闭环覆盖率"
+                value={`${Math.round((closureState.must_close_coverage || 0) * 100)}%`}
+                hint={`阈值 ${Math.round(((closureState.closure_threshold || closureState.threshold || 0) as number) * 100)}%`}
+              />
+              <StatsCard
+                label="章节弹性"
+                value={`${closureState.min_total_chapters || 0} ~ ${closureState.max_total_chapters || 0}`}
+                hint="允许范围"
+              />
+              <StatsCard
+                label="桥接预算"
+                value={`${closureState.bridge_budget_left || 0} / ${closureState.bridge_budget_total || 0}`}
+                hint="剩余/总额度"
+              />
+              <StatsCard
+                label="尾章重写"
+                value={`${closureState.tail_rewrite_attempts || 0}`}
+                hint="rewrite attempts"
+              />
+            </div>
+            {(closureState.must_close_items || []).length > 0 ? (
+              <div className="mt-3 rounded-[10px] border border-[#E4DFDA] bg-white px-3 py-2">
+                <p className="text-xs text-[#8E8379] mb-1">当前优先回收项（Top 3）</p>
+                <div className="space-y-1">
+                  {(closureState.must_close_items || []).slice(0, 3).map((item, idx) => (
+                    <p key={`${item.id || idx}`} className="text-sm text-[#5E5650] line-clamp-1">
+                      {idx + 1}. {item.title || item.id || "未命名项"}
+                    </p>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            {(closureState.reasons || []).length > 0 ? (
+              <p className="text-xs text-[#8E8379] mt-3">决策原因：{(closureState.reasons || []).join(" / ")}</p>
+            ) : null}
+          </Card>
+        ) : null}
+        {!closureReport?.available && isRunning ? (
+          <p className="text-xs text-[#8E8379]">收官状态准备中，生成进入中后段后会展示收官门禁数据。</p>
+        ) : null}
 
         {gateReport && (
           <Card className="p-6">

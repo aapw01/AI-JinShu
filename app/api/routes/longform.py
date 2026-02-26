@@ -1,4 +1,6 @@
 """Long-form generation support routes."""
+from collections import defaultdict
+
 from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
@@ -6,6 +8,10 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db, resolve_novel
 from app.core.time_utils import to_utc_iso_z
 from app.models.novel import QualityReport, GenerationCheckpoint, Chapter, StorySnapshot, NovelFeedback
+from app.services.generation.evaluation_metrics import (
+    compute_abrupt_ending_risk,
+    compute_closure_action_metrics,
+)
 
 router = APIRouter()
 
@@ -185,6 +191,44 @@ def get_volume_gate_report(
     }
 
 
+@router.get("/{novel_id}/closure-report")
+def get_closure_report(
+    novel_id: str,
+    task_id: str | None = None,
+    db: Session = Depends(get_db),
+):
+    """Return latest closure-gate state for ending completeness tracking."""
+    novel = resolve_novel(db, novel_id)
+    if not novel:
+        raise HTTPException(404, "Novel not found")
+
+    stmt = select(GenerationCheckpoint).where(
+        GenerationCheckpoint.novel_id == novel.id,
+        GenerationCheckpoint.node == "closure_gate",
+    )
+    if task_id:
+        stmt = stmt.where(GenerationCheckpoint.task_id == task_id)
+    stmt = stmt.order_by(GenerationCheckpoint.id.desc())
+    cp = db.execute(stmt).scalars().first()
+    if not cp:
+        return {
+            "novel_id": novel.uuid or str(novel.id),
+            "task_id": task_id,
+            "available": False,
+            "message": "closure report not available yet",
+            "state": {},
+        }
+    return {
+        "novel_id": novel.uuid or str(novel.id),
+        "task_id": cp.task_id,
+        "available": True,
+        "chapter_num": cp.chapter_num,
+        "volume_no": cp.volume_no,
+        "state": cp.state_json or {},
+        "created_at": to_utc_iso_z(cp.created_at),
+    }
+
+
 @router.get("/{novel_id}/feedback")
 def list_feedback(
     novel_id: str,
@@ -300,12 +344,116 @@ def get_observability(
             QualityReport.verdict.in_(("warning", "fail")),
         )
     ).scalar_one()
+    closure_rows_asc = (
+        db.execute(
+            select(GenerationCheckpoint)
+            .where(
+                GenerationCheckpoint.novel_id == novel.id,
+                GenerationCheckpoint.node == "closure_gate",
+            )
+            .order_by(GenerationCheckpoint.id.asc())
+        )
+        .scalars()
+        .all()
+    )
+    closure_actions = [str((r.state_json or {}).get("action") or "") for r in closure_rows_asc]
+    closure_metrics = compute_closure_action_metrics(closure_actions)
+    latest_closure_state = (closure_rows_asc[-1].state_json or {}) if closure_rows_asc else {}
+    tail_chapters = (
+        db.execute(
+            select(Chapter.content)
+            .where(Chapter.novel_id == novel.id)
+            .order_by(Chapter.chapter_num.desc())
+            .limit(3)
+        )
+        .scalars()
+        .all()
+    )
+    abrupt = compute_abrupt_ending_risk(latest_closure_state, tail_chapters)
+
+    node_counts: dict[str, int] = defaultdict(int)
+    node_duration_samples: dict[str, list[float]] = defaultdict(list)
+    reason_code_counts: dict[str, int] = defaultdict(int)
+    task_rows: dict[str, list[GenerationCheckpoint]] = defaultdict(list)
+    for row in checkpoint_rows:
+        node_counts[str(row.node)] += 1
+        task_rows[str(row.task_id or "unknown")].append(row)
+        state = row.state_json or {}
+        if row.node == "closure_gate":
+            for code in (state.get("reason_codes") or []):
+                code_str = str(code).strip()
+                if code_str:
+                    reason_code_counts[code_str] += 1
+        if row.node in {"chapter_done", "consistency_blocked"}:
+            consistency = state.get("consistency_scorecard") or {}
+            for code in (consistency.get("reason_codes") or []):
+                code_str = str(code).strip()
+                if code_str:
+                    reason_code_counts[f"consistency:{code_str}"] += 1
+
+    for _, rows in task_rows.items():
+        rows_sorted = sorted(rows, key=lambda x: (x.created_at, x.id))
+        for i in range(1, len(rows_sorted)):
+            prev = rows_sorted[i - 1]
+            cur = rows_sorted[i]
+            delta = (cur.created_at - prev.created_at).total_seconds()
+            if delta < 0:
+                continue
+            node_duration_samples[str(cur.node)].append(delta)
+
+    node_latency_seconds: dict[str, dict[str, float | int]] = {}
+    for node, samples in node_duration_samples.items():
+        if not samples:
+            continue
+        samples_sorted = sorted(samples)
+        p50 = samples_sorted[len(samples_sorted) // 2]
+        p95 = samples_sorted[min(len(samples_sorted) - 1, int(len(samples_sorted) * 0.95))]
+        node_latency_seconds[node] = {
+            "samples": len(samples_sorted),
+            "p50": round(float(p50), 3),
+            "p95": round(float(p95), 3),
+            "max": round(float(samples_sorted[-1]), 3),
+        }
+
+    chapter_quality_rows = [r for r in quality_rows if r.scope == "chapter"]
+    hard_violation_chapters = 0
+    soft_warning_chapters = 0
+    over_correction_risk_chapters = 0
+    review_gate_accept_minor = 0
+    for row in chapter_quality_rows:
+        metrics = row.metrics_json or {}
+        consistency = metrics.get("consistency_scorecard") or {}
+        blockers = int(consistency.get("blockers") or 0)
+        warnings = int(consistency.get("warnings") or 0)
+        if blockers > 0:
+            hard_violation_chapters += 1
+        if warnings > 0:
+            soft_warning_chapters += 1
+        gate = metrics.get("review_gate") or {}
+        if bool(gate.get("over_correction_risk")):
+            over_correction_risk_chapters += 1
+        if str(gate.get("decision") or "") == "accept_with_minor_polish":
+            review_gate_accept_minor += 1
+    chapter_count = max(1, len(chapter_quality_rows))
+
     return {
         "summary": {
             "quality_reports": int(total_quality_reports or 0),
             "checkpoints": int(total_checkpoints or 0),
             "feedback_count": int(total_feedback or 0),
             "warning_or_fail_volumes": int(total_warning_or_fail_volumes or 0),
+            "closure_action_distribution": closure_metrics.get("distribution") or {},
+            "closure_action_oscillation_rate": float(closure_metrics.get("oscillation_rate") or 0.0),
+            "abrupt_ending_score": float(abrupt.get("score") or 0.0),
+            "abrupt_ending_risk": bool(abrupt.get("is_abrupt")),
+            "abrupt_ending_reasons": abrupt.get("reasons") or [],
+            "node_counts": dict(node_counts),
+            "node_latency_seconds": node_latency_seconds,
+            "reason_code_distribution": dict(reason_code_counts),
+            "hard_constraint_violation_rate": round(hard_violation_chapters / chapter_count, 4),
+            "soft_constraint_warning_rate": round(soft_warning_chapters / chapter_count, 4),
+            "review_over_correction_risk_rate": round(over_correction_risk_chapters / chapter_count, 4),
+            "review_accept_minor_polish_rate": round(review_gate_accept_minor / chapter_count, 4),
         },
         "quality_reports": [
             {

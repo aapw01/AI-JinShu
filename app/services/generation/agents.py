@@ -142,6 +142,24 @@ class ReviewSchema(BaseModel):
     feedback: str = ""
 
 
+class ReviewIssueSchema(BaseModel):
+    category: str = ""
+    severity: str = "should_fix"
+    claim: str = ""
+    evidence: str = ""
+    confidence: float = 0.6
+
+
+class ReviewScorecardSchema(BaseModel):
+    score: float = 0.8
+    confidence: float = 0.75
+    feedback: str = ""
+    positives: list[str] = []
+    must_fix: list[ReviewIssueSchema] = []
+    should_fix: list[ReviewIssueSchema] = []
+    risks: list[str] = []
+
+
 class FactualReviewSchema(BaseModel):
     score: float = 0.8
     feedback: str = ""
@@ -392,6 +410,50 @@ class WriterAgent:
 class ReviewerAgent:
     """Review draft and return score + feedback."""
 
+    def run_structured(
+        self,
+        draft: str,
+        chapter_num: int = 0,
+        language: str = "zh",
+        native_style_profile: str = "",
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> dict[str, Any]:
+        llm = get_llm_with_fallback(provider, model)
+        prompt = (
+            "你是小说章节评审器。必须严格输出JSON评分卡，不允许输出额外文本。\n"
+            f"章节: 第{chapter_num}章 语言: {language} 风格: {native_style_profile or '默认'}\n"
+            "评分要求:\n"
+            "- score: 0~1 总分\n"
+            "- confidence: 0~1 评审置信度\n"
+            "- must_fix: 仅保留“有文本证据且影响主线/逻辑”的问题，最多3条\n"
+            "- should_fix: 次要问题，最多3条\n"
+            "- 每条问题必须包含 category/severity/claim/evidence/confidence\n"
+            "- evidence 必须引用正文短句（<=40字）\n"
+            "- 不得臆造上下文，不确定时降低confidence并写入risks\n\n"
+            f"正文:\n{draft[:7000]}"
+        )
+        try:
+            result = _invoke_json_with_schema(llm, prompt, ReviewScorecardSchema)
+            score = float(result.get("score", 0.8))
+            if score > 1:
+                score = score / 100 if score <= 100 else 0.8
+            result["score"] = max(0.0, min(1.0, score))
+            conf = float(result.get("confidence", 0.75))
+            result["confidence"] = max(0.0, min(1.0, conf))
+            return result
+        except Exception as e:
+            logger.error(f"ReviewerAgent structured review failed: {e}")
+            return {
+                "score": 0.75,
+                "confidence": 0.5,
+                "feedback": "结构化审校降级：返回基础结果",
+                "positives": [],
+                "must_fix": [],
+                "should_fix": [],
+                "risks": ["structured_review_failed"],
+            }
+
     def run(
         self,
         draft: str,
@@ -401,21 +463,17 @@ class ReviewerAgent:
         provider: str | None = None,
         model: str | None = None,
     ) -> tuple[float, str]:
-        llm = get_llm_with_fallback(provider, model)
-        prompt = render_prompt(
-            "chapter_review",
-            draft=draft,
-            chapter_num=chapter_num,
-            language=language,
-            native_style_profile=native_style_profile,
-        )
         try:
-            result = _invoke_json_with_schema(llm, prompt, ReviewSchema)
+            result = self.run_structured(
+                draft=draft,
+                chapter_num=chapter_num,
+                language=language,
+                native_style_profile=native_style_profile,
+                provider=provider,
+                model=model,
+            )
             score = float(result.get("score", 0.8))
-            feedback = result.get("feedback", "")
-            # Normalize score to 0-1 range
-            if score > 1:
-                score = score / 100 if score <= 100 else 0.8
+            feedback = str(result.get("feedback", ""))
             logger.info(f"ReviewerAgent completed, score: {score}")
             return score, feedback
         except Exception as e:
@@ -431,24 +489,51 @@ class ReviewerAgent:
         provider: str | None = None,
         model: str | None = None,
     ) -> tuple[float, str, list[str]]:
+        result = self.run_factual_structured(draft, chapter_num, context, language, provider, model)
+        return (
+            float(result.get("score", 0.75)),
+            str(result.get("feedback", "")),
+            [str(x) for x in (result.get("contradictions") or [])][:20],
+        )
+
+    def run_factual_structured(
+        self,
+        draft: str,
+        chapter_num: int,
+        context: dict,
+        language: str = "zh",
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> dict[str, Any]:
         llm = get_llm_with_fallback(provider, model)
         prompt = (
             f"你是事实一致性审稿器。请检查第{chapter_num}章正文是否与上下文冲突。\n"
             f"上下文要点:\n{json.dumps(context, ensure_ascii=False)[:3000]}\n\n"
             f"正文:\n{draft[:6000]}\n\n"
-            "返回JSON字段: score(0-1), feedback(字符串), contradictions(字符串数组)。"
+            "输出要求：返回JSON字段 score(0-1), feedback, contradictions, must_fix(问题数组), should_fix(问题数组), risks(数组), confidence(0-1)。"
+            "问题数组每项包含 category/severity/claim/evidence/confidence；evidence必须引用正文原句。"
         )
         try:
-            result = _invoke_json_with_schema(llm, prompt, FactualReviewSchema)
+            result = _invoke_json_with_schema(llm, prompt, ReviewScorecardSchema)
             score = float(result.get("score", 0.8))
             if score > 1:
                 score = score / 100 if score <= 100 else 0.8
-            feedback = str(result.get("feedback", ""))
-            contradictions = [str(x) for x in (result.get("contradictions") or [])][:20]
-            return score, feedback, contradictions
+            result["score"] = max(0.0, min(1.0, score))
+            result["confidence"] = max(0.0, min(1.0, float(result.get("confidence", 0.75) or 0.75)))
+            contradictions = [str(x.get("claim") or "") for x in (result.get("must_fix") or []) if isinstance(x, dict)]
+            result["contradictions"] = [x for x in contradictions if x][:20]
+            return result
         except Exception as e:
             logger.error(f"ReviewerAgent factual review failed: {e}")
-            return 0.75, "事实审校降级：未检测到显著冲突", []
+            return {
+                "score": 0.75,
+                "confidence": 0.5,
+                "feedback": "事实审校降级：未检测到显著冲突",
+                "contradictions": [],
+                "must_fix": [],
+                "should_fix": [],
+                "risks": ["factual_review_failed"],
+            }
 
     def run_aesthetic(
         self,
@@ -458,23 +543,49 @@ class ReviewerAgent:
         provider: str | None = None,
         model: str | None = None,
     ) -> tuple[float, str, list[str]]:
+        result = self.run_aesthetic_structured(draft, chapter_num, language, provider, model)
+        return (
+            float(result.get("score", 0.75)),
+            str(result.get("feedback", "")),
+            [str(x) for x in (result.get("highlights") or [])][:20],
+        )
+
+    def run_aesthetic_structured(
+        self,
+        draft: str,
+        chapter_num: int,
+        language: str = "zh",
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> dict[str, Any]:
         llm = get_llm_with_fallback(provider, model)
         prompt = (
             f"你是网文节奏与审美审稿器。请评估第{chapter_num}章可读性、爽点兑现、情绪张力。\n"
             f"正文:\n{draft[:6000]}\n\n"
-            "返回JSON字段: score(0-1), feedback(字符串), highlights(字符串数组)。"
+            "输出要求：返回JSON字段 score(0-1), feedback, highlights(数组), must_fix(问题数组), should_fix(问题数组), risks(数组), confidence(0-1)。"
+            "问题数组每项包含 category/severity/claim/evidence/confidence；evidence必须引用正文原句。"
         )
         try:
-            result = _invoke_json_with_schema(llm, prompt, AestheticReviewSchema)
+            result = _invoke_json_with_schema(llm, prompt, ReviewScorecardSchema)
             score = float(result.get("score", 0.8))
             if score > 1:
                 score = score / 100 if score <= 100 else 0.8
-            feedback = str(result.get("feedback", ""))
-            highlights = [str(x) for x in (result.get("highlights") or [])][:20]
-            return score, feedback, highlights
+            result["score"] = max(0.0, min(1.0, score))
+            result["confidence"] = max(0.0, min(1.0, float(result.get("confidence", 0.75) or 0.75)))
+            highlights = [str(x) for x in (result.get("positives") or [])]
+            result["highlights"] = [x for x in highlights if x][:20]
+            return result
         except Exception as e:
             logger.error(f"ReviewerAgent aesthetic review failed: {e}")
-            return 0.75, "审美审校降级：节奏基本可用", []
+            return {
+                "score": 0.75,
+                "confidence": 0.5,
+                "feedback": "审美审校降级：节奏基本可用",
+                "highlights": [],
+                "must_fix": [],
+                "should_fix": [],
+                "risks": ["aesthetic_review_failed"],
+            }
 
 
 class FinalizerAgent:

@@ -76,9 +76,12 @@ const DEFAULT_AUDIENCES = [
 ];
 
 const METHODS = [
-  { value: "three_act", label: "三幕式结构" },
-  { value: "hero_journey", label: "英雄之旅" },
-  { value: "free", label: "自由发挥" },
+  { value: "three_act", label: "三幕式（起承转决战）" },
+  { value: "hero_journey", label: "英雄之旅（召唤试炼归来）" },
+  { value: "qichengzhuanhe", label: "起承转合（东方四段递进）" },
+  { value: "dual_line", label: "双线并行（主线副线交叉）" },
+  { value: "mystery_puzzle", label: "悬疑拼图（线索逐章揭示）" },
+  { value: "free", label: "自由发挥（AI自适应结构）" },
 ];
 
 interface FormData {
@@ -106,6 +109,8 @@ export default function Home() {
   const [step, setStep] = useState(1);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [ideaGenerating, setIdeaGenerating] = useState(false);
+  const [ideaError, setIdeaError] = useState<string | null>(null);
 
   const [novels, setNovels] = useState<Novel[]>([]);
   const [novelsLoading, setNovelsLoading] = useState(true);
@@ -274,6 +279,29 @@ export default function Home() {
     }
   };
 
+  const handleGenerateIdea = async () => {
+    const title = form.title.trim();
+    if (!title || ideaGenerating) return;
+    setIdeaGenerating(true);
+    setIdeaError(null);
+    try {
+      const result = await api.generateIdeaFramework({
+        title,
+        genre: form.genre || undefined,
+        style: form.style || undefined,
+        strategy: selectedStyle?.strategy || "web-novel",
+      });
+      setForm((prev) => ({
+        ...prev,
+        idea: result.editable_framework || result.one_liner,
+      }));
+    } catch (err) {
+      setIdeaError(err instanceof Error ? err.message : "AI 创意生成失败");
+    } finally {
+      setIdeaGenerating(false);
+    }
+  };
+
   const handleSubmit = async () => {
     try {
       setSubmitting(true);
@@ -343,23 +371,39 @@ export default function Home() {
                   {step === 1 && (
                     <div className="space-y-3">
                       <p className="text-sm font-medium text-[#A52A25]">1. 作品标题与一句话创意</p>
-                      <Input
-                        label="作品标题"
-                        placeholder="给你的故事起一个名字..."
-                        value={form.title}
-                        onChange={(e) => setForm((prev) => ({ ...prev, title: e.target.value }))}
-                      />
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <label className="block text-sm font-medium text-[#3A3A3C]">作品标题</label>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="secondary"
+                            className="h-8 px-3"
+                            onClick={handleGenerateIdea}
+                            loading={ideaGenerating}
+                            disabled={!form.title.trim() || ideaGenerating}
+                          >
+                            <WandSparkles className="w-3.5 h-3.5 mr-1" />
+                            AI 生成创意框架
+                          </Button>
+                        </div>
+                        <Input
+                          placeholder="给你的故事起一个名字..."
+                          value={form.title}
+                          onChange={(e) => setForm((prev) => ({ ...prev, title: e.target.value }))}
+                        />
+                      </div>
                       <Textarea
                         label="一句话创意"
                         placeholder="例如：星际移民飞船上，AI 宣布自己拥有了情感..."
                         rows={2}
                         className="min-h-[96px]"
-                        maxLength={200}
+                        maxLength={600}
                         value={form.idea}
                         onChange={(e) => setForm((prev) => ({ ...prev, idea: e.target.value }))}
                       />
                       <div className="flex items-center justify-between text-xs">
-                        <span className="text-[#8E8379]">{form.idea.length}/200</span>
+                        <span className="text-[#8E8379]">{form.idea.length}/600</span>
                         {form.idea.trim().length >= 8 ? (
                           <span className="inline-flex items-center gap-1.5 text-[#A52A25]">
                             <WandSparkles className="w-3.5 h-3.5" />
@@ -367,6 +411,7 @@ export default function Home() {
                           </span>
                         ) : null}
                       </div>
+                      {ideaError ? <p className="text-xs text-[#B22F2A]">{ideaError}</p> : null}
                     </div>
                   )}
 

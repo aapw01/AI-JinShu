@@ -157,6 +157,54 @@ def _check_hard_constraints(
         )
 
 
+def _check_entity_hard_constraints(
+    report: ConsistencyReport,
+    outline: dict,
+    context: dict,
+    chapter_num: int,
+) -> None:
+    """Generic entity hard-constraint validation from constraint registry."""
+    constraints = context.get("hard_constraints") or {}
+    registry = constraints.get("entity_hard_constraints") or []
+    if not isinstance(registry, list) or not registry:
+        return
+    outline_text = (outline.get("outline") or "") + (outline.get("title") or "") + (outline.get("summary") or "")
+    for item in registry[:60]:
+        if not isinstance(item, dict):
+            continue
+        entity = str(item.get("entity") or "").strip()
+        if not entity:
+            continue
+        if entity not in outline_text:
+            continue
+        ctype = str(item.get("constraint_type") or "").strip()
+        if ctype == "forbidden_presence":
+            report.issues.append(
+                ConsistencyIssue(
+                    "blocker",
+                    "character",
+                    f"硬约束冲突：角色「{entity}」不应在本章正常出场",
+                    chapter_num,
+                )
+            )
+            continue
+        forbidden_patterns = item.get("forbidden_patterns") or []
+        if not isinstance(forbidden_patterns, list):
+            continue
+        for pattern in forbidden_patterns[:12]:
+            token = str(pattern).strip()
+            if token and token in outline_text:
+                report.issues.append(
+                    ConsistencyIssue(
+                        "blocker",
+                        "character",
+                        f"硬约束冲突：角色「{entity}」触发限制动作「{token}」",
+                        chapter_num,
+                    )
+                )
+                break
+
+
 def _check_foreshadowing_continuity(
     report: ConsistencyReport,
     outline: dict,
@@ -345,6 +393,7 @@ def check_consistency(
 
     _check_character_existence(report, outline, prewrite, context, chapter_num)
     _check_hard_constraints(report, outline, context, chapter_num)
+    _check_entity_hard_constraints(report, outline, context, chapter_num)
     _check_foreshadowing_continuity(report, outline, context, prewrite, novel_id, chapter_num)
     _check_outline_dependency(report, context, chapter_num)
     _check_duplicate_content(report, novel_id, chapter_num)
