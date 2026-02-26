@@ -86,6 +86,8 @@ def test_generation_status_extended_fields(client):
     assert "total_chapters" in body
     assert "estimated_cost" in body
     assert "current_phase" in body
+    assert "current_subtask" in body
+    assert "decision_state" in body
 
 
 def test_longform_quality_and_checkpoints_endpoints(client):
@@ -180,3 +182,5 @@ def test_observability_endpoint(client):
     assert "summary" in data
     assert "quality_reports" in data
     assert "checkpoints" in data
+    assert "closure_action_oscillation_rate" in data["summary"]
+    assert "abrupt_ending_risk" in data["summary"]

@@ -34,6 +34,9 @@ SUBTASK_LABELS: dict[str, str] = {
     "full_outline_ready": "全书大纲已完成",
     "outline_waiting_confirmation": "等待大纲确认",
     "volume_replan": "分卷策略重规划",
+    "closure_gate": "收官完整性检查",
+    "bridge_chapter": "追加桥接章节",
+    "tail_rewrite": "尾章重写补完",
     "context": "加载上下文",
     "consistency": "一致性检查",
     "chapter_blocked": "一致性未通过（跳过）",
@@ -58,6 +61,14 @@ def _with_subtask(payload: dict[str, Any]) -> dict[str, Any]:
     merged.setdefault("subtask_key", step)
     merged.setdefault("subtask_label", SUBTASK_LABELS.get(step, step))
     merged.setdefault("subtask_progress", float(payload.get("progress") or 0.0))
+    merged.setdefault(
+        "current_subtask",
+        {
+            "key": merged.get("subtask_key"),
+            "label": merged.get("subtask_label"),
+            "progress": merged.get("subtask_progress"),
+        },
+    )
     return merged
 
 
@@ -162,6 +173,11 @@ def _run_volume_generation(
             "status": meta.get("status", "running"),
             "step": step,
             "current_phase": meta.get("current_phase", step),
+            "current_subtask": {
+                "key": step,
+                "label": SUBTASK_LABELS.get(step, step),
+                "progress": round(global_pct, 2),
+            },
             "current_chapter": chapter,
             "total_chapters": total_chapters,
             "progress": round(global_pct, 2),
@@ -171,6 +187,10 @@ def _run_volume_generation(
             "volume_no": volume_no,
             "volume_size": volume_size,
             "message": msg,
+            "pacing_mode": meta.get("pacing_mode"),
+            "low_progress_streak": meta.get("low_progress_streak"),
+            "progress_signal": meta.get("progress_signal"),
+            "decision_state": meta.get("decision_state"),
         }
         _set_status(r, key, novel_key, payload)
 
@@ -241,6 +261,7 @@ def submit_book_generation_task(self, novel_id: str, num_chapters: int, start_ch
             "status": "running",
             "step": "book_orchestrator",
             "current_phase": "book_planning",
+            "current_subtask": {"key": "book_planning", "label": SUBTASK_LABELS.get("book_planning"), "progress": 5},
             "current_chapter": start_chapter,
             "total_chapters": num_chapters,
             "progress": 5,
@@ -256,6 +277,7 @@ def submit_book_generation_task(self, novel_id: str, num_chapters: int, start_ch
                 "status": "running",
                 "step": "volume_dispatch",
                 "current_phase": "volume_dispatch",
+                "current_subtask": {"key": "volume_dispatch", "label": SUBTASK_LABELS.get("volume_dispatch")},
                 "current_chapter": chunk_start,
                 "total_chapters": num_chapters,
                 "progress": round(10 + ((volume_no - 1) / max(len(chunks), 1)) * 70, 2),
@@ -280,6 +302,7 @@ def submit_book_generation_task(self, novel_id: str, num_chapters: int, start_ch
             "status": "completed",
             "step": "done",
             "current_phase": "completed",
+            "current_subtask": {"key": "done", "label": SUBTASK_LABELS.get("done"), "progress": 100},
             "progress": 100,
             "current_chapter": start_chapter + num_chapters - 1,
             "total_chapters": num_chapters,
@@ -296,6 +319,7 @@ def submit_book_generation_task(self, novel_id: str, num_chapters: int, start_ch
             "status": "failed",
             "step": "failed",
             "current_phase": "failed",
+            "current_subtask": {"key": "failed", "label": SUBTASK_LABELS.get("failed"), "progress": 0},
             "progress": 0,
             "total_chapters": num_chapters,
             "error": str(e),

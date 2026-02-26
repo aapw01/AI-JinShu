@@ -2,6 +2,7 @@
 import json
 import asyncio
 import logging
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
@@ -10,8 +11,8 @@ import redis
 
 from app.core.database import get_db
 from app.core.config import get_settings
-from app.models.novel import Novel, GenerationTask
-from app.schemas.novel import GenerateRequest, GenerateResponse, GenerationStatusResponse
+from app.models.novel import Novel, GenerationTask, GenerationCheckpoint
+from app.schemas.novel import GenerateRequest, GenerateResponse, GenerationStatusResponse, RetryGenerationRequest
 from app.tasks.generation import submit_generation_task
 
 router = APIRouter()
@@ -35,6 +36,9 @@ SUBTASK_LABELS: dict[str, str] = {
     "full_outline_ready": "全书大纲已完成",
     "outline_waiting_confirmation": "等待大纲确认",
     "volume_replan": "分卷策略重规划",
+    "closure_gate": "收官完整性检查",
+    "bridge_chapter": "追加桥接章节",
+    "tail_rewrite": "尾章重写补完",
     "context": "加载上下文",
     "consistency": "一致性检查",
     "chapter_blocked": "一致性未通过（跳过）",
@@ -101,6 +105,11 @@ def _to_status_response(payload: dict) -> GenerationStatusResponse:
         subtask_key=subtask_key,
         subtask_label=subtask_label or None,
         subtask_progress=payload.get("subtask_progress", payload.get("progress")),
+        current_subtask={
+            "key": subtask_key,
+            "label": subtask_label or None,
+            "progress": payload.get("subtask_progress", payload.get("progress")),
+        } if subtask_key else None,
         current_chapter=payload.get("current_chapter", 0) or 0,
         total_chapters=payload.get("total_chapters", 0) or 0,
         progress=payload.get("progress", 0) or 0,
@@ -109,9 +118,118 @@ def _to_status_response(payload: dict) -> GenerationStatusResponse:
         estimated_cost=payload.get("estimated_cost", 0.0) or 0.0,
         volume_no=payload.get("volume_no"),
         volume_size=payload.get("volume_size"),
+        pacing_mode=payload.get("pacing_mode"),
+        low_progress_streak=payload.get("low_progress_streak"),
+        progress_signal=payload.get("progress_signal"),
+        decision_state=payload.get("decision_state"),
+        eta_seconds=payload.get("eta_seconds"),
+        eta_label=payload.get("eta_label"),
         message=payload.get("message"),
         error=payload.get("error"),
     )
+
+
+def _format_eta(seconds: int) -> str:
+    sec = max(0, int(seconds))
+    if sec < 60:
+        return f"约{sec}秒"
+    minutes = sec // 60
+    if minutes < 60:
+        return f"约{minutes}分钟"
+    hours = minutes // 60
+    mins = minutes % 60
+    if mins == 0:
+        return f"约{hours}小时"
+    return f"约{hours}小时{mins}分钟"
+
+
+def _smoothed_chapter_seconds(samples: list[float]) -> float:
+    if not samples:
+        return 0.0
+    take = samples[-5:]
+    weights = [0.40, 0.27, 0.18, 0.10, 0.05]
+    rev = list(reversed(take))
+    acc = 0.0
+    w_sum = 0.0
+    for idx, sec in enumerate(rev):
+        w = weights[idx] if idx < len(weights) else 0.03
+        acc += max(1.0, float(sec)) * w
+        w_sum += w
+    return acc / max(w_sum, 1e-6)
+
+
+def _estimate_eta_payload(
+    db: Session,
+    novel_db_id: int | None,
+    task_id: str | None,
+    payload: dict,
+) -> dict:
+    if not novel_db_id:
+        return payload
+    status = str(payload.get("status") or "")
+    if status in {"completed", "failed", "cancelled"}:
+        out = dict(payload)
+        out["eta_seconds"] = 0
+        out["eta_label"] = "已完成" if status == "completed" else "已停止"
+        return out
+    total = int(payload.get("total_chapters") or 0)
+    current = int(payload.get("current_chapter") or 0)
+    if total <= 0:
+        return payload
+    remaining = max(0, total - current)
+    if remaining <= 0:
+        out = dict(payload)
+        out["eta_seconds"] = 0
+        out["eta_label"] = "即将完成"
+        return out
+
+    samples: list[float] = []
+    cp_stmt = (
+        select(GenerationCheckpoint)
+        .where(
+            GenerationCheckpoint.novel_id == novel_db_id,
+            GenerationCheckpoint.node.in_(("chapter_done", "consistency_blocked")),
+        )
+        .order_by(GenerationCheckpoint.created_at.asc(), GenerationCheckpoint.id.asc())
+    )
+    if task_id:
+        cp_stmt = cp_stmt.where(GenerationCheckpoint.task_id == task_id)
+    cps = db.execute(cp_stmt).scalars().all()
+    if len(cps) >= 2:
+        for i in range(1, len(cps)):
+            delta = (cps[i].created_at - cps[i - 1].created_at).total_seconds()
+            if delta > 0:
+                samples.append(float(delta))
+
+    eta_seconds = 0
+    if samples:
+        avg_sec = _smoothed_chapter_seconds(samples)
+        eta_seconds = int(max(60, round(avg_sec * remaining)))
+    else:
+        progress = float(payload.get("progress") or 0.0)
+        gt_stmt = (
+            select(GenerationTask)
+            .where(GenerationTask.novel_id == novel_db_id)
+            .order_by(GenerationTask.id.desc())
+            .limit(1)
+        )
+        if task_id:
+            gt_stmt = select(GenerationTask).where(GenerationTask.task_id == task_id).limit(1)
+        gt = db.execute(gt_stmt).scalar_one_or_none()
+        if gt and progress > 1.0:
+            now = datetime.now(timezone.utc)
+            created = gt.created_at
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            elapsed = max(1.0, (now - created).total_seconds())
+            eta_seconds = int(elapsed * (100.0 - progress) / progress)
+
+    if eta_seconds <= 0:
+        return payload
+    out = dict(payload)
+    out["eta_seconds"] = eta_seconds
+    out["eta_label"] = _format_eta(eta_seconds)
+    return out
 
 
 @router.post("/{novel_id}/generate", response_model=GenerateResponse)
@@ -146,6 +264,92 @@ def submit_generation(novel_id: str, req: GenerateRequest, db: Session = Depends
     return GenerateResponse(task_id=task.id, novel_id=novel.uuid or str(novel.id))
 
 
+@router.post("/{novel_id}/generation/retry", response_model=GenerateResponse)
+def retry_generation(novel_id: str, req: RetryGenerationRequest, db: Session = Depends(get_db)):
+    """Retry generation from latest failed position (or specified failed task)."""
+    from app.core.database import resolve_novel
+
+    novel = resolve_novel(db, novel_id)
+    if not novel:
+        raise HTTPException(404, "Novel not found")
+
+    active_stmt = select(GenerationTask).where(
+        GenerationTask.novel_id == novel.id,
+        GenerationTask.status.in_(["submitted", "running", "awaiting_outline_confirmation"]),
+    )
+    active_task = db.execute(active_stmt).scalar_one_or_none()
+    if active_task:
+        raise HTTPException(409, f"已有进行中的生成任务: {active_task.task_id}")
+
+    source_task = None
+    if req.task_id:
+        source_stmt = select(GenerationTask).where(
+            GenerationTask.novel_id == novel.id,
+            GenerationTask.task_id == req.task_id,
+        )
+        source_task = db.execute(source_stmt).scalar_one_or_none()
+        if not source_task:
+            raise HTTPException(404, "指定的任务不存在")
+    else:
+        source_stmt = (
+            select(GenerationTask)
+            .where(
+                GenerationTask.novel_id == novel.id,
+                GenerationTask.status.in_(["failed", "cancelled"]),
+            )
+            .order_by(GenerationTask.updated_at.desc(), GenerationTask.id.desc())
+            .limit(1)
+        )
+        source_task = db.execute(source_stmt).scalar_one_or_none()
+        if not source_task:
+            raise HTTPException(409, "当前没有可重试的失败任务")
+
+    if source_task.status not in {"failed", "cancelled"}:
+        raise HTTPException(409, f"任务状态为 {source_task.status}，不可重试")
+
+    source_start = int(source_task.start_chapter or 1)
+    source_total = int(source_task.total_chapters or source_task.num_chapters or 1)
+    source_end = source_start + max(1, source_total) - 1
+    retry_start = int(source_task.current_chapter or source_start)
+    retry_start = max(source_start, min(retry_start, source_end))
+    retry_num = max(1, source_end - retry_start + 1)
+
+    task = submit_generation_task.delay(novel.id, retry_num, retry_start)
+    novel.status = "generating"
+    gt = GenerationTask(
+        task_id=task.id,
+        novel_id=novel.id,
+        status="submitted",
+        current_phase="queued",
+        total_chapters=retry_num,
+        outline_confirmed=1,
+        num_chapters=retry_num,
+        start_chapter=retry_start,
+        message=f"重试已提交：从第{retry_start}章继续",
+    )
+    db.add(gt)
+    db.commit()
+
+    r = _get_redis()
+    data = {
+        "status": "submitted",
+        "step": "queued",
+        "current_phase": "queued",
+        "current_subtask": {"key": "queued", "label": "任务已入队", "progress": 0},
+        "subtask_key": "queued",
+        "subtask_label": "任务已入队",
+        "subtask_progress": 0,
+        "current_chapter": retry_start,
+        "total_chapters": retry_num,
+        "progress": 0,
+        "message": f"重试已提交：从第{retry_start}章继续",
+        "task_id": task.id,
+    }
+    r.setex(_redis_key(task.id), 86400, json.dumps(data, ensure_ascii=False))
+    r.setex(_novel_key(str(novel.id)), 86400, json.dumps(data, ensure_ascii=False))
+    return GenerateResponse(task_id=task.id, novel_id=novel.uuid or str(novel.id))
+
+
 @router.delete("/{novel_id}/generation/{task_id}")
 def cancel_generation(novel_id: str, task_id: str, db: Session = Depends(get_db)):
     """Cancel a running generation task."""
@@ -175,6 +379,7 @@ def cancel_generation(novel_id: str, task_id: str, db: Session = Depends(get_db)
         "status": "cancelled",
         "step": "cancelled",
         "current_phase": "cancelled",
+        "current_subtask": {"key": "cancelled", "label": "任务已取消", "progress": gt.progress or 0},
         "subtask_key": "cancelled",
         "subtask_label": "任务已取消",
         "subtask_progress": gt.progress or 0,
@@ -212,6 +417,7 @@ def confirm_outline_generation(novel_id: str, task_id: str, db: Session = Depend
         "status": "running",
         "current_phase": "chapter_writing",
         "step": "chapter_writing",
+        "current_subtask": {"key": "chapter_writing", "label": "开始章节生成", "progress": gt.progress or 20},
         "subtask_key": "chapter_writing",
         "subtask_label": "开始章节生成",
         "subtask_progress": gt.progress or 20,
@@ -235,14 +441,14 @@ def get_generation_status(novel_id: str, task_id: str | None = None, db: Session
     key = _redis_key(task_id) if task_id else _novel_key(redis_novel_id)
     data = _decode_redis_payload(r.get(key))
     if data:
+        data = _estimate_eta_payload(db, novel.id if novel else None, task_id or data.get("task_id"), data)
         return _to_status_response(data)
 
     if task_id:
         gt_stmt = select(GenerationTask).where(GenerationTask.task_id == task_id)
         gt = db.execute(gt_stmt).scalar_one_or_none()
         if gt:
-            return _to_status_response(
-                {
+            fallback = {
                     "status": gt.status,
                     "step": gt.step,
                     "current_phase": gt.current_phase,
@@ -255,7 +461,8 @@ def get_generation_status(novel_id: str, task_id: str | None = None, db: Session
                     "message": gt.message,
                     "error": gt.error,
                 }
-            )
+            fallback = _estimate_eta_payload(db, novel.id if novel else None, task_id or gt.task_id, fallback)
+            return _to_status_response(fallback)
     return GenerationStatusResponse(status="unknown", progress=0, current_chapter=0)
 
 

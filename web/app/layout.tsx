@@ -5,6 +5,11 @@ import { AppHeader } from "@/components/layout/AppHeader";
 export const metadata: Metadata = {
   title: "锦书 - AI 小说生成平台",
   description: "取意“云中谁寄锦书来”的 AI 长篇小说创作平台",
+  icons: {
+    icon: "/icon.svg",
+    shortcut: "/icon.svg",
+    apple: "/icon.svg",
+  },
 };
 
 export default function RootLayout({

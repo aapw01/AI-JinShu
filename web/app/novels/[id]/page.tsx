@@ -101,19 +101,35 @@ export default function NovelPage() {
         backHref="/novels"
         icon={<ArrowLeft className="w-5 h-5" />}
         actions={(
-          <>
-            <Badge variant={STATUS_MAP[novel.status]?.variant || "default"}>
+          <div className="flex items-center gap-2">
+            <div className="inline-flex h-9 items-center gap-1.5 rounded-full border border-[#E5DED7] bg-[#FFFDFB] px-3 text-sm font-medium text-[#6F665F]">
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${
+                  novel.status === "completed"
+                    ? "bg-[#18864B]"
+                    : novel.status === "failed"
+                    ? "bg-[#C4372D]"
+                    : novel.status === "generating"
+                    ? "bg-[#D08A10]"
+                    : "bg-[#8E8379]"
+                }`}
+              />
               {STATUS_MAP[novel.status]?.label || novel.status}
-            </Badge>
+            </div>
             <div className="relative">
-              <Button variant="secondary" onClick={() => setShowExport(!showExport)}>
+              <Button
+                variant="secondary"
+                size="sm"
+                className="h-9 px-3 shadow-none border-[#E5DED7] bg-white hover:bg-[#F8F5F1]"
+                onClick={() => setShowExport(!showExport)}
+              >
                 <Download className="w-4 h-4 mr-2" />
                 导出
               </Button>
               {showExport && (
                 <>
                   <div className="fixed inset-0 z-10" onClick={() => setShowExport(false)} />
-                  <div className="absolute right-0 mt-2 w-40 bg-white border border-[rgba(60,60,67,0.14)] rounded-[12px] shadow-[0_10px_30px_rgba(0,0,0,0.1)] z-20 overflow-hidden">
+                  <div className="absolute right-0 mt-1.5 w-40 bg-white border border-[#E5DED7] rounded-[12px] shadow-[0_10px_30px_rgba(0,0,0,0.08)] z-20 overflow-hidden">
                     {(["txt", "md", "zip"] as const).map((format) => (
                       <a
                         key={format}
@@ -130,11 +146,16 @@ export default function NovelPage() {
               )}
             </div>
             <Link href={`/novels/${id}/progress`}>
-              <Button variant="ghost" size="sm">
-                <BarChart3 className="w-4 h-4" />
+              <Button
+                variant="secondary"
+                size="sm"
+                className="h-9 px-3 shadow-none border-[#E5DED7] bg-white hover:bg-[#F8F5F1]"
+              >
+                <BarChart3 className="w-4 h-4 mr-1.5" />
+                进度
               </Button>
             </Link>
-          </>
+          </div>
         )}
       />
 

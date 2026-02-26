@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
-import { ArrowLeft, ArrowRight, Globe, PenSquare, Sparkles } from "lucide-react";
+import { ArrowLeft, ArrowRight, Globe, PenSquare, Sparkles, WandSparkles } from "lucide-react";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -65,9 +65,12 @@ const DEFAULT_AUDIENCES = [
 ];
 
 const METHODS = [
-  { value: "three_act", label: "三幕式结构" },
-  { value: "hero_journey", label: "英雄之旅" },
-  { value: "free", label: "自由发挥" },
+  { value: "three_act", label: "三幕式（起承转决战）" },
+  { value: "hero_journey", label: "英雄之旅（召唤试炼归来）" },
+  { value: "qichengzhuanhe", label: "起承转合（东方四段递进）" },
+  { value: "dual_line", label: "双线并行（主线副线交叉）" },
+  { value: "mystery_puzzle", label: "悬疑拼图（线索逐章揭示）" },
+  { value: "free", label: "自由发挥（AI自适应结构）" },
 ];
 
 interface FormData {
@@ -87,6 +90,8 @@ export default function CreatePage() {
   const [step, setStep] = useState(1);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [ideaGenerating, setIdeaGenerating] = useState(false);
+  const [ideaError, setIdeaError] = useState<string | null>(null);
   const [form, setForm] = useState<FormData>({
     title: "",
     idea: "",
@@ -194,6 +199,26 @@ export default function CreatePage() {
     }
   };
 
+  const handleGenerateIdea = async () => {
+    const title = form.title.trim();
+    if (!title || ideaGenerating) return;
+    setIdeaGenerating(true);
+    setIdeaError(null);
+    try {
+      const result = await api.generateIdeaFramework({
+        title,
+        genre: form.genre || undefined,
+        style: form.style || undefined,
+        strategy: selectedStyle?.strategy || "web-novel",
+      });
+      updateForm({ idea: result.editable_framework || result.one_liner });
+    } catch (err) {
+      setIdeaError(err instanceof Error ? err.message : "AI 创意生成失败");
+    } finally {
+      setIdeaGenerating(false);
+    }
+  };
+
   return (
     <main className="min-h-screen">
       <TopBar title="创建小说" backHref="/" icon={<ArrowLeft className="w-5 h-5" />} maxWidthClassName="max-w-4xl" />
@@ -257,13 +282,31 @@ export default function CreatePage() {
                 onChange={(e) => updateForm({ title: e.target.value })}
                 autoFocus
               />
+              <div className="flex items-center justify-end -mt-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  onClick={handleGenerateIdea}
+                  loading={ideaGenerating}
+                  disabled={!form.title.trim() || ideaGenerating}
+                >
+                  <WandSparkles className="w-3.5 h-3.5 mr-1" />
+                  AI 生成创意框架
+                </Button>
+              </div>
               <Textarea
                 label="创意描述（可选）"
                 placeholder="描述你想要的故事情节、主角设定、世界观等..."
                 value={form.idea}
                 onChange={(e) => updateForm({ idea: e.target.value })}
                 rows={5}
+                maxLength={600}
               />
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-[#8E8379]">{form.idea.length}/600</span>
+                {ideaError ? <span className="text-[#B22F2A]">{ideaError}</span> : null}
+              </div>
             </div>
           )}
 

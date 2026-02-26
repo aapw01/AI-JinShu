@@ -39,10 +39,30 @@ export interface GenerationStatus {
   subtask_key?: string;
   subtask_label?: string;
   subtask_progress?: number;
+  current_subtask?: {
+    key?: string;
+    label?: string;
+    progress?: number;
+  };
   current_chapter?: number;
   total_chapters?: number;
   volume_no?: number;
   volume_size?: number;
+  pacing_mode?: string;
+  low_progress_streak?: number;
+  progress_signal?: number;
+  eta_seconds?: number;
+  eta_label?: string;
+  decision_state?: {
+    closure?: ClosureState;
+    pacing?: {
+      mode?: string;
+      low_progress_streak?: number;
+      progress_signal?: number;
+      reasons?: string[];
+    };
+    quality?: Record<string, unknown>;
+  };
   token_usage_input?: number;
   token_usage_output?: number;
   estimated_cost?: number;
@@ -57,6 +77,47 @@ export interface VolumeGateReport {
   evidence_chain: Array<Record<string, unknown>>;
   checkpoint_id?: number | null;
   checkpoint_state?: Record<string, unknown>;
+  created_at?: string;
+}
+
+export interface ClosureItem {
+  type?: string;
+  id?: string;
+  title?: string;
+  introduced_chapter?: number;
+}
+
+export interface ClosureState {
+  generated_chapters?: number;
+  target_chapters?: number;
+  min_total_chapters?: number;
+  max_total_chapters?: number;
+  remaining_chapters?: number;
+  remaining_ratio?: number;
+  phase_mode?: string;
+  unresolved_count?: number;
+  closure_score?: number;
+  must_close_coverage?: number;
+  closure_threshold?: number;
+  threshold?: number;
+  tail_rewrite_attempts?: number;
+  bridge_attempts?: number;
+  bridge_budget_total?: number;
+  bridge_budget_left?: number;
+  confidence?: number;
+  reasons?: string[];
+  action?: string;
+  must_close_items?: ClosureItem[];
+}
+
+export interface ClosureReport {
+  novel_id: string;
+  task_id?: string | null;
+  available: boolean;
+  chapter_num?: number;
+  volume_no?: number;
+  state?: ClosureState;
+  message?: string;
   created_at?: string;
 }
 
@@ -77,6 +138,11 @@ export interface ObservabilityPayload {
     checkpoints: number;
     feedback_count: number;
     warning_or_fail_volumes: number;
+    closure_action_distribution?: Record<string, number>;
+    closure_action_oscillation_rate?: number;
+    abrupt_ending_score?: number;
+    abrupt_ending_risk?: boolean;
+    abrupt_ending_reasons?: string[];
   };
   quality_reports: Array<Record<string, unknown>>;
   checkpoints: Array<Record<string, unknown>>;
@@ -91,6 +157,24 @@ export interface CreateNovelData {
   strategy?: string;
   target_language?: string;
   config?: Record<string, unknown>;
+}
+
+export interface IdeaFrameworkRequest {
+  title: string;
+  target_language?: string;
+  genre?: string;
+  style?: string;
+  strategy?: string;
+}
+
+export interface IdeaFrameworkResponse {
+  title: string;
+  one_liner: string;
+  premise: string;
+  conflict: string;
+  hook: string;
+  selling_point: string;
+  editable_framework: string;
 }
 
 export interface UpdateNovelData {
@@ -151,6 +235,12 @@ export const api = {
       body: JSON.stringify(data),
     }),
 
+  generateIdeaFramework: (data: IdeaFrameworkRequest) =>
+    fetchApi<IdeaFrameworkResponse>("/api/novels/idea-framework", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
   getNovel: (id: string) => fetchApi<Novel>(`/api/novels/${id}`),
 
   updateNovel: (id: string, data: UpdateNovelData) =>
@@ -204,6 +294,12 @@ export const api = {
       method: "POST",
     }),
 
+  retryGeneration: (novelId: string, taskId?: string) =>
+    fetchApi<{ task_id: string; novel_id: string; status: string }>(`/api/novels/${novelId}/generation/retry`, {
+      method: "POST",
+      body: JSON.stringify({ task_id: taskId || null }),
+    }),
+
   // Presets
   getPresets: () => fetchApi<PresetCategory>("/api/presets"),
 
@@ -222,6 +318,11 @@ export const api = {
 
   getVolumeGateReport: (novelId: string, volumeNo: number) =>
     fetchApi<VolumeGateReport>(`/api/novels/${novelId}/volumes/${volumeNo}/gate-report`),
+
+  getClosureReport: (novelId: string, taskId?: string) =>
+    fetchApi<ClosureReport>(
+      `/api/novels/${novelId}/closure-report${taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""}`
+    ),
 
   listFeedback: (novelId: string) =>
     fetchApi<NovelFeedback[]>(`/api/novels/${novelId}/feedback`),

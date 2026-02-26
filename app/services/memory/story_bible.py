@@ -14,6 +14,7 @@ from app.models.novel import (
     StorySnapshot,
     GenerationCheckpoint,
     QualityReport,
+    NovelMemory,
 )
 
 
@@ -240,6 +241,60 @@ class StoryBibleStore:
                 StoryForeshadow.planted_chapter < chapter_num,
             )
             unresolved = db.execute(unresolved_stmt).scalars().all()
+            memory_stmt = select(NovelMemory).where(
+                NovelMemory.novel_id == novel_id,
+                NovelMemory.memory_type == "character",
+            )
+            memory_rows = db.execute(memory_stmt).scalars().all()
+
+            entity_hard_constraints: list[dict] = []
+            for row in memory_rows:
+                content = row.content if isinstance(row.content, dict) else {}
+                name = str(row.key or content.get("name") or "").strip()
+                if not name:
+                    continue
+                source_chapter = int(content.get("chapter_num") or 0)
+                status = str(content.get("status") or "").lower()
+                if status == "dead":
+                    entity_hard_constraints.append(
+                        {
+                            "entity": name,
+                            "constraint_type": "forbidden_presence",
+                            "description": f"角色{name}已死亡，不应再次以正常出场参与行动。",
+                            "forbidden_patterns": [],
+                            "confidence": 0.95,
+                            "source_chapter": source_chapter,
+                        }
+                    )
+
+                # Generic capability constraints from extracted state.
+                raw_limits = content.get("limitations") or content.get("forbidden_actions") or []
+                limitations: list[str] = [str(x).strip() for x in raw_limits if str(x).strip()] if isinstance(raw_limits, list) else []
+                lost_items = content.get("lost_items") or []
+                injuries = content.get("injuries") or []
+                limb_loss = " ".join([str(x) for x in (lost_items if isinstance(lost_items, list) else [])] + [str(x) for x in (injuries if isinstance(injuries, list) else [])])
+                if any(k in limb_loss for k in ["断臂", "断手", "失去右手", "失去左手", "失去双手", "断右臂", "断左臂"]):
+                    limitations.append("双手持")
+                    limitations.append("双臂发力")
+                if bool(content.get("can_use_both_hands") is False):
+                    limitations.append("双手持")
+                    limitations.append("双手结印")
+
+                dedup_limits: list[str] = []
+                for x in limitations:
+                    if x and x not in dedup_limits:
+                        dedup_limits.append(x)
+                if dedup_limits:
+                    entity_hard_constraints.append(
+                        {
+                            "entity": name,
+                            "constraint_type": "forbidden_action_pattern",
+                            "description": f"角色{name}存在能力限制，不应出现与限制冲突的动作描写。",
+                            "forbidden_patterns": dedup_limits[:8],
+                            "confidence": 0.8,
+                            "source_chapter": source_chapter,
+                        }
+                    )
 
             return {
                 "forbidden_characters": dead_names,
@@ -251,6 +306,12 @@ class StoryBibleStore:
                     }
                     for f in unresolved
                 ],
+                "entity_hard_constraints": entity_hard_constraints,
+                "constraint_registry_meta": {
+                    "chapter_num": chapter_num,
+                    "character_memory_count": len(memory_rows),
+                    "hard_constraint_count": len(entity_hard_constraints),
+                },
             }
         finally:
             if should_close:

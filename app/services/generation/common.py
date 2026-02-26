@@ -106,7 +106,8 @@ def update_character_states_from_content(
         f"Based on this chapter content, report any STATE CHANGES for these characters: {', '.join(char_names)}\n\n"
         f"Chapter {chapter_num} content (truncated):\n{content[:3000]}\n\n"
         f'Output JSON: {{"updates": [{{"name": "角色名", "status": "alive/injured/dead/unknown", '
-        f'"location": "当前位置", "new_items": [], "lost_items": [], '
+        f'"location": "当前位置", "new_items": [], "lost_items": [], "injuries": [], '
+        f'"can_use_both_hands": true, "limitations": [], "forbidden_actions": [], '
         f'"relationship_changes": [], "key_action": "本章关键行为"}}]}}\n'
         f"Only include characters who actually appeared or were affected. Output pure JSON."
     )
