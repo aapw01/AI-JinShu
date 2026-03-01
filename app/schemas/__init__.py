@@ -7,6 +7,20 @@ from app.schemas.novel import (
     GenerateRequest,
     GenerateResponse,
     GenerationStatusResponse,
+    CharacterProfileResponse,
+)
+from app.schemas.storyboard import (
+    StoryboardCreateRequest,
+    StoryboardProjectResponse,
+    StoryboardGenerateResponse,
+    StoryboardStyleRecommendationRequest,
+    StoryboardStyleRecommendationResponse,
+    StoryboardTaskStatusResponse,
+    StoryboardVersionResponse,
+    StoryboardShotResponse,
+    StoryboardCharacterPromptResponse,
+    StoryboardCharacterGenerateResponse,
+    StoryboardOptimizeResponse,
 )
 
 __all__ = [
@@ -17,4 +31,16 @@ __all__ = [
     "GenerateRequest",
     "GenerateResponse",
     "GenerationStatusResponse",
+    "CharacterProfileResponse",
+    "StoryboardCreateRequest",
+    "StoryboardProjectResponse",
+    "StoryboardGenerateResponse",
+    "StoryboardStyleRecommendationRequest",
+    "StoryboardStyleRecommendationResponse",
+    "StoryboardTaskStatusResponse",
+    "StoryboardVersionResponse",
+    "StoryboardShotResponse",
+    "StoryboardCharacterPromptResponse",
+    "StoryboardCharacterGenerateResponse",
+    "StoryboardOptimizeResponse",
 ]
