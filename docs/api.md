@@ -2,6 +2,61 @@
 
 ## Longform Endpoints
 
+## Auth Endpoints
+
+### `POST /api/auth/register`
+- 入参：`email`, `password`
+- 行为：创建用户；若开启邮箱激活则发送激活邮件并返回提示，否则直接登录返回 token。
+- 配置：
+  - `AUTH_REQUIRE_EMAIL_VERIFICATION=false`（默认）：直接登录。
+  - `AUTH_REQUIRE_EMAIL_VERIFICATION=true`：必须配置 `SENDGRID_API_KEY` 与 `SENDGRID_FROM_EMAIL`，否则返回 `503`。
+
+### `POST /api/auth/login`
+- 入参：`email`, `password`
+- 返回：`access_token` + `user`。
+- 风控：失败次数过多会临时锁定账号。
+
+### `POST /api/auth/logout`
+- 行为：清除登录 cookie。
+
+### `GET /api/auth/me`
+- 行为：返回当前登录用户信息。
+
+### `POST /api/auth/verify-email/request`
+- 入参：`email`
+- 行为：发送激活邮件（若账户存在且未激活）。
+
+### `POST /api/auth/verify-email/confirm`
+- 入参：`token`
+- 行为：完成邮箱激活。
+
+### `POST /api/auth/password/forgot`
+- 入参：`email`
+- 行为：发送重置密码邮件（若账户存在）。
+
+### `POST /api/auth/password/reset`
+- 入参：`token`, `new_password`
+- 行为：重置密码并失效本次 token。
+
+## 日志与追踪约定
+
+- 所有 API 响应头返回：`X-Trace-Id`。
+- 生产默认日志：`JSON + INFO`。
+- 关键日志事件：
+  - `api.request.received|completed|failed|slow`
+  - `auth.login.success|failed`、`authz.denied`
+  - `generation.submit|retry.submit|pause|resume|cancel|status.fallback_db|task.finalized|quota.blocked`
+  - `pipeline.node.start|end|error|slow`
+  - `rewrite.request.created|retry`、`rewrite.chapter.start|end|llm_error`、`rewrite.completed|failed`
+  - `llm.call.start|success|error`、`embed.query.success|fallback`
+  - `mail.send.success|error|skipped`
+- 日志配置项：
+  - `LOG_FORMAT`
+  - `LOG_LEVEL`
+  - `LOG_SLOW_THRESHOLD_MS`
+  - `LOG_NODE_SLOW_THRESHOLD_MS`
+  - `LOG_REDACTION_LEVEL`
+
 ### `GET /api/novels/{novel_id}/quality-reports`
 - 作用：查询章节/卷/全书质量报告。
 - 参数：`scope`（可选，`chapter|volume|book`），`scope_id`（可选），`limit`（默认 200）。
@@ -48,28 +103,73 @@
   - `review_over_correction_risk_rate`
   - `review_accept_minor_polish_rate`
 
+### `GET /api/novels/{novel_id}/character-profiles`
+- 作用：查看小说生成过程中逐章沉淀的角色硬形象画像。
+- 返回：角色硬字段（含 `skin_tone`, `ethnicity`, 外观锚点、证据与置信度）。
+
 ### `GET /api/novels/{novel_id}/closure-report`
 - 作用：返回最新的收官门禁状态（章节弹性、未回收项、收官动作）。
 - 参数：`task_id`（可选）。
 - 返回：`available`, `state(action/phase_mode/remaining_ratio/unresolved_count/must_close_items...)`。
 
 ### `GET /api/novels/{novel_id}/generation/status`
-- 作用：查询实时生成状态（Redis 优先，DB 回退）。
+- 作用：查询统一调度后的生成状态（`creation_tasks` 为主，Redis 为实时补充）。
 - 关键字段：
-  - `current_subtask`: `{ key, label, progress }` 稳定子任务对象。
-  - `eta_seconds` / `eta_label`: 预计剩余时间（基于最近章节耗时平滑估算）。
-  - `decision_state`:
-    - `closure`: `phase_mode/action/must_close_coverage/threshold/unresolved_count/bridge_budget_left/reasons`
-    - `pacing`: `mode(low|accelerated|closing_accelerated)/low_progress_streak/progress_signal/reasons`
-    - `quality`: `review_score/factual_score/language_score/aesthetic_score/quality_passed/review_suggestions`
-      - `consistency_scorecard`: 一致性结构化评分（blockers/warnings/categories/reason_codes）
-      - `review_gate`: 审校门控结果（evidence_coverage/decision/over_correction_risk）
-- 兼容字段：`subtask_key/subtask_label/subtask_progress` 继续保留，后续版本再下线。
+  - 顶层状态统一为：`queued | dispatching | running | paused | completed | failed | cancelled`
+  - `phase`: 当前阶段（细粒度节点信息）
+  - `progress`: 0~100
+  - `message/error`
 
 ### `POST /api/novels/{novel_id}/generation/retry`
 - 作用：失败/取消后一键重试，默认自动选择最新失败任务；也可指定 `task_id`。
 - 请求体：`{ "task_id": "可选，指定失败任务ID" }`
-- 行为：从失败任务 `current_chapter` 继续提交新任务（`task_id` 会变化）。
+- 行为：重试任务进入统一调度队列（状态 `queued`）。
+
+### `POST /api/novels/{novel_id}/generation/pause`
+- 作用：暂停任务并释放并发槽位（状态切换至 `paused`）。
+- 参数：`task_id`（可选，默认取最新运行任务）。
+
+### `POST /api/novels/{novel_id}/generation/resume`
+- 作用：恢复任务并重新入队（状态切换至 `queued`）。
+- 参数：`task_id`（可选）。
+
+### `POST /api/novels/{novel_id}/generation/cancel`
+- 作用：取消运行任务。
+- 参数：`task_id`（可选）。
+
+### `GET /api/novels/{novel_id}/generation/tasks`
+- 作用：列出任务历史及错误分类信息。
+- 关键字段：`status/error_code/error_category/retryable`。
+
+### `GET /api/account/quota`
+- 作用：查看当前账号套餐配额与本月已用量。
+- 返回：`plan_key/max_concurrent_tasks/monthly_chapter_limit/monthly_token_limit/used_*/remaining_*`。
+- 说明：并发上限是否生效由环境变量 `QUOTA_ENFORCE_CONCURRENCY_LIMIT` 控制；默认 `false`（不限制并发创建）。
+- 月度限额由环境变量控制：
+  - `QUOTA_FREE_MONTHLY_CHAPTER_LIMIT`
+  - `QUOTA_FREE_MONTHLY_TOKEN_LIMIT`
+  - `QUOTA_ADMIN_MONTHLY_CHAPTER_LIMIT`
+  - `QUOTA_ADMIN_MONTHLY_TOKEN_LIMIT`
+
+### `GET /api/account/ledger`
+- 作用：查看任务级账本明细（token、章节、估算成本）。
+- 参数：`limit`（默认 50）。
+
+### `GET /api/account/notifications`
+- 作用：通知中心数据源，汇总生成/重写完成、失败、取消事件。
+- 参数：`limit`（默认 30）。
+
+### `GET /api/novels/{novel_id}/versions/{version_id}/diff?compare_to={base_version_id}`
+- 作用：对比两个版本的章节差异（章节级标题变化 + 内容相似度）。
+- 返回：`summary(total_chapters/changed_chapters/change_ratio)` + `chapters[]`。
+
+### `GET /api/admin/observability/summary`
+- 作用：管理员聚合观测面板。
+- 返回：
+  - `model_error_rate`
+  - `retry_hit_rate`
+  - `review_overfix_risk_rate`
+  - `node_latency_seconds.{node}.p50/p95/max`
 
 ## Novel 辅助端点
 
@@ -78,6 +178,113 @@
 - 请求体：`title`（必填），`target_language`、`genre`、`style`、`strategy`（可选）。
 - 返回：`one_liner/premise/conflict/hook/selling_point/editable_framework`。
 
+## Storyboard Endpoints
+
+### `POST /api/storyboards`
+- 作用：为已完结小说创建导演分镜项目（V1 强制专业模式）。
+- 关键入参：
+  - `novel_id`（仅允许 `novel.status=completed`）
+  - `mode`（`quick|professional`，默认 `quick`）
+  - `genre_style_key` / `director_style_key`（可选，默认用推荐）
+  - `auto_style_recommendation`（默认 true）
+  - `target_episodes`
+  - `target_episode_seconds`
+  - `output_lanes`（默认 `vertical_feed + horizontal_cinematic`）
+  - `professional_mode=true`
+  - `audience_goal`
+  - `copyright_assertion=true`（必填硬门槛）
+
+### `POST /api/storyboards/{project_id}/generate`
+- 作用：异步生成双 lane 导演分镜草案。
+- 返回：`task_id` + `created_version_ids`。
+
+### `GET /api/storyboards/{project_id}/status?task_id=...`
+- 返回：`run_state/current_phase/current_lane/progress/eta`。
+- 专业字段：
+  - `style_consistency_score`
+  - `hook_score_episode`
+  - `quality_gate_reasons`
+  - `character_prompt_phase`
+  - `character_profiles_count`
+  - `missing_identity_fields_count`
+  - `failed_identity_characters`
+
+### `GET /api/storyboards/style-presets`
+- 作用：获取内置双层风格库（题材风格 + 导演风格）。
+
+### `POST /api/storyboards/style-recommendations`
+- 入参：`novel_id`
+- 作用：返回 AI 推荐 Top3 风格组合（含置信度和理由）。
+
+### `POST /api/storyboards/{project_id}/pause|resume|cancel|retry`
+- 作用：任务控制与故障恢复。
+
+### `GET /api/storyboards/{project_id}/versions`
+- 作用：查看版本列表（含 `lane`, `is_default`, `is_final`, `quality_report_json`）。
+
+### `POST /api/storyboards/{project_id}/versions/{version_id}/activate`
+- 作用：切换默认版本（工作台读取源）。
+
+### `POST /api/storyboards/{project_id}/versions/{version_id}/finalize`
+- 作用：人工确认定稿（定稿后导出）。
+- 额外门禁：必须先通过角色身份字段门禁（每角色 `skin_tone/ethnicity` 必填合法）。
+
+### `GET /api/storyboards/{project_id}/shots?version_id=...&episode_no=...`
+- 作用：读取镜头级分镜数据。
+
+### `PUT /api/storyboards/{project_id}/shots/{shot_id}`
+- 作用：人工编辑镜头字段（定稿版本不可编辑）。
+
+### `GET /api/storyboards/{project_id}/characters?version_id=...&lane=...`
+- 作用：读取角色主形象提示词（按版本/lane）。
+
+### `POST /api/storyboards/{project_id}/characters/generate`
+- 作用：手动重生角色主形象提示词（默认会覆盖该版本旧产物）。
+
+### `GET /api/storyboards/{project_id}/characters/export?version_id=...&lane=...&format=csv|json`
+- 作用：导出角色主形象提示词产物。
+- 限制：仅 `is_final=true` 且身份字段门禁通过可导出。
+
+### `POST /api/storyboards/{project_id}/versions/{version_id}/optimize`
+- 作用：一键应用结构化修订建议，自动优化镜头可拍性与字段完整性。
+
+### Storyboard Prompt 模板
+- 位置：`app/prompts/templates/`
+- 已外置模板示例：
+  - `storyboard_style_recommend_reason.j2`
+  - `storyboard_shot_action.j2`
+  - `storyboard_shot_blocking.j2`
+  - `storyboard_shot_performance_note.j2`
+  - `storyboard_shot_continuity_anchor.j2`
+  - `storyboard_rewrite_suggestion_*.j2`
+  - `character_profile_increment_extract.j2`
+  - `character_profile_merge_policy.j2`
+  - `storyboard_character_master_prompt.j2`
+  - `storyboard_character_negative_prompt.j2`
+  - `storyboard_character_identity_gate_fail.j2`
+
+### `GET /api/storyboards/{project_id}/versions/{version_id}/diff?compare_to=...`
+- 作用：版本差异（新增/删除/修改镜头统计）。
+
+### `GET /api/storyboards/{project_id}/export/csv?version_id=...`
+- 作用：导出导演分镜 CSV（仅 `is_final=true` 可导出）。
+
+## 权限矩阵（RBAC + Resource Policy）
+
+- 匿名可访问：
+  - `GET /health`
+  - `GET /api/presets`
+  - `GET /api/presets/{category}`
+  - Auth 白名单接口（register/login/verify/reset）
+- 登录用户（`user`）：
+  - `novel:read/create/update/delete/generate/rewrite`
+  - 仅限本人资源（`novels.user_id == current_user.uuid`）
+  - `storyboard:read/create/update/generate/finalize/export`
+  - 仅限本人资源（`storyboard_projects.owner_user_uuid == current_user.uuid`）
+- 管理员（`admin`）：
+  - 全部用户权限 + `user:read`, `user:disable`
+  - 可访问所有小说资源
+
 ## 离线评估脚本
 
 ### `scripts/evaluate_generation_metrics.py`
@@ -85,4 +292,5 @@
 - 用法：
 ```bash
 UV_CACHE_DIR=.uv-cache uv run python scripts/evaluate_generation_metrics.py
+UV_CACHE_DIR=.uv-cache uv run python scripts/evaluate_generation_metrics.py --enforce-thresholds
 ```

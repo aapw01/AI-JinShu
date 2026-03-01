@@ -48,12 +48,14 @@ celerybeat.pid
 logs/
 
 # Node.js (web/)
+node_modules/
 web/node_modules/
 web/.next/
 web/out/
 web/.env
 web/.env.local
 web/.env.*.local
+*.tsbuildinfo
 
 # Lock files (optional, uncomment if not tracking)
 # uv.lock

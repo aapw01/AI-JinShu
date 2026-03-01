@@ -1,5 +1,7 @@
 const BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+const AUTH_TOKEN_KEY = "auth_token";
+
 // Types
 export interface Novel {
   id: string;
@@ -25,6 +27,71 @@ export interface Chapter {
   created_at?: string;
 }
 
+export interface CharacterProfile {
+  id: number;
+  novel_id: string;
+  character_key: string;
+  display_name: string;
+  gender_presentation?: string;
+  age_band?: string;
+  skin_tone?: string;
+  ethnicity?: string;
+  body_type?: string;
+  face_features?: string;
+  hair_style?: string;
+  hair_color?: string;
+  eye_color?: string;
+  wardrobe_base_style?: string;
+  signature_items_json: string[];
+  visual_do_not_change_json: string[];
+  evidence_json: Array<Record<string, unknown>>;
+  confidence: number;
+  updated_chapter_num?: number;
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface NovelVersion {
+  id: number;
+  novel_id: string;
+  version_no: number;
+  parent_version_id?: number | null;
+  status: string;
+  is_default: boolean;
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface RewriteAnnotationInput {
+  chapter_num: number;
+  start_offset?: number;
+  end_offset?: number;
+  selected_text?: string;
+  issue_type?: "bug" | "continuity" | "style" | "pace" | "other";
+  instruction: string;
+  priority?: "must" | "should" | "nice";
+  metadata?: Record<string, unknown>;
+}
+
+export interface RewriteRequest {
+  id: number;
+  novel_id: string;
+  base_version_id: number;
+  target_version_id: number;
+  task_id?: string;
+  status: "queued" | "submitted" | "running" | "paused" | "completed" | "failed" | "cancelled";
+  rewrite_from_chapter: number;
+  rewrite_to_chapter: number;
+  current_chapter?: number;
+  progress: number;
+  eta_seconds?: number;
+  eta_label?: string;
+  message?: string;
+  error?: string;
+  created_at: string;
+  updated_at?: string;
+}
+
 export interface ChapterProgress {
   chapter_num: number;
   title?: string;
@@ -33,6 +100,8 @@ export interface ChapterProgress {
 
 export interface GenerationStatus {
   status: string;
+  trace_id?: string;
+  run_state?: string;
   progress: number;
   current_phase?: string;
   step?: string;
@@ -68,6 +137,28 @@ export interface GenerationStatus {
   estimated_cost?: number;
   message?: string;
   error?: string;
+  last_error?: {
+    code?: string;
+    category?: string;
+    retryable?: boolean;
+    message?: string;
+  };
+}
+
+export interface GenerationTaskItem {
+  task_id: string;
+  trace_id?: string;
+  status: string;
+  run_state?: string;
+  current_chapter?: number;
+  total_chapters?: number;
+  progress?: number;
+  message?: string;
+  error?: string;
+  error_code?: string;
+  error_category?: string;
+  retryable?: boolean;
+  updated_at?: string;
 }
 
 export interface VolumeGateReport {
@@ -177,6 +268,205 @@ export interface IdeaFrameworkResponse {
   editable_framework: string;
 }
 
+export interface AuthUser {
+  uuid: string;
+  email: string;
+  role: string;
+  status: string;
+  email_verified: boolean;
+}
+
+export interface AuthResponse {
+  access_token: string;
+  token_type: string;
+  user: AuthUser;
+}
+
+export interface AccountQuota {
+  plan_key: string;
+  max_concurrent_tasks: number;
+  monthly_chapter_limit: number;
+  monthly_token_limit: number;
+  used_chapters: number;
+  used_tokens: number;
+  remaining_chapters: number;
+  remaining_tokens: number;
+  month: string;
+}
+
+export interface UsageLedgerItem {
+  task_id: string;
+  source: string;
+  input_tokens: number;
+  output_tokens: number;
+  chapters_generated: number;
+  estimated_cost: number;
+  created_at: string;
+}
+
+export interface NotificationItem {
+  id: string;
+  type: string;
+  title: string;
+  message: string;
+  created_at: string;
+}
+
+export type StoryboardLane = "vertical_feed" | "horizontal_cinematic";
+
+export interface StoryboardProject {
+  id: number;
+  uuid: string;
+  novel_id: string;
+  status: "draft" | "generating" | "ready" | "finalized" | "failed";
+  target_episodes: number;
+  target_episode_seconds: number;
+  style_profile?: string;
+  mode?: "quick" | "professional";
+  genre_style_key?: string;
+  director_style_key?: string;
+  style_recommendations?: StoryboardStyleRecommendationItem[];
+  professional_mode: boolean;
+  audience_goal?: string;
+  output_lanes: StoryboardLane[];
+  active_lane: StoryboardLane;
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface StoryboardVersion {
+  id: number;
+  storyboard_project_id: number;
+  version_no: number;
+  parent_version_id?: number | null;
+  lane: StoryboardLane;
+  status: "draft" | "generating" | "completed" | "failed";
+  is_default: boolean;
+  is_final: boolean;
+  quality_report_json: {
+    style_consistency_score?: number;
+    hook_score_episode?: Record<string, number>;
+    quality_gate_reasons?: string[];
+    completeness_rate?: number;
+    shot_density_risk?: number;
+    rewrite_suggestions?: string[];
+    character_prompt_phase?: string;
+    character_profiles_count?: number;
+    missing_identity_fields_count?: number;
+    failed_identity_characters?: Array<Record<string, unknown>>;
+  };
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface StoryboardShot {
+  id: number;
+  storyboard_version_id: number;
+  episode_no: number;
+  scene_no: number;
+  shot_no: number;
+  location?: string;
+  time_of_day?: string;
+  shot_size?: string;
+  camera_angle?: string;
+  camera_move?: string;
+  duration_sec: number;
+  characters_json: string[];
+  action?: string;
+  dialogue?: string;
+  emotion_beat?: string;
+  transition?: string;
+  sound_hint?: string;
+  production_note?: string;
+  blocking?: string;
+  motivation?: string;
+  performance_note?: string;
+  continuity_anchor?: string;
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface StoryboardTaskStatus {
+  storyboard_project_id: number;
+  task_id?: string;
+  status: string;
+  run_state?: string;
+  current_phase?: string;
+  current_lane?: StoryboardLane;
+  progress: number;
+  current_episode?: number;
+  eta_seconds?: number;
+  eta_label?: string;
+  message?: string;
+  error?: string;
+  error_code?: string;
+  error_category?: string;
+  retryable?: boolean;
+  style_consistency_score?: number;
+  hook_score_episode?: Record<string, number>;
+  quality_gate_reasons?: string[];
+  character_prompt_phase?: string;
+  character_profiles_count?: number;
+  missing_identity_fields_count?: number;
+  failed_identity_characters?: Array<Record<string, unknown>>;
+}
+
+export interface StoryboardCharacterPrompt {
+  id: number;
+  storyboard_project_id: number;
+  storyboard_version_id: number;
+  lane: StoryboardLane;
+  character_key: string;
+  display_name: string;
+  skin_tone: string;
+  ethnicity: string;
+  master_prompt_text: string;
+  negative_prompt_text?: string;
+  style_tags_json: string[];
+  consistency_anchors_json: string[];
+  quality_score?: number;
+  created_at: string;
+  updated_at?: string;
+}
+
+export interface StoryboardCreateData {
+  novel_id: string;
+  target_episodes: number;
+  target_episode_seconds: number;
+  style_profile?: string;
+  mode?: "quick" | "professional";
+  genre_style_key?: string;
+  director_style_key?: string;
+  auto_style_recommendation?: boolean;
+  output_lanes?: StoryboardLane[];
+  professional_mode?: boolean;
+  audience_goal?: string;
+  copyright_assertion: boolean;
+}
+
+export interface StoryboardGenerateResponse {
+  task_id: string;
+  storyboard_project_id: number;
+  created_version_ids: number[];
+}
+
+export interface StoryboardStylePresetItem {
+  key: string;
+  label: string;
+  description: string;
+  tags?: string[];
+  camera_notes?: string[];
+}
+
+export interface StoryboardStyleRecommendationItem {
+  genre_style_key: string;
+  genre_style_label: string;
+  director_style_key: string;
+  director_style_label: string;
+  confidence: number;
+  reason: string;
+}
+
 export interface UpdateNovelData {
   title?: string;
   genre?: string;
@@ -202,19 +492,79 @@ export class ApiError extends Error {
   }
 }
 
+function parseApiErrorMessage(status: number, rawText: string): string {
+  const fallback = rawText || `HTTP ${status}`;
+  const text = (rawText || "").trim();
+  if (!text) return humanizeApiErrorMessage(fallback);
+
+  try {
+    const data = JSON.parse(text) as Record<string, unknown>;
+    const detail = data.detail;
+    if (typeof detail === "string" && detail.trim()) return humanizeApiErrorMessage(detail.trim());
+    if (Array.isArray(detail) && detail.length > 0) {
+      const first = detail[0] as { msg?: string; message?: string } | undefined;
+      if (typeof first?.msg === "string" && first.msg.trim()) return humanizeApiErrorMessage(first.msg.trim());
+      if (typeof first?.message === "string" && first.message.trim()) return humanizeApiErrorMessage(first.message.trim());
+    }
+    if (detail && typeof detail === "object" && !Array.isArray(detail)) {
+      const detailObj = detail as { message?: string };
+      if (typeof detailObj.message === "string" && detailObj.message.trim()) {
+        return humanizeApiErrorMessage(detailObj.message.trim());
+      }
+    }
+    if (typeof data.message === "string" && data.message.trim()) return humanizeApiErrorMessage(data.message.trim());
+    if (typeof data.error === "string" && data.error.trim()) return humanizeApiErrorMessage(data.error.trim());
+  } catch {
+    // non-JSON payload
+  }
+
+  return humanizeApiErrorMessage(fallback);
+}
+
+function humanizeApiErrorMessage(message: string): string {
+  const normalized = (message || "").trim();
+  const lower = normalized.toLowerCase();
+  if (!normalized) return "请求失败，请稍后重试";
+
+  if (lower.includes("email not verified")) return "邮箱未激活，请先完成邮箱激活后再登录";
+  if (lower.includes("email already registered")) return "该邮箱已注册，请直接登录";
+  if (lower.includes("invalid email or password")) return "邮箱或密码错误";
+  if (lower.includes("invalid email")) return "邮箱格式不正确";
+  if (lower.includes("account temporarily locked")) return "账号已被临时锁定，请稍后再试";
+  if (lower.includes("user disabled")) return "账号已被禁用，请联系管理员";
+  if (lower.includes("user inactive")) return "账号未激活，请先完成激活后再登录";
+  if (lower.includes("user disabled or inactive")) return "账号未激活或已被禁用";
+  if (lower.includes("mail service is not configured")) return "系统邮件服务未配置，请联系管理员";
+  if (lower.includes("missing token")) return "登录已失效，请重新登录";
+  if (lower.includes("invalid token")) return "登录凭证无效，请重新登录";
+
+  return normalized;
+}
+
 // Fetch wrapper with error handling
 async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
+  const token =
+    typeof window !== "undefined" ? window.localStorage.getItem(AUTH_TOKEN_KEY) : null;
   const res = await fetch(`${BASE}${path}`, {
     ...options,
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...options?.headers,
     },
   });
 
   if (!res.ok) {
     const text = await res.text();
-    throw new ApiError(res.status, text || `HTTP ${res.status}`);
+    if (res.status === 401 && typeof window !== "undefined") {
+      const current = `${window.location.pathname}${window.location.search || ""}`;
+      if (!window.location.pathname.startsWith("/auth")) {
+        const next = encodeURIComponent(current);
+        window.location.href = `/auth/login?next=${next}`;
+      }
+    }
+    throw new ApiError(res.status, parseApiErrorMessage(res.status, text));
   }
 
   // Handle empty responses
@@ -226,6 +576,67 @@ async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
 
 // API methods
 export const api = {
+  setAuthToken: (token: string | null) => {
+    if (typeof window === "undefined") return;
+    if (token) {
+      window.localStorage.setItem(AUTH_TOKEN_KEY, token);
+    } else {
+      window.localStorage.removeItem(AUTH_TOKEN_KEY);
+    }
+  },
+
+  // Auth
+  register: (data: { email: string; password: string }) =>
+    fetchApi<{ ok?: boolean; message?: string; access_token?: string; user?: AuthUser }>("/api/auth/register", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  login: (data: { email: string; password: string }) =>
+    fetchApi<AuthResponse>("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  logout: () =>
+    fetchApi<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
+
+  me: () =>
+    fetchApi<{ user: AuthUser }>("/api/auth/me"),
+
+  getQuota: () =>
+    fetchApi<AccountQuota>("/api/account/quota"),
+
+  getUsageLedger: (limit = 50) =>
+    fetchApi<UsageLedgerItem[]>(`/api/account/ledger?limit=${encodeURIComponent(limit)}`),
+
+  getNotifications: (limit = 30) =>
+    fetchApi<NotificationItem[]>(`/api/account/notifications?limit=${encodeURIComponent(limit)}`),
+
+  requestVerifyEmail: (email: string) =>
+    fetchApi<{ ok: boolean; message?: string }>("/api/auth/verify-email/request", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    }),
+
+  confirmVerifyEmail: (token: string) =>
+    fetchApi<{ ok: boolean }>("/api/auth/verify-email/confirm", {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    }),
+
+  forgotPassword: (email: string) =>
+    fetchApi<{ ok: boolean }>("/api/auth/password/forgot", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    }),
+
+  resetPassword: (token: string, newPassword: string) =>
+    fetchApi<{ ok: boolean }>("/api/auth/password/reset", {
+      method: "POST",
+      body: JSON.stringify({ token, new_password: newPassword }),
+    }),
+
   // Novels
   listNovels: () => fetchApi<Novel[]>("/api/novels"),
 
@@ -253,19 +664,50 @@ export const api = {
     fetchApi<void>(`/api/novels/${id}`, { method: "DELETE" }),
 
   // Chapters
-  getChapters: (novelId: string) =>
-    fetchApi<Chapter[]>(`/api/novels/${novelId}/chapters`),
+  getVersions: (novelId: string) =>
+    fetchApi<NovelVersion[]>(`/api/novels/${novelId}/versions`),
 
-  getChapter: (novelId: string, chapterNum: number) =>
-    fetchApi<Chapter>(`/api/novels/${novelId}/chapters/${chapterNum}`),
+  activateVersion: (novelId: string, versionId: number) =>
+    fetchApi<{ ok: boolean; active_version_id: number }>(`/api/novels/${novelId}/versions/${versionId}/activate`, {
+      method: "POST",
+    }),
+
+  getChapters: (novelId: string, versionId?: number) =>
+    fetchApi<Chapter[]>(`/api/novels/${novelId}/chapters${versionId ? `?version_id=${encodeURIComponent(versionId)}` : ""}`),
+
+  getChapter: (novelId: string, chapterNum: number, versionId?: number) =>
+    fetchApi<Chapter>(`/api/novels/${novelId}/chapters/${chapterNum}${versionId ? `?version_id=${encodeURIComponent(versionId)}` : ""}`),
 
   getChapterProgress: (novelId: string) =>
     fetchApi<ChapterProgress[]>(`/api/novels/${novelId}/chapter-progress`),
 
-  updateChapter: (novelId: string, chapterNum: number, data: { title?: string; content?: string }) =>
-    fetchApi<Chapter>(`/api/novels/${novelId}/chapters/${chapterNum}`, {
+  getCharacterProfiles: (novelId: string) =>
+    fetchApi<CharacterProfile[]>(`/api/novels/${novelId}/character-profiles`),
+
+  updateChapter: (novelId: string, chapterNum: number, data: { title?: string; content?: string }, versionId?: number) =>
+    fetchApi<Chapter>(`/api/novels/${novelId}/chapters/${chapterNum}${versionId ? `?version_id=${encodeURIComponent(versionId)}` : ""}`, {
       method: "PUT",
       body: JSON.stringify(data),
+    }),
+
+  createRewriteRequest: (
+    novelId: string,
+    data: {
+      base_version_id: number;
+      annotations: RewriteAnnotationInput[];
+    }
+  ) =>
+    fetchApi<RewriteRequest>(`/api/novels/${novelId}/rewrite-requests`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  getRewriteStatus: (novelId: string, requestId: number) =>
+    fetchApi<RewriteRequest>(`/api/novels/${novelId}/rewrite-requests/${requestId}/status`),
+
+  retryRewrite: (novelId: string, requestId: number) =>
+    fetchApi<RewriteRequest>(`/api/novels/${novelId}/rewrite-requests/${requestId}/retry`, {
+      method: "POST",
     }),
 
   // Generation
@@ -288,6 +730,27 @@ export const api = {
     fetchApi<{ ok: boolean }>(`/api/novels/${novelId}/generation/${taskId}`, {
       method: "DELETE",
     }),
+
+  pauseGeneration: (novelId: string, taskId?: string) =>
+    fetchApi<{ ok: boolean; task_id: string; run_state: string }>(
+      `/api/novels/${novelId}/generation/pause${taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""}`,
+      { method: "POST" }
+    ),
+
+  resumeGeneration: (novelId: string, taskId?: string) =>
+    fetchApi<{ ok: boolean; task_id: string; run_state: string }>(
+      `/api/novels/${novelId}/generation/resume${taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""}`,
+      { method: "POST" }
+    ),
+
+  cancelGenerationByNovel: (novelId: string, taskId?: string) =>
+    fetchApi<{ ok: boolean; task_id: string; run_state: string }>(
+      `/api/novels/${novelId}/generation/cancel${taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""}`,
+      { method: "POST" }
+    ),
+
+  listGenerationTasks: (novelId: string, limit = 20) =>
+    fetchApi<GenerationTaskItem[]>(`/api/novels/${novelId}/generation/tasks?limit=${encodeURIComponent(limit)}`),
 
   confirmOutline: (novelId: string, taskId: string) =>
     fetchApi<{ ok: boolean; message: string }>(`/api/novels/${novelId}/generation/${taskId}/confirm-outline`, {
@@ -345,6 +808,149 @@ export const api = {
 
   getObservability: (novelId: string) =>
     fetchApi<ObservabilityPayload>(`/api/novels/${novelId}/observability`),
+
+  // Storyboards
+  listStoryboardProjects: () =>
+    fetchApi<StoryboardProject[]>("/api/storyboards"),
+
+  createStoryboardProject: (data: StoryboardCreateData) =>
+    fetchApi<StoryboardProject>("/api/storyboards", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  getStoryboardStylePresets: () =>
+    fetchApi<{ genre_styles: StoryboardStylePresetItem[]; director_styles: StoryboardStylePresetItem[] }>(
+      "/api/storyboards/style-presets"
+    ),
+
+  getStoryboardStyleRecommendations: (novelId: string) =>
+    fetchApi<{ novel_id: string; recommendations: StoryboardStyleRecommendationItem[] }>(
+      "/api/storyboards/style-recommendations",
+      {
+        method: "POST",
+        body: JSON.stringify({ novel_id: novelId }),
+      }
+    ),
+
+  generateStoryboard: (projectId: number) =>
+    fetchApi<StoryboardGenerateResponse>(`/api/storyboards/${projectId}/generate`, {
+      method: "POST",
+    }),
+
+  getStoryboardStatus: (projectId: number, taskId?: string) =>
+    fetchApi<StoryboardTaskStatus>(
+      `/api/storyboards/${projectId}/status${taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""}`
+    ),
+
+  pauseStoryboard: (projectId: number, taskId?: string) =>
+    fetchApi<{ ok: boolean; storyboard_project_id: number; task_id?: string; run_state?: string }>(
+      `/api/storyboards/${projectId}/pause${taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""}`,
+      { method: "POST" }
+    ),
+
+  resumeStoryboard: (projectId: number, taskId?: string) =>
+    fetchApi<{ ok: boolean; storyboard_project_id: number; task_id?: string; run_state?: string }>(
+      `/api/storyboards/${projectId}/resume${taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""}`,
+      { method: "POST" }
+    ),
+
+  cancelStoryboard: (projectId: number, taskId?: string) =>
+    fetchApi<{ ok: boolean; storyboard_project_id: number; task_id?: string; run_state?: string }>(
+      `/api/storyboards/${projectId}/cancel${taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""}`,
+      { method: "POST" }
+    ),
+
+  retryStoryboard: (projectId: number) =>
+    fetchApi<{ ok: boolean; storyboard_project_id: number; task_id?: string; run_state?: string }>(
+      `/api/storyboards/${projectId}/retry`,
+      { method: "POST" }
+    ),
+
+  listStoryboardVersions: (projectId: number) =>
+    fetchApi<StoryboardVersion[]>(`/api/storyboards/${projectId}/versions`),
+
+  activateStoryboardVersion: (projectId: number, versionId: number) =>
+    fetchApi<{ ok: boolean; storyboard_project_id: number }>(
+      `/api/storyboards/${projectId}/versions/${versionId}/activate`,
+      { method: "POST" }
+    ),
+
+  finalizeStoryboardVersion: (projectId: number, versionId: number) =>
+    fetchApi<{ ok: boolean; storyboard_project_id: number }>(
+      `/api/storyboards/${projectId}/versions/${versionId}/finalize`,
+      { method: "POST" }
+    ),
+
+  listStoryboardShots: (projectId: number, versionId?: number, episodeNo?: number) => {
+    const qs = new URLSearchParams();
+    if (versionId !== undefined) qs.set("version_id", String(versionId));
+    if (episodeNo !== undefined) qs.set("episode_no", String(episodeNo));
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return fetchApi<StoryboardShot[]>(`/api/storyboards/${projectId}/shots${suffix}`);
+  },
+
+  updateStoryboardShot: (projectId: number, shotId: number, data: Partial<StoryboardShot>) =>
+    fetchApi<StoryboardShot>(`/api/storyboards/${projectId}/shots/${shotId}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+
+  listStoryboardCharacterPrompts: (projectId: number, versionId?: number, lane?: StoryboardLane) => {
+    const qs = new URLSearchParams();
+    if (versionId !== undefined) qs.set("version_id", String(versionId));
+    if (lane) qs.set("lane", lane);
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return fetchApi<StoryboardCharacterPrompt[]>(`/api/storyboards/${projectId}/characters${suffix}`);
+  },
+
+  regenerateStoryboardCharacterPrompts: (projectId: number, versionId?: number, lane?: StoryboardLane) => {
+    const qs = new URLSearchParams();
+    if (versionId !== undefined) qs.set("version_id", String(versionId));
+    if (lane) qs.set("lane", lane);
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return fetchApi<{
+      ok: boolean;
+      storyboard_project_id: number;
+      storyboard_version_id: number;
+      lane: StoryboardLane;
+      generated_count: number;
+      profiles_count: number;
+      missing_identity_fields_count: number;
+      failed_identity_characters: Array<Record<string, unknown>>;
+    }>(`/api/storyboards/${projectId}/characters/generate${suffix}`, { method: "POST" });
+  },
+
+  optimizeStoryboardVersion: (projectId: number, versionId: number) =>
+    fetchApi<{
+      ok: boolean;
+      storyboard_project_id: number;
+      version_id: number;
+      optimized_shots: number;
+      quality_report_json: Record<string, unknown>;
+    }>(`/api/storyboards/${projectId}/versions/${versionId}/optimize`, {
+      method: "POST",
+    }),
+
+  getStoryboardDiff: (projectId: number, versionId: number, compareTo: number) =>
+    fetchApi<{
+      storyboard_project_id: number;
+      version_id: number;
+      compare_to: number;
+      summary: Record<string, number>;
+      episodes: Array<{ episode_no: number; added: number; removed: number; changed: number }>;
+    }>(`/api/storyboards/${projectId}/versions/${versionId}/diff?compare_to=${encodeURIComponent(compareTo)}`),
+
+  getStoryboardCsvUrl: (projectId: number, versionId: number) =>
+    `${BASE}/api/storyboards/${projectId}/export/csv?version_id=${encodeURIComponent(versionId)}`,
+
+  getStoryboardCharacterExportUrl: (projectId: number, versionId: number, lane?: StoryboardLane, format: "csv" | "json" = "csv") => {
+    const qs = new URLSearchParams();
+    qs.set("version_id", String(versionId));
+    if (lane) qs.set("lane", lane);
+    qs.set("format", format);
+    return `${BASE}/api/storyboards/${projectId}/characters/export?${qs.toString()}`;
+  },
 };
 
 export default api;
