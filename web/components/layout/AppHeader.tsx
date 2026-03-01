@@ -1,15 +1,17 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
-import { BookCopy, Plus, Star, Type } from "lucide-react";
+import { BookCopy, LogOut, Plus, Star, Type } from "lucide-react";
 import { api, Novel } from "@/lib/api";
 import { Button } from "@/components/ui/Button";
 
 export function AppHeader() {
   const pathname = usePathname();
+  const router = useRouter();
   const [novels, setNovels] = useState<Novel[]>([]);
+  const [logoutLoading, setLogoutLoading] = useState(false);
 
   useEffect(() => {
     let disposed = false;
@@ -53,11 +55,19 @@ export function AppHeader() {
         <div className="flex items-center gap-4 min-w-0">
           <Link href="/" className="inline-flex items-center gap-2 shrink-0">
             <div className="w-7 h-7 rounded-[8px] bg-[#C8211B] text-white flex items-center justify-center font-semibold text-sm">锦</div>
-            <span className="font-semibold text-[#1F1B18] text-[18px] leading-none">锦书</span>
+            <div className="flex items-center gap-2">
+              <span className="font-semibold text-[#1F1B18] text-[18px] leading-none">锦书</span>
+              {pathname === "/" ? (
+                <span className="hidden lg:inline-flex h-5 items-center rounded-full border border-[#E6DED6] bg-[#F9F6F2] px-2 text-[11px] leading-none text-[#7A7068]">
+                  AI 智能写小说平台
+                </span>
+              ) : null}
+            </div>
           </Link>
           <nav className="hidden md:flex items-center gap-6 text-[15px]">
             <NavItem href="/" active={pathname === "/"}>工作台</NavItem>
             <NavItem href="/novels" active={pathname.startsWith("/novels")}>我的作品</NavItem>
+            <NavItem href="/storyboards" active={pathname.startsWith("/storyboards")}>导演分镜</NavItem>
           </nav>
         </div>
 
@@ -74,6 +84,27 @@ export function AppHeader() {
               新建
             </Button>
           </Link>
+          {!pathname.startsWith("/auth") ? (
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-9 px-3 text-sm border border-[#DDD8D3] hover:bg-[#F2EEEA]"
+              loading={logoutLoading}
+              onClick={async () => {
+                try {
+                  setLogoutLoading(true);
+                  await api.logout();
+                } finally {
+                  api.setAuthToken(null);
+                  setLogoutLoading(false);
+                  router.push("/auth/login");
+                }
+              }}
+            >
+              <LogOut className="w-4 h-4 mr-1" />
+              退出登录
+            </Button>
+          ) : null}
         </div>
       </div>
     </header>

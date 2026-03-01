@@ -1,11 +1,13 @@
 """Vector store wrapper using pgvector."""
 import logging
 import re
+import time
 from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.llm import embed_query
+from app.core.logging_config import log_event
 from app.core.database import SessionLocal
 from app.models.novel import KnowledgeChunk
 
@@ -36,7 +38,14 @@ class VectorStoreWrapper:
                         KnowledgeChunk.embedding.cosine_distance(query_embedding)
                     )
                 except Exception as e:
-                    logger.warning(f"Vector search failed: {e}")
+                    log_event(
+                        logger,
+                        "vector.search.fallback",
+                        level=logging.WARNING,
+                        novel_id=novel_id,
+                        error_class=type(e).__name__,
+                        error_category="transient",
+                    )
             rows = db.execute(stmt.limit(max(limit * 8, 20))).scalars().all()
             if query_embedding is None and query_text:
                 rows = _lexical_rank(rows, query_text, limit)
@@ -60,6 +69,7 @@ class VectorStoreWrapper:
         should_close = db is None
         db = db or SessionLocal()
         try:
+            started = time.perf_counter()
             db.add(KnowledgeChunk(
                 novel_id=novel_id,
                 content=content,
@@ -68,8 +78,24 @@ class VectorStoreWrapper:
                 metadata_=metadata or {},
             ))
             db.commit()
+            log_event(
+                logger,
+                "vector.chunk.added",
+                novel_id=novel_id,
+                chunk_type=chunk_type,
+                latency_ms=round((time.perf_counter() - started) * 1000, 2),
+            )
         except Exception as e:
-            logger.error(f"Failed to add knowledge chunk: {e}")
+            log_event(
+                logger,
+                "vector.chunk.add.error",
+                level=logging.ERROR,
+                novel_id=novel_id,
+                chunk_type=chunk_type,
+                error_class=type(e).__name__,
+                error_code="VECTOR_ADD_FAILED",
+                error_category="transient",
+            )
             db.rollback()
         finally:
             if should_close:

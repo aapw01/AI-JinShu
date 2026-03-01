@@ -1,0 +1,493 @@
+"""Celery task for chapter rewrite workflow."""
+from __future__ import annotations
+
+import logging
+
+from sqlalchemy import select
+
+from app.core.database import SessionLocal
+from app.core.llm import get_llm_with_fallback
+from app.core.llm_usage import begin_usage_session, end_usage_session, snapshot_usage
+from app.core.logging_config import bind_log_context, log_event
+from app.core.strategy import get_model_for_stage
+from app.models.novel import ChapterVersion, Novel, NovelVersion, RewriteRequest
+from app.prompts import render_prompt
+from app.services.generation.common import resolve_chapter_title
+from app.services.rewrite.service import group_annotations_by_chapter
+from app.services.scheduler.scheduler_service import (
+    heartbeat_task as heartbeat_creation_task,
+    finalize_task as finalize_creation_task,
+    get_task_by_id as get_creation_task_by_id,
+    mark_task_running as mark_creation_task_running,
+    update_task_progress as update_creation_task_progress,
+)
+from app.services.task_runtime.checkpoint_repo import (
+    get_last_completed_unit,
+    mark_unit_completed,
+    update_resume_cursor,
+)
+from app.services.task_runtime.cursor_service import resume_from_last_completed
+from app.workers.celery_app import app
+
+logger = logging.getLogger(__name__)
+
+
+def _get_creation_task_state(task_db_id: int) -> str | None:
+    db = SessionLocal()
+    try:
+        row = get_creation_task_by_id(db, task_id=task_db_id)
+        return row.status if row else None
+    finally:
+        db.close()
+
+
+def _mark_creation_running(task_db_id: int) -> None:
+    db = SessionLocal()
+    try:
+        mark_creation_task_running(db, task_id=task_db_id)
+        db.commit()
+    finally:
+        db.close()
+
+
+def _update_creation_progress(task_db_id: int, *, progress: float, message: str, phase: str = "rewrite") -> None:
+    db = SessionLocal()
+    try:
+        usage = snapshot_usage()
+        update_creation_task_progress(
+            db,
+            task_id=task_db_id,
+            progress=progress,
+            message=message,
+            phase=phase,
+            token_usage_input=int(usage.get("input_tokens") or 0),
+            token_usage_output=int(usage.get("output_tokens") or 0),
+            estimated_cost=float(usage.get("estimated_cost") or 0.0),
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+def _heartbeat_creation(task_db_id: int) -> None:
+    db = SessionLocal()
+    try:
+        heartbeat_creation_task(db, task_id=task_db_id)
+        db.commit()
+    finally:
+        db.close()
+
+
+def _mark_rewrite_checkpoint(task_db_id: int, *, chapter_num: int) -> None:
+    db = SessionLocal()
+    try:
+        mark_unit_completed(
+            db,
+            creation_task_id=task_db_id,
+            unit_type="chapter",
+            unit_no=int(chapter_num),
+            payload={"phase": "rewrite", "chapter_num": int(chapter_num)},
+        )
+        last_completed = get_last_completed_unit(db, creation_task_id=task_db_id, unit_type="chapter")
+        update_resume_cursor(
+            db,
+            creation_task_id=task_db_id,
+            unit_type="chapter",
+            last_completed_unit_no=last_completed,
+            next_unit_no=int(last_completed or 0) + 1,
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+def _resolve_rewrite_resume(task_db_id: int, *, rewrite_from: int, rewrite_to: int) -> int:
+    db = SessionLocal()
+    try:
+        last_completed = get_last_completed_unit(
+            db,
+            creation_task_id=task_db_id,
+            unit_type="chapter",
+            unit_from=int(rewrite_from),
+            unit_to=int(rewrite_to),
+        )
+        resume_from = resume_from_last_completed(
+            range_start=int(rewrite_from),
+            range_end=int(rewrite_to),
+            last_completed=last_completed,
+        )
+        update_resume_cursor(
+            db,
+            creation_task_id=task_db_id,
+            unit_type="chapter",
+            last_completed_unit_no=last_completed,
+            next_unit_no=int(resume_from),
+        )
+        db.commit()
+        return int(resume_from)
+    finally:
+        db.close()
+
+
+def _finalize_creation(
+    task_db_id: int,
+    *,
+    final_status: str,
+    progress: float,
+    message: str,
+    phase: str,
+    error_code: str | None = None,
+    error_category: str | None = None,
+    error_detail: str | None = None,
+    result_json: dict | None = None,
+) -> None:
+    db = SessionLocal()
+    try:
+        finalize_creation_task(
+            db,
+            task_id=task_db_id,
+            final_status=final_status,
+            progress=progress,
+            message=message,
+            phase=phase,
+            error_code=error_code,
+            error_category=error_category,
+            error_detail=error_detail,
+            result_json=result_json,
+        )
+        db.commit()
+    finally:
+        db.close()
+
+
+def _rewrite_prompt(
+    novel_title: str,
+    chapter_num: int,
+    base_title: str | None,
+    base_content: str,
+    previous_context: str,
+    annotations: list[dict],
+    target_language: str,
+) -> str:
+    ann_lines = []
+    for idx, ann in enumerate(annotations, start=1):
+        snippet = (ann.get("selected_text") or "").strip()
+        if len(snippet) > 80:
+            snippet = snippet[:80] + "..."
+        ann_lines.append(
+            f"{idx}. [优先级:{ann.get('priority','should')}] [类型:{ann.get('issue_type','other')}] "
+            f"片段:{snippet or '未选中片段'} 指令:{ann.get('instruction','')}"
+        )
+
+    ann_text = "\n".join(ann_lines) if ann_lines else "无"
+    context_block = previous_context or "无"
+
+    return render_prompt(
+        "rewrite_chapter_from_annotations",
+        novel_title=novel_title,
+        chapter_num=chapter_num,
+        base_title=(base_title or ""),
+        target_language=target_language,
+        context_block=context_block,
+        ann_text=ann_text,
+        base_content=base_content,
+    )
+
+
+def _collect_previous_context(db, target_version_id: int, chapter_num: int) -> str:
+    rows = db.execute(
+        select(ChapterVersion)
+        .where(
+            ChapterVersion.novel_version_id == target_version_id,
+            ChapterVersion.chapter_num < chapter_num,
+        )
+        .order_by(ChapterVersion.chapter_num.desc())
+        .limit(2)
+    ).scalars().all()
+    rows = list(reversed(rows))
+    if not rows:
+        return ""
+    parts: list[str] = []
+    for row in rows:
+        title = row.title or f"第{row.chapter_num}章"
+        content = (row.content or "")[:500]
+        parts.append(f"- {title}: {content}")
+    return "\n".join(parts)
+
+
+@app.task(bind=True, acks_late=True, reject_on_worker_lost=True)
+def submit_rewrite_task(
+    self,
+    novel_id: int,
+    rewrite_request_id: int,
+    base_version_id: int,
+    target_version_id: int,
+    rewrite_from: int,
+    rewrite_to: int,
+    creation_task_id: int | None = None,
+):
+    begin_usage_session(f"rewrite:{self.request.id}")
+    db = SessionLocal()
+    try:
+        if creation_task_id is not None:
+            c_status = _get_creation_task_state(creation_task_id)
+            if c_status not in {"dispatching", "running"}:
+                logger.info("Skip rewrite execution because creation_task status=%s", c_status)
+                return
+            _mark_creation_running(creation_task_id)
+            rewrite_from = _resolve_rewrite_resume(
+                creation_task_id,
+                rewrite_from=int(rewrite_from),
+                rewrite_to=int(rewrite_to),
+            )
+            if int(rewrite_from) > int(rewrite_to):
+                _finalize_creation(
+                    creation_task_id,
+                    final_status="completed",
+                    progress=100.0,
+                    message="重写完成（已无待处理章节）",
+                    phase="completed",
+                )
+                return
+
+        novel = db.execute(select(Novel).where(Novel.id == novel_id)).scalar_one_or_none()
+        req = db.execute(select(RewriteRequest).where(RewriteRequest.id == rewrite_request_id)).scalar_one_or_none()
+        target_version = db.execute(select(NovelVersion).where(NovelVersion.id == target_version_id)).scalar_one_or_none()
+        if not novel or not req or not target_version:
+            raise RuntimeError("rewrite target not found")
+
+        req.status = "running"
+        req.task_id = self.request.id
+        req.error = None
+        target_version.status = "generating"
+        target_version.source_task_id = self.request.id
+        db.commit()
+        with bind_log_context(task_id=self.request.id, novel_id=novel_id):
+            log_event(
+                logger,
+                "rewrite.task.started",
+                task_id=self.request.id,
+                novel_id=novel_id,
+                chapter_num=rewrite_from,
+                run_state="running",
+                base_version_id=base_version_id,
+                target_version_id=target_version_id,
+            )
+
+        strategy = novel.strategy or "web-novel"
+        provider, model = get_model_for_stage(strategy, "writer")
+        llm = get_llm_with_fallback(provider, model)
+        annotations_by_chapter = group_annotations_by_chapter(db, rewrite_request_id)
+
+        total = max(1, rewrite_to - rewrite_from + 1)
+        for chapter_num in range(rewrite_from, rewrite_to + 1):
+            if creation_task_id is not None:
+                try:
+                    _heartbeat_creation(creation_task_id)
+                except Exception:
+                    pass
+                c_state = _get_creation_task_state(creation_task_id)
+                if c_state == "cancelled":
+                    raise RuntimeError("rewrite_cancelled")
+                if c_state == "paused":
+                    raise RuntimeError("rewrite_paused")
+            log_event(
+                logger,
+                "rewrite.chapter.start",
+                task_id=self.request.id,
+                novel_id=novel_id,
+                chapter_num=chapter_num,
+                base_version_id=base_version_id,
+                target_version_id=target_version_id,
+            )
+            base_chapter = db.execute(
+                select(ChapterVersion)
+                .where(
+                    ChapterVersion.novel_version_id == base_version_id,
+                    ChapterVersion.chapter_num == chapter_num,
+                )
+            ).scalar_one_or_none()
+            if not base_chapter:
+                raise RuntimeError(f"base chapter missing: {chapter_num}")
+
+            ann_rows = annotations_by_chapter.get(chapter_num, [])
+            annotations = [
+                {
+                    "selected_text": x.selected_text,
+                    "issue_type": x.issue_type,
+                    "instruction": x.instruction,
+                    "priority": x.priority,
+                }
+                for x in ann_rows
+            ]
+            prev_context = _collect_previous_context(db, target_version_id, chapter_num)
+            prompt = _rewrite_prompt(
+                novel_title=novel.title,
+                chapter_num=chapter_num,
+                base_title=base_chapter.title,
+                base_content=base_chapter.content or "",
+                previous_context=prev_context,
+                annotations=annotations,
+                target_language=novel.target_language or "zh",
+            )
+            try:
+                rewritten = str(llm.invoke(prompt).content or "").strip()
+            except Exception as e:
+                log_event(
+                    logger,
+                    "rewrite.chapter.llm_error",
+                    level=logging.WARNING,
+                    task_id=self.request.id,
+                    novel_id=novel_id,
+                    chapter_num=chapter_num,
+                    error_class=type(e).__name__,
+                    error_category="transient",
+                )
+                rewritten = (base_chapter.content or "").strip()
+
+            if not rewritten:
+                rewritten = (base_chapter.content or "").strip()
+            chapter_title = resolve_chapter_title(
+                chapter_num=chapter_num,
+                title=base_chapter.title,
+                summary=base_chapter.summary,
+                content=rewritten,
+            )
+
+            target_chapter = db.execute(
+                select(ChapterVersion)
+                .where(
+                    ChapterVersion.novel_version_id == target_version_id,
+                    ChapterVersion.chapter_num == chapter_num,
+                )
+            ).scalar_one_or_none()
+            if target_chapter:
+                target_chapter.title = chapter_title
+                target_chapter.content = rewritten
+                target_chapter.summary = base_chapter.summary
+                target_chapter.status = "completed"
+                target_chapter.metadata_ = {
+                    **(target_chapter.metadata_ or {}),
+                    "rewrite_request_id": rewrite_request_id,
+                    "based_on_version": base_version_id,
+                }
+            else:
+                db.add(
+                    ChapterVersion(
+                        novel_version_id=target_version_id,
+                        chapter_num=chapter_num,
+                        title=chapter_title,
+                        content=rewritten,
+                        summary=base_chapter.summary,
+                        status="completed",
+                        source_chapter_version_id=base_chapter.id,
+                        metadata_={
+                            "rewrite_request_id": rewrite_request_id,
+                            "based_on_version": base_version_id,
+                        },
+                    )
+                )
+
+            finished = chapter_num - rewrite_from + 1
+            req.current_chapter = chapter_num
+            req.progress = round((finished / total) * 100, 2)
+            req.message = f"重写中：第{chapter_num}章"
+            db.commit()
+            if creation_task_id is not None:
+                _mark_rewrite_checkpoint(creation_task_id, chapter_num=chapter_num)
+                _update_creation_progress(
+                    creation_task_id,
+                    progress=req.progress,
+                    message=req.message or "重写中",
+                    phase="rewrite",
+                )
+            log_event(
+                logger,
+                "rewrite.chapter.end",
+                task_id=self.request.id,
+                novel_id=novel_id,
+                chapter_num=chapter_num,
+                progress=req.progress,
+            )
+
+        req.status = "completed"
+        req.progress = 100.0
+        req.message = "重写完成"
+        target_version.status = "completed"
+
+        all_versions = db.execute(select(NovelVersion).where(NovelVersion.novel_id == novel_id)).scalars().all()
+        for version in all_versions:
+            version.is_default = 1 if version.id == target_version_id else 0
+        db.commit()
+        log_event(
+            logger,
+            "rewrite.completed",
+            task_id=self.request.id,
+            novel_id=novel_id,
+            chapter_num=rewrite_to,
+            run_state="completed",
+        )
+        if creation_task_id is not None:
+            usage = snapshot_usage()
+            _finalize_creation(
+                creation_task_id,
+                final_status="completed",
+                progress=100.0,
+                message="重写完成",
+                phase="completed",
+                result_json={
+                    "token_usage_input": int(usage.get("input_tokens") or 0),
+                    "token_usage_output": int(usage.get("output_tokens") or 0),
+                    "estimated_cost": float(usage.get("estimated_cost") or 0.0),
+                    "usage_calls": int(usage.get("calls") or 0),
+                    "usage_stages": usage.get("stages") or {},
+                },
+            )
+    except Exception as exc:
+        err_text = str(exc)
+        is_paused = err_text == "rewrite_paused"
+        is_cancelled = err_text == "rewrite_cancelled"
+        log_event(
+            logger,
+            "rewrite.failed" if not (is_paused or is_cancelled) else "rewrite.stopped",
+            level=logging.ERROR if not (is_paused or is_cancelled) else logging.WARNING,
+            task_id=self.request.id,
+            novel_id=novel_id,
+            run_state="failed" if not (is_paused or is_cancelled) else ("paused" if is_paused else "cancelled"),
+            error_class=type(exc).__name__,
+            error_code=None if (is_paused or is_cancelled) else "REWRITE_TASK_FAILED",
+            error_category=None if (is_paused or is_cancelled) else "transient",
+        )
+        req = db.execute(select(RewriteRequest).where(RewriteRequest.id == rewrite_request_id)).scalar_one_or_none()
+        if req:
+            req.status = "paused" if is_paused else ("cancelled" if is_cancelled else "failed")
+            req.error = None if (is_paused or is_cancelled) else str(exc)
+            req.message = "重写任务已暂停" if is_paused else ("重写任务已取消" if is_cancelled else "重写失败")
+        target_version = db.execute(select(NovelVersion).where(NovelVersion.id == target_version_id)).scalar_one_or_none()
+        if target_version and not is_paused:
+            target_version.status = "failed"
+        db.commit()
+        if creation_task_id is not None:
+            usage = snapshot_usage()
+            _finalize_creation(
+                creation_task_id,
+                final_status="paused" if is_paused else ("cancelled" if is_cancelled else "failed"),
+                progress=float(req.progress if req else 0.0),
+                message=str(req.message if req else "任务结束"),
+                phase="paused" if is_paused else ("cancelled" if is_cancelled else "failed"),
+                error_code=None if (is_paused or is_cancelled) else "REWRITE_TASK_FAILED",
+                error_category=None if (is_paused or is_cancelled) else "transient",
+                error_detail=None if (is_paused or is_cancelled) else str(exc),
+                result_json={
+                    "token_usage_input": int(usage.get("input_tokens") or 0),
+                    "token_usage_output": int(usage.get("output_tokens") or 0),
+                    "estimated_cost": float(usage.get("estimated_cost") or 0.0),
+                    "usage_calls": int(usage.get("calls") or 0),
+                    "usage_stages": usage.get("stages") or {},
+                },
+            )
+        if not (is_paused or is_cancelled):
+            raise
+    finally:
+        db.close()
+        end_usage_session()

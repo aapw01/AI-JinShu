@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Optional
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
@@ -46,19 +47,37 @@ class StoryBibleStore:
                 row.metadata_ = {**(row.metadata_ or {}), **(metadata or {})}
                 row.revision = (row.revision or 1) + 1
             else:
-                row = StoryEntity(
-                    novel_id=novel_id,
-                    entity_type=entity_type,
-                    name=name,
-                    status=status,
-                    summary=summary,
-                    metadata_=metadata or {},
-                    revision=1,
-                )
-                db.add(row)
-            db.commit()
+                try:
+                    with db.begin_nested():
+                        row = StoryEntity(
+                            novel_id=novel_id,
+                            entity_type=entity_type,
+                            name=name,
+                            status=status,
+                            summary=summary,
+                            metadata_=metadata or {},
+                            revision=1,
+                        )
+                        db.add(row)
+                        db.flush()
+                except IntegrityError:
+                    row = db.execute(stmt).scalar_one_or_none()
+                    if row is None:
+                        raise
+                    row.status = status if status is not None else row.status
+                    row.summary = summary if summary is not None else row.summary
+                    row.metadata_ = {**(row.metadata_ or {}), **(metadata or {})}
+                    row.revision = (row.revision or 1) + 1
+            if should_close:
+                db.commit()
+            else:
+                db.flush()
             db.refresh(row)
             return row
+        except Exception:
+            if should_close:
+                db.rollback()
+            raise
         finally:
             if should_close:
                 db.close()
@@ -86,9 +105,16 @@ class StoryBibleStore:
                 revision=1,
             )
             db.add(row)
-            db.commit()
+            if should_close:
+                db.commit()
+            else:
+                db.flush()
             db.refresh(row)
             return row
+        except Exception:
+            if should_close:
+                db.rollback()
+            raise
         finally:
             if should_close:
                 db.close()
@@ -121,9 +147,16 @@ class StoryBibleStore:
                 payload=payload or {},
             )
             db.add(row)
-            db.commit()
+            if should_close:
+                db.commit()
+            else:
+                db.flush()
             db.refresh(row)
             return row
+        except Exception:
+            if should_close:
+                db.rollback()
+            raise
         finally:
             if should_close:
                 db.close()
@@ -153,19 +186,37 @@ class StoryBibleStore:
                 row.resolved_chapter = resolved_chapter
                 row.payload = {**(row.payload or {}), **(payload or {})}
             else:
-                row = StoryForeshadow(
-                    novel_id=novel_id,
-                    foreshadow_id=foreshadow_id,
-                    title=title,
-                    planted_chapter=planted_chapter,
-                    resolved_chapter=resolved_chapter,
-                    state=state,
-                    payload=payload or {},
-                )
-                db.add(row)
-            db.commit()
+                try:
+                    with db.begin_nested():
+                        row = StoryForeshadow(
+                            novel_id=novel_id,
+                            foreshadow_id=foreshadow_id,
+                            title=title,
+                            planted_chapter=planted_chapter,
+                            resolved_chapter=resolved_chapter,
+                            state=state,
+                            payload=payload or {},
+                        )
+                        db.add(row)
+                        db.flush()
+                except IntegrityError:
+                    row = db.execute(stmt).scalar_one_or_none()
+                    if row is None:
+                        raise
+                    row.title = title if title is not None else row.title
+                    row.state = state
+                    row.resolved_chapter = resolved_chapter
+                    row.payload = {**(row.payload or {}), **(payload or {})}
+            if should_close:
+                db.commit()
+            else:
+                db.flush()
             db.refresh(row)
             return row
+        except Exception:
+            if should_close:
+                db.rollback()
+            raise
         finally:
             if should_close:
                 db.close()
@@ -188,9 +239,16 @@ class StoryBibleStore:
                 snapshot_json=snapshot_json,
             )
             db.add(row)
-            db.commit()
+            if should_close:
+                db.commit()
+            else:
+                db.flush()
             db.refresh(row)
             return row
+        except Exception:
+            if should_close:
+                db.rollback()
+            raise
         finally:
             if should_close:
                 db.close()
@@ -384,9 +442,16 @@ class CheckpointStore:
                 state_json=state_json,
             )
             db.add(row)
-            db.commit()
+            if should_close:
+                db.commit()
+            else:
+                db.flush()
             db.refresh(row)
             return row
+        except Exception:
+            if should_close:
+                db.rollback()
+            raise
         finally:
             if should_close:
                 db.close()
@@ -415,9 +480,16 @@ class QualityReportStore:
                 verdict=verdict,
             )
             db.add(row)
-            db.commit()
+            if should_close:
+                db.commit()
+            else:
+                db.flush()
             db.refresh(row)
             return row
+        except Exception:
+            if should_close:
+                db.rollback()
+            raise
         finally:
             if should_close:
                 db.close()

@@ -8,6 +8,9 @@ from fastapi.responses import StreamingResponse, PlainTextResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.authz.deps import require_permission
+from app.core.authz.resources import load_novel_resource
+from app.core.authz.types import Permission, Principal
 from app.core.database import get_db, resolve_novel
 from app.models.novel import Novel, Chapter, ChapterOutline, NovelSpecification
 
@@ -28,7 +31,12 @@ def _chapter_file_name(chapter: Chapter) -> str:
 
 
 @router.get("/{novel_id}/export")
-def export_novel(novel_id: str, format: str = "txt", db: Session = Depends(get_db)):
+def export_novel(
+    novel_id: str,
+    format: str = "txt",
+    db: Session = Depends(get_db),
+    _: Principal = Depends(require_permission(Permission.NOVEL_READ, resource_loader=load_novel_resource)),
+):
     """Export novel as txt, md, or zip."""
     novel = resolve_novel(db, novel_id)
     if not novel:

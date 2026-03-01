@@ -10,9 +10,14 @@ import re
 from langgraph.graph import END, StateGraph
 from sqlalchemy import select
 
+from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.core.i18n import evaluate_language_quality, get_native_style_profile
+from app.core.logging_config import log_event
 from app.core.strategy import get_model_for_stage
+from app.core.tokens import estimate_tokens
+from app.core.llm_usage import snapshot_usage
+from app.prompts import render_prompt
 from app.models.novel import Chapter, GenerationTask, Novel, GenerationCheckpoint, NovelFeedback, StoryForeshadow
 from app.services.generation.agents import (
     FactExtractorAgent,
@@ -26,13 +31,14 @@ from app.services.generation.agents import (
 from app.services.generation.common import (
     MAX_RETRIES,
     REVIEW_SCORE_THRESHOLD,
-    estimate_tokens,
     generate_chapter_summary,
     logger,
+    resolve_chapter_title,
     save_full_outlines,
     save_prewrite_artifacts,
     update_character_states_from_content,
 )
+from app.services.generation.character_profiles import update_character_profiles_incremental
 from app.services.generation.policies import (
     ClosurePolicyEngine,
     ClosurePolicyInput,
@@ -126,6 +132,15 @@ def _progress(state: GenerationState, step: str, chapter: int, pct: float, msg: 
     payload = dict(meta or {})
     payload.setdefault("task_id", state.get("task_id"))
     payload.setdefault("novel_id", state.get("novel_id"))
+    usage = snapshot_usage()
+    usage_in = int(usage.get("input_tokens") or 0)
+    usage_out = int(usage.get("output_tokens") or 0)
+    payload.setdefault("token_usage_input", usage_in or int(state.get("total_input_tokens") or 0))
+    payload.setdefault("token_usage_output", usage_out or int(state.get("total_output_tokens") or 0))
+    if payload.get("estimated_cost") is None:
+        input_tokens = int(payload.get("token_usage_input") or 0)
+        output_tokens = int(payload.get("token_usage_output") or 0)
+        payload["estimated_cost"] = round((input_tokens / 1000) * 0.0015 + (output_tokens / 1000) * 0.002, 6)
     logger.info(
         "PIPELINE progress task_id=%s novel_id=%s step=%s chapter=%s pct=%.2f msg=%s meta=%s",
         payload.get("task_id"),
@@ -1330,12 +1345,17 @@ def _node_consistency_check(state: GenerationState) -> GenerationState:
 def _node_save_blocked(state: GenerationState) -> GenerationState:
     chapter_num = state["current_chapter"]
     report = state["consistency_report"]
+    chapter_title = resolve_chapter_title(
+        chapter_num=chapter_num,
+        title=(state.get("outline") or {}).get("title"),
+        outline=state.get("outline") or {},
+    )
     db = SessionLocal()
     try:
         existing_stmt = select(Chapter).where(Chapter.novel_id == state["novel_id"], Chapter.chapter_num == chapter_num)
         existing = db.execute(existing_stmt).scalar_one_or_none()
         payload = {
-            "title": state["outline"].get("title", f"第{chapter_num}章"),
+            "title": chapter_title,
             "content": "",
             "summary": "",
             "status": "consistency_blocked",
@@ -1375,7 +1395,7 @@ def _node_save_blocked(state: GenerationState) -> GenerationState:
             },
         )
     _progress(state, "chapter_blocked", chapter_num, _chapter_progress(state, 1.0), f"第{chapter_num}章因一致性检查未通过已跳过", {"current_phase": "chapter_blocked", "total_chapters": state["num_chapters"]})
-    return {}
+    return {"outline": {**(state.get("outline") or {}), "title": chapter_title}}
 
 
 def _node_writer(state: GenerationState) -> GenerationState:
@@ -1418,8 +1438,10 @@ def _node_writer(state: GenerationState) -> GenerationState:
         {"variant": "A", "draft": draft_a},
         {"variant": "B", "draft": draft_b},
     ]
-    output_tokens = state["total_output_tokens"] + estimate_tokens(draft_a) + estimate_tokens(draft_b)
-    return {"candidate_drafts": candidates, "draft": draft_a, "total_output_tokens": output_tokens}
+    usage = snapshot_usage()
+    input_tokens = int(usage.get("input_tokens") or state["total_input_tokens"] or 0)
+    output_tokens = int(usage.get("output_tokens") or state["total_output_tokens"] or 0)
+    return {"candidate_drafts": candidates, "draft": draft_a, "total_input_tokens": input_tokens, "total_output_tokens": output_tokens}
 
 
 def _node_review(state: GenerationState) -> GenerationState:
@@ -1599,7 +1621,10 @@ def _node_rollback_rerun(state: GenerationState) -> GenerationState:
     snap = state.get("chapter_token_snapshot", {})
     ctx = dict(state["context"])
     suggestions = state.get("review_suggestions") or {}
-    ctx["review_feedback"] = f"{state.get('feedback', '')}\n请彻底重写该章，修复上述问题并保持连续性。"
+    ctx["review_feedback"] = render_prompt(
+        "review_feedback_force_rewrite",
+        feedback=(state.get("feedback", "") or ""),
+    ).strip()
     if suggestions:
         ctx["review_suggestions"] = suggestions
     _progress(state, "rollback_rerun", chapter_num, _chapter_progress(state, 0.60), f"第{chapter_num}章审校未通过，回滚并重跑一次...", {"current_phase": "rollback_rerun", "total_chapters": state["num_chapters"]})
@@ -1627,6 +1652,12 @@ def _node_finalize(state: GenerationState) -> GenerationState:
     )
     language_score, language_report = evaluate_language_quality(final_content, state["target_language"])
     aesthetic_score = _aesthetic_score(final_content)
+    chapter_title = resolve_chapter_title(
+        chapter_num=chapter_num,
+        title=(state.get("outline") or {}).get("title"),
+        outline=state.get("outline") or {},
+        content=final_content,
+    )
 
     db = SessionLocal()
     try:
@@ -1652,11 +1683,21 @@ def _node_finalize(state: GenerationState) -> GenerationState:
             state["strategy"],
             db=db,
         )
+        update_character_profiles_incremental(
+            db=db,
+            novel_id=state["novel_id"],
+            chapter_num=chapter_num,
+            content=final_content,
+            prewrite=state["prewrite"],
+            extracted_facts=extracted_facts,
+            target_language=state["target_language"],
+            strategy=state["strategy"],
+        )
         existing_stmt = select(Chapter).where(Chapter.novel_id == state["novel_id"], Chapter.chapter_num == chapter_num)
         existing = db.execute(existing_stmt).scalar_one_or_none()
         revision_count = state.get("review_attempt", 0) + 1 + (state.get("rerun_count", 0) * (MAX_RETRIES + 1))
         payload = {
-            "title": state["outline"].get("title", f"第{chapter_num}章"),
+            "title": chapter_title,
             "content": final_content,
             "summary": summary_text,
             "review_score": state["score"],
@@ -1680,7 +1721,7 @@ def _node_finalize(state: GenerationState) -> GenerationState:
             db.add(Chapter(novel_id=state["novel_id"], chapter_num=chapter_num, **payload))
         db.commit()
         _write_longform_artifacts(
-            state=state,
+            state={**state, "outline": {**(state.get("outline") or {}), "title": chapter_title}},
             chapter_num=chapter_num,
             summary_text=summary_text,
             final_content=final_content,
@@ -1692,8 +1733,10 @@ def _node_finalize(state: GenerationState) -> GenerationState:
     finally:
         db.close()
 
-    total_input_tokens = state["total_input_tokens"] + estimate_tokens(str(state["outline"]) + str(state["context"]) + (state.get("feedback") or ""))
-    estimated_cost = round((total_input_tokens / 1000) * 0.0015 + (state["total_output_tokens"] / 1000) * 0.002, 6)
+    usage = snapshot_usage()
+    total_input_tokens = int(usage.get("input_tokens") or state["total_input_tokens"] or 0)
+    total_output_tokens = int(usage.get("output_tokens") or state["total_output_tokens"] or 0)
+    estimated_cost = round((total_input_tokens / 1000) * 0.0015 + (total_output_tokens / 1000) * 0.002, 6)
     factual_score = float(state.get("factual_score", 0.0) or 0.0)
     progress_signal = _chapter_progress_signal(
         outline=state.get("outline") or {},
@@ -1745,7 +1788,7 @@ def _node_finalize(state: GenerationState) -> GenerationState:
             "current_phase": "chapter_done",
             "total_chapters": state["num_chapters"],
             "token_usage_input": total_input_tokens,
-            "token_usage_output": state["total_output_tokens"],
+            "token_usage_output": total_output_tokens,
             "estimated_cost": estimated_cost,
             "pacing_mode": pacing_mode,
             "low_progress_streak": next_streak,
@@ -1773,15 +1816,20 @@ def _node_finalize(state: GenerationState) -> GenerationState:
             fail_reasons.append("语言自然度不足")
         if reviewer_aesthetic < 0.6 or aesthetic_score < 0.6:
             fail_reasons.append("爽点节奏与情绪张力不足")
-        fail_reason = (
-            f"章后质量门禁未通过：review_score={state.get('score', 0.0):.2f}, "
-            f"factual_score={factual_score:.2f}, language_score={language_score:.2f}, "
-            f"aesthetic_score={reviewer_aesthetic:.2f}/{aesthetic_score:.2f}；"
-            f"失败类别: {','.join(fail_reasons)}。请重写并定向修复。"
-        )
+        fail_reason = render_prompt(
+            "post_quality_gate_fail_reason",
+            review_score=f"{state.get('score', 0.0):.2f}",
+            factual_score=f"{factual_score:.2f}",
+            language_score=f"{language_score:.2f}",
+            reviewer_aesthetic=f"{reviewer_aesthetic:.2f}",
+            aesthetic_score=f"{aesthetic_score:.2f}",
+            fail_reasons=",".join(fail_reasons),
+        ).strip()
     return {
+        "outline": {**(state.get("outline") or {}), "title": chapter_title},
         "total_input_tokens": total_input_tokens,
         "estimated_cost": estimated_cost,
+        "total_output_tokens": total_output_tokens,
         "quality_passed": quality_passed,
         "low_progress_streak": next_streak,
         "pacing_mode": pacing_mode,
@@ -2019,34 +2067,59 @@ def _build_generation_graph():
             chapter = int(state.get("current_chapter") or 0)
             task_id = state.get("task_id")
             novel_id = state.get("novel_id")
-            logger.info(
-                "PIPELINE node_start name=%s task_id=%s novel_id=%s chapter=%s",
-                name,
-                task_id,
-                novel_id,
-                chapter,
+            log_event(
+                logger,
+                "pipeline.node.start",
+                node=name,
+                task_id=task_id,
+                novel_id=novel_id,
+                chapter_num=chapter,
+                volume_no=_volume_no_for_chapter(state, chapter) if chapter > 0 else None,
             )
             try:
                 out = fn(state)
-                elapsed = time.perf_counter() - started
-                logger.info(
-                    "PIPELINE node_done name=%s task_id=%s novel_id=%s chapter=%s elapsed=%.2fs",
-                    name,
-                    task_id,
-                    novel_id,
-                    chapter,
-                    elapsed,
+                elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+                log_event(
+                    logger,
+                    "pipeline.node.end",
+                    node=name,
+                    task_id=task_id,
+                    novel_id=novel_id,
+                    chapter_num=chapter,
+                    volume_no=_volume_no_for_chapter(state, chapter) if chapter > 0 else None,
+                    latency_ms=elapsed_ms,
                 )
+                slow_threshold_ms = int(get_settings().log_node_slow_threshold_ms or 2500)
+                if elapsed_ms > slow_threshold_ms:
+                    log_event(
+                        logger,
+                        "pipeline.node.slow",
+                        level=30,
+                        node=name,
+                        task_id=task_id,
+                        novel_id=novel_id,
+                        chapter_num=chapter,
+                        volume_no=_volume_no_for_chapter(state, chapter) if chapter > 0 else None,
+                        latency_ms=elapsed_ms,
+                        threshold_ms=slow_threshold_ms,
+                    )
                 return out
-            except Exception:
-                elapsed = time.perf_counter() - started
-                logger.exception(
-                    "PIPELINE node_failed name=%s task_id=%s novel_id=%s chapter=%s elapsed=%.2fs",
-                    name,
-                    task_id,
-                    novel_id,
-                    chapter,
-                    elapsed,
+            except Exception as exc:
+                elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+                log_event(
+                    logger,
+                    "pipeline.node.error",
+                    level=40,
+                    message="Pipeline node failed",
+                    node=name,
+                    task_id=task_id,
+                    novel_id=novel_id,
+                    chapter_num=chapter,
+                    volume_no=_volume_no_for_chapter(state, chapter) if chapter > 0 else None,
+                    latency_ms=elapsed_ms,
+                    error_class=type(exc).__name__,
+                    error_code="PIPELINE_NODE_ERROR",
+                    error_category="permanent",
                 )
                 raise
         return _wrapped
@@ -2116,6 +2189,7 @@ def run_generation_pipeline_langgraph(
                 select(GenerationCheckpoint)
                 .where(GenerationCheckpoint.task_id == task_id, GenerationCheckpoint.novel_id == novel_id)
                 .order_by(GenerationCheckpoint.chapter_num.desc(), GenerationCheckpoint.id.desc())
+                .limit(1)
             )
             latest_cp = db.execute(cp_stmt).scalar_one_or_none()
             if latest_cp:

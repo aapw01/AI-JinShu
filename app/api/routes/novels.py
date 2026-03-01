@@ -3,10 +3,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.authz.deps import require_permission
+from app.core.authz.resources import load_novel_resource
+from app.core.authz.types import Permission, Principal
 from app.core.database import get_db, resolve_novel
 from app.core.time_utils import to_utc_iso_z
-from app.models.novel import Novel
+from app.models.novel import Novel, StoryCharacterProfile
 from app.schemas.novel import (
+    CharacterProfileResponse,
     IdeaFrameworkRequest,
     IdeaFrameworkResponse,
     NovelCreate,
@@ -31,20 +35,58 @@ def _to_response(novel: Novel) -> NovelResponse:
     )
 
 
+def _to_character_profile_response(row: StoryCharacterProfile, novel_public_id: str) -> CharacterProfileResponse:
+    return CharacterProfileResponse(
+        id=row.id,
+        novel_id=novel_public_id,
+        character_key=row.character_key,
+        display_name=row.display_name,
+        gender_presentation=row.gender_presentation,
+        age_band=row.age_band,
+        skin_tone=row.skin_tone,
+        ethnicity=row.ethnicity,
+        body_type=row.body_type,
+        face_features=row.face_features,
+        hair_style=row.hair_style,
+        hair_color=row.hair_color,
+        eye_color=row.eye_color,
+        wardrobe_base_style=row.wardrobe_base_style,
+        signature_items_json=[str(x) for x in (row.signature_items_json or []) if str(x).strip()],
+        visual_do_not_change_json=[str(x) for x in (row.visual_do_not_change_json or []) if str(x).strip()],
+        evidence_json=[x for x in (row.evidence_json or []) if isinstance(x, dict)],
+        confidence=float(row.confidence or 0.0),
+        updated_chapter_num=row.updated_chapter_num,
+        created_at=to_utc_iso_z(row.created_at),
+        updated_at=to_utc_iso_z(row.updated_at),
+    )
+
+
 @router.get("", response_model=list[NovelResponse])
-def list_novels(skip: int = 0, limit: int = 50, db: Session = Depends(get_db)):
+def list_novels(
+    skip: int = 0,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(Permission.NOVEL_READ)),
+):
     """List all novels, ordered by creation date (newest first)."""
-    stmt = select(Novel).order_by(Novel.created_at.desc()).offset(skip).limit(limit)
+    stmt = select(Novel)
+    if principal.role != "admin":
+        stmt = stmt.where(Novel.user_id == principal.user_uuid)
+    stmt = stmt.order_by(Novel.created_at.desc()).offset(skip).limit(limit)
     novels = db.execute(stmt).scalars().all()
     return [_to_response(n) for n in novels]
 
 
 @router.post("", response_model=NovelResponse)
-def create_novel(data: NovelCreate, db: Session = Depends(get_db)):
+def create_novel(
+    data: NovelCreate,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(Permission.NOVEL_CREATE)),
+):
     """Create a novel."""
     novel = Novel(
         title=data.title,
-        user_id=data.user_id,
+        user_id=principal.user_uuid,
         target_language=data.target_language,
         native_style_profile=data.native_style_profile,
         genre=data.genre,
@@ -95,7 +137,11 @@ def generate_idea(data: IdeaFrameworkRequest):
 
 
 @router.get("/{novel_id}", response_model=NovelResponse)
-def get_novel(novel_id: str, db: Session = Depends(get_db)):
+def get_novel(
+    novel_id: str,
+    db: Session = Depends(get_db),
+    _: Principal = Depends(require_permission(Permission.NOVEL_READ, resource_loader=load_novel_resource)),
+):
     """Get novel by ID (uuid or integer)."""
     novel = resolve_novel(db, novel_id)
     if not novel:
@@ -103,8 +149,31 @@ def get_novel(novel_id: str, db: Session = Depends(get_db)):
     return _to_response(novel)
 
 
+@router.get("/{novel_id}/character-profiles", response_model=list[CharacterProfileResponse])
+def list_character_profiles(
+    novel_id: str,
+    db: Session = Depends(get_db),
+    _: Principal = Depends(require_permission(Permission.NOVEL_READ, resource_loader=load_novel_resource)),
+):
+    novel = resolve_novel(db, novel_id)
+    if not novel:
+        raise HTTPException(404, "Novel not found")
+    rows = db.execute(
+        select(StoryCharacterProfile)
+        .where(StoryCharacterProfile.novel_id == novel.id)
+        .order_by(StoryCharacterProfile.updated_chapter_num.desc().nullslast(), StoryCharacterProfile.id.asc())
+    ).scalars().all()
+    public_id = novel.uuid or str(novel.id)
+    return [_to_character_profile_response(r, public_id) for r in rows]
+
+
 @router.put("/{novel_id}", response_model=NovelResponse)
-def update_novel(novel_id: str, data: NovelUpdate, db: Session = Depends(get_db)):
+def update_novel(
+    novel_id: str,
+    data: NovelUpdate,
+    db: Session = Depends(get_db),
+    _: Principal = Depends(require_permission(Permission.NOVEL_UPDATE, resource_loader=load_novel_resource)),
+):
     """Update novel."""
     novel = resolve_novel(db, novel_id)
     if not novel:
@@ -117,7 +186,11 @@ def update_novel(novel_id: str, data: NovelUpdate, db: Session = Depends(get_db)
 
 
 @router.delete("/{novel_id}")
-def delete_novel(novel_id: str, db: Session = Depends(get_db)):
+def delete_novel(
+    novel_id: str,
+    db: Session = Depends(get_db),
+    _: Principal = Depends(require_permission(Permission.NOVEL_DELETE, resource_loader=load_novel_resource)),
+):
     """Delete novel."""
     novel = resolve_novel(db, novel_id)
     if not novel:

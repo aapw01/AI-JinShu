@@ -1,0 +1,12 @@
+请抽取第{{ chapter_num }}章的结构化事实，语言:{{ language }}。
+大纲:
+{{ outline_json }}
+
+正文:
+{{ content }}
+
+输出JSON字段:
+- events: [{id,title,type,actors[],summary,time_marker}]
+- entities: [{name,entity_type,status,summary}]
+- facts: [{entity_name,fact_type,value}]
+只输出JSON。

@@ -4,8 +4,8 @@ import { useEffect, useState, useRef, useCallback } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { motion } from "framer-motion";
-import { ArrowLeft, CheckCircle2, LoaderCircle, XCircle } from "lucide-react";
-import { api, Novel, GenerationStatus, ObservabilityPayload, VolumeGateReport, ClosureReport } from "@/lib/api";
+import { ArrowLeft, CheckCircle2, LoaderCircle, Pause, Play, Square, XCircle } from "lucide-react";
+import { api, Novel, GenerationStatus, ObservabilityPayload, VolumeGateReport, ClosureReport, RewriteRequest } from "@/lib/api";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { SectionTitle } from "@/components/ui/SectionTitle";
@@ -86,12 +86,15 @@ export default function ProgressPage() {
   const searchParams = useSearchParams();
   const id = String(params.id);
   const taskId = searchParams.get("task_id");
+  const rewriteRequestId = searchParams.get("rewrite_request_id");
 
   const [novel, setNovel] = useState<Novel | null>(null);
   const [status, setStatus] = useState<GenerationStatus | null>(null);
+  const [rewriteStatus, setRewriteStatus] = useState<RewriteRequest | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [retrying, setRetrying] = useState(false);
+  const [mutatingRunState, setMutatingRunState] = useState(false);
   const [gateReport, setGateReport] = useState<VolumeGateReport | null>(null);
   const [closureReport, setClosureReport] = useState<ClosureReport | null>(null);
   const [observability, setObservability] = useState<ObservabilityPayload | null>(null);
@@ -104,6 +107,7 @@ export default function ProgressPage() {
 
   // Polling fallback for status
   useEffect(() => {
+    if (rewriteRequestId) return;
     const pollStatus = async () => {
       try {
         const s = await api.getGenerationStatus(id, taskId || undefined);
@@ -120,29 +124,49 @@ export default function ProgressPage() {
   }, [id, taskId]);
 
   useEffect(() => {
+    if (!rewriteRequestId) return;
+    const requestId = Number(rewriteRequestId);
+    const pollRewrite = async () => {
+      try {
+        const s = await api.getRewriteStatus(id, requestId);
+        setRewriteStatus(s);
+        setLoading(false);
+      } catch (err) {
+        console.error(err);
+      }
+    };
+    pollRewrite();
+    const timer = setInterval(pollRewrite, 3000);
+    return () => clearInterval(timer);
+  }, [id, rewriteRequestId]);
+
+  useEffect(() => {
+    if (rewriteRequestId) return;
     const volumeNo = status?.volume_no;
     if (!volumeNo || volumeNo <= 0) return;
     api.getVolumeGateReport(id, volumeNo).then(setGateReport).catch(() => undefined);
-  }, [id, status?.volume_no]);
+  }, [id, status?.volume_no, rewriteRequestId]);
 
   useEffect(() => {
+    if (rewriteRequestId) return;
     const loadClosure = () => api.getClosureReport(id, taskId || undefined).then(setClosureReport).catch(() => undefined);
     loadClosure();
     const timer = setInterval(loadClosure, 5000);
     return () => clearInterval(timer);
-  }, [id, taskId]);
+  }, [id, taskId, rewriteRequestId]);
 
   useEffect(() => {
+    if (rewriteRequestId) return;
     const timer = setInterval(() => {
       api.getObservability(id).then(setObservability).catch(() => undefined);
     }, 5000);
     api.getObservability(id).then(setObservability).catch(() => undefined);
     return () => clearInterval(timer);
-  }, [id]);
+  }, [id, rewriteRequestId]);
 
   // SSE connection for real-time updates
   useEffect(() => {
-    if (!taskId) return;
+    if (rewriteRequestId || !taskId) return;
 
     const connectSSE = () => {
       const es = api.streamProgress(id, taskId);
@@ -177,7 +201,7 @@ export default function ProgressPage() {
     return () => {
       eventSourceRef.current?.close();
     };
-  }, [id, taskId]);
+  }, [id, taskId, rewriteRequestId]);
 
   // Auto-scroll logs
   useEffect(() => {
@@ -211,14 +235,20 @@ export default function ProgressPage() {
     );
   }
 
-  const isComplete = status?.status === "completed";
-  const isFailed = status?.status === "failed";
-  const isAwaitingOutline = status?.status === "awaiting_outline_confirmation";
-  const isRunning = status?.status === "generating" || status?.status === "running";
-  const activeSubtaskLabel =
-    status?.current_subtask?.label ||
-    status?.subtask_label ||
-    (status?.step ? SUBTASK_LABELS[status.step] || status.step : "");
+  const isRewriteMode = Boolean(rewriteRequestId);
+  const isComplete = isRewriteMode ? rewriteStatus?.status === "completed" : status?.status === "completed";
+  const isFailed = isRewriteMode ? rewriteStatus?.status === "failed" : status?.status === "failed";
+  const isAwaitingOutline = false;
+  const runState = status?.run_state || status?.status;
+  const isRunning = isRewriteMode
+    ? rewriteStatus?.status === "running" || rewriteStatus?.status === "queued"
+    : status?.status === "queued" || status?.status === "dispatching" || status?.status === "running" || runState === "running";
+  const isPaused = !isRewriteMode && runState === "paused";
+  const activeSubtaskLabel = isRewriteMode
+    ? (rewriteStatus?.message || "章节重写中")
+    : status?.current_subtask?.label ||
+      status?.subtask_label ||
+      (status?.step ? SUBTASK_LABELS[status.step] || status.step : "");
   const closureState = status?.decision_state?.closure || closureReport?.state;
   const pacingState = status?.decision_state?.pacing;
 
@@ -226,7 +256,7 @@ export default function ProgressPage() {
     <main className="min-h-screen">
       <TopBar
         title="生成进度"
-        subtitle={novel.title}
+        subtitle={isRewriteMode ? `${novel.title} · 重写任务` : novel.title}
         backHref={`/novels/${id}`}
         icon={<ArrowLeft className="w-5 h-5" />}
         maxWidthClassName="max-w-[1280px]"
@@ -261,25 +291,46 @@ export default function ProgressPage() {
               <XCircle className="w-5 h-5 text-[#C4372D]" />
             </div>
             <div className="flex-1">
-              <p className="font-medium text-[#C4372D]">生成失败</p>
-              <p className="text-sm text-[#C4372D]">{status?.error || "发生未知错误"}</p>
+              <p className="font-medium text-[#C4372D]">{isRewriteMode ? "重写失败" : "生成失败"}</p>
+              <p className="text-sm text-[#C4372D]">{isRewriteMode ? (rewriteStatus?.error || "发生未知错误") : (status?.error || "发生未知错误")}</p>
             </div>
-            <Button
-              loading={retrying}
-              onClick={async () => {
-                try {
-                  setRetrying(true);
-                  const res = await api.retryGeneration(id, taskId || undefined);
-                  router.replace(`/novels/${id}/progress?task_id=${res.task_id}`);
-                } catch (e) {
-                  setLogs((prev) => [...prev, "重试提交失败，请稍后重试"]);
-                } finally {
-                  setRetrying(false);
-                }
-              }}
-            >
-              失败重试
-            </Button>
+            {isRewriteMode ? (
+              <Button
+                loading={retrying}
+                onClick={async () => {
+                  try {
+                    if (!rewriteRequestId) return;
+                    setRetrying(true);
+                    await api.retryRewrite(id, Number(rewriteRequestId));
+                    const next = await api.getRewriteStatus(id, Number(rewriteRequestId));
+                    setRewriteStatus(next);
+                  } catch (e) {
+                    setLogs((prev) => [...prev, "重试提交失败，请稍后重试"]);
+                  } finally {
+                    setRetrying(false);
+                  }
+                }}
+              >
+                重写重试
+              </Button>
+            ) : (
+              <Button
+                loading={retrying}
+                onClick={async () => {
+                  try {
+                    setRetrying(true);
+                    const res = await api.retryGeneration(id, taskId || undefined);
+                    router.replace(`/novels/${id}/progress?task_id=${res.task_id}`);
+                  } catch (e) {
+                    setLogs((prev) => [...prev, "重试提交失败，请稍后重试"]);
+                  } finally {
+                    setRetrying(false);
+                  }
+                }}
+              >
+                失败重试
+              </Button>
+            )}
           </div>
         )}
 
@@ -287,7 +338,7 @@ export default function ProgressPage() {
         <Card className="p-6">
           <SectionTitle
             title="整体进度"
-            right={<span className="text-xl font-semibold text-[#C8211B]">{Math.round(status?.progress || 0)}%</span>}
+            right={<span className="text-xl font-semibold text-[#C8211B]">{Math.round(isRewriteMode ? (rewriteStatus?.progress || 0) : (status?.progress || 0))}%</span>}
           />
 
           <div className="h-3 bg-[#F6F3EF] rounded-full overflow-hidden mb-6">
@@ -299,23 +350,94 @@ export default function ProgressPage() {
                   ? "bg-[#18864B]"
                   : "bg-[#C8211B]"
               }`}
-              style={{ width: `${status?.progress || 0}%` }}
+              style={{ width: `${isRewriteMode ? (rewriteStatus?.progress || 0) : (status?.progress || 0)}%` }}
             />
           </div>
 
           {/* Chapter Progress */}
-          {status?.current_chapter && status?.total_chapters && (
+          {isRewriteMode && rewriteStatus ? (
+            <>
+              <p className="text-sm text-[#7E756D]">
+                正在重写第 {rewriteStatus.current_chapter || rewriteStatus.rewrite_from_chapter} / {rewriteStatus.rewrite_to_chapter} 章
+              </p>
+              {isRunning && rewriteStatus.eta_label ? (
+                <p className="text-xs text-[#7E756D] mt-1">预计剩余时间：{rewriteStatus.eta_label}</p>
+              ) : null}
+            </>
+          ) : status?.current_chapter && status?.total_chapters ? (
             <p className="text-sm text-[#7E756D]">
               正在生成第 {status.current_chapter} / {status.total_chapters} 章
             </p>
-          )}
+          ) : null}
           {isRunning && status?.eta_label ? (
             <p className="text-xs text-[#7E756D] mt-1">预计剩余时间：{status.eta_label}</p>
           ) : null}
-          <p className="text-xs text-[#7E756D] mt-2">
+          {!isRewriteMode ? <p className="text-xs text-[#7E756D] mt-2">
             估算 Token：输入 {status?.token_usage_input || 0} / 输出 {status?.token_usage_output || 0}，预估费用 $
             {(status?.estimated_cost || 0).toFixed(4)}
-          </p>
+          </p> : null}
+          {!isRewriteMode ? (
+            <div className="mt-4 flex items-center gap-2">
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={mutatingRunState || !taskId || !isRunning || isPaused}
+                onClick={async () => {
+                  if (!taskId) return;
+                  try {
+                    setMutatingRunState(true);
+                    await api.pauseGeneration(id, taskId);
+                    const next = await api.getGenerationStatus(id, taskId);
+                    setStatus(next);
+                  } finally {
+                    setMutatingRunState(false);
+                  }
+                }}
+              >
+                <Pause className="w-4 h-4 mr-1.5" />
+                暂停
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={mutatingRunState || !taskId || !isPaused}
+                onClick={async () => {
+                  if (!taskId) return;
+                  try {
+                    setMutatingRunState(true);
+                    await api.resumeGeneration(id, taskId);
+                    const next = await api.getGenerationStatus(id, taskId);
+                    setStatus(next);
+                  } finally {
+                    setMutatingRunState(false);
+                  }
+                }}
+              >
+                <Play className="w-4 h-4 mr-1.5" />
+                恢复
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={mutatingRunState || !taskId || isComplete || isFailed}
+                onClick={async () => {
+                  if (!taskId) return;
+                  try {
+                    setMutatingRunState(true);
+                    await api.cancelGenerationByNovel(id, taskId);
+                    const next = await api.getGenerationStatus(id, taskId);
+                    setStatus(next);
+                  } finally {
+                    setMutatingRunState(false);
+                  }
+                }}
+              >
+                <Square className="w-4 h-4 mr-1.5" />
+                取消
+              </Button>
+              <span className="text-xs text-[#8E8379]">运行状态：{runState || "-"}</span>
+            </div>
+          ) : null}
           {status?.pacing_mode === "accelerated" || status?.pacing_mode === "closing_accelerated" ? (
             <p className="text-xs text-[#C8211B] mt-1">
               已启用自动节奏加速（连续低推进 {status?.low_progress_streak || 0} 章，信号 {Math.round((status?.progress_signal || 0) * 100)}%，原因 {(pacingState?.reasons || []).join(" / ") || "low_progress_streak"}）
@@ -342,7 +464,7 @@ export default function ProgressPage() {
         </Card>
         </motion.div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        {!isRewriteMode ? <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <StatsCard
             label="当前章节"
             value={`${status?.current_chapter || 0} / ${status?.total_chapters || 0}`}
@@ -358,9 +480,9 @@ export default function ProgressPage() {
             value={`${status?.token_usage_output || 0}`}
             hint={`$${(status?.estimated_cost || 0).toFixed(4)}`}
           />
-        </div>
+        </div> : null}
 
-        {(closureReport?.available || status?.decision_state?.closure) && closureState ? (
+        {!isRewriteMode && (closureReport?.available || status?.decision_state?.closure) && closureState ? (
           <Card className="p-5">
             <SectionTitle
               title="收官状态"
@@ -411,11 +533,11 @@ export default function ProgressPage() {
             ) : null}
           </Card>
         ) : null}
-        {!closureReport?.available && isRunning ? (
+        {!isRewriteMode && !closureReport?.available && isRunning ? (
           <p className="text-xs text-[#8E8379]">收官状态准备中，生成进入中后段后会展示收官门禁数据。</p>
         ) : null}
 
-        {gateReport && (
+        {!isRewriteMode && gateReport && (
           <Card className="p-6">
             <SectionTitle title={`第 ${gateReport.volume_no} 卷 Gate 报告`} subtitle={`结论: ${gateReport.verdict}`} />
             <div className="text-sm text-[#7E756D] space-y-1">
@@ -428,16 +550,25 @@ export default function ProgressPage() {
           </Card>
         )}
 
-        {observability && (
-          <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
-            <StatsCard label="质量报告" value={`${observability.summary.quality_reports}`} hint="总数" />
-            <StatsCard label="检查点" value={`${observability.summary.checkpoints}`} hint="可恢复节点" />
-            <StatsCard label="人工反馈" value={`${observability.summary.feedback_count}`} hint="编辑/读者" />
-            <StatsCard label="风险卷" value={`${observability.summary.warning_or_fail_volumes}`} hint="warning/fail" />
-          </div>
+        {!isRewriteMode && observability && (
+          <Card className="p-5">
+            <SectionTitle title="运行提示" subtitle="仅展示和你操作直接相关的信息" />
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <StatsCard
+                label="可恢复节点"
+                value={`${observability.summary.checkpoints}`}
+                hint="用于中断后继续执行"
+              />
+              <StatsCard
+                label="风险卷"
+                value={`${observability.summary.warning_or_fail_volumes}`}
+                hint="需要重点检查的卷"
+              />
+            </div>
+          </Card>
         )}
 
-        <Card className="p-5">
+        {!isRewriteMode ? <Card className="p-5">
           <SectionTitle
             title="生成流程"
             subtitle={isRunning && activeSubtaskLabel ? `当前子任务：${activeSubtaskLabel}` : "单轴节点视图，节点下方显示详情"}
@@ -504,7 +635,28 @@ export default function ProgressPage() {
               })}
             </div>
           </div>
-        </Card>
+        </Card> : (
+          <Card className="p-5">
+            <SectionTitle title="重写流程" subtitle={activeSubtaskLabel} />
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <StatsCard
+                label="重写区间"
+                value={`第${rewriteStatus?.rewrite_from_chapter || 0}章 - 第${rewriteStatus?.rewrite_to_chapter || 0}章`}
+                hint="自动级联"
+              />
+              <StatsCard
+                label="当前章节"
+                value={`第${rewriteStatus?.current_chapter || rewriteStatus?.rewrite_from_chapter || 0}章`}
+                hint="实时更新"
+              />
+              <StatsCard
+                label="任务状态"
+                value={rewriteStatus?.status || "running"}
+                hint={rewriteStatus?.error || rewriteStatus?.message || ""}
+              />
+            </div>
+          </Card>
+        )}
 
         {logs.length > 0 && (
           <Card className="p-6">
