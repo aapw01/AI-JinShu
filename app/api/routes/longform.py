@@ -5,6 +5,9 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
+from app.core.authz.deps import require_permission
+from app.core.authz.resources import load_novel_resource
+from app.core.authz.types import Permission, Principal
 from app.core.database import get_db, resolve_novel
 from app.core.time_utils import to_utc_iso_z
 from app.models.novel import QualityReport, GenerationCheckpoint, Chapter, StorySnapshot, NovelFeedback
@@ -23,6 +26,7 @@ def list_quality_reports(
     scope_id: str | None = None,
     limit: int = 200,
     db: Session = Depends(get_db),
+    _: Principal = Depends(require_permission(Permission.NOVEL_READ, resource_loader=load_novel_resource)),
 ):
     """List quality reports for chapter/volume/book scopes."""
     novel = resolve_novel(db, novel_id)
@@ -53,6 +57,7 @@ def list_generation_checkpoints(
     task_id: str | None = None,
     limit: int = 200,
     db: Session = Depends(get_db),
+    _: Principal = Depends(require_permission(Permission.NOVEL_READ, resource_loader=load_novel_resource)),
 ):
     """List durable generation checkpoints."""
     novel = resolve_novel(db, novel_id)
@@ -85,6 +90,7 @@ def get_volume_summary(
     novel_id: str,
     volume_size: int = 30,
     db: Session = Depends(get_db),
+    _: Principal = Depends(require_permission(Permission.NOVEL_READ, resource_loader=load_novel_resource)),
 ):
     """Return volume-level completion summary."""
     novel = resolve_novel(db, novel_id)
@@ -143,6 +149,7 @@ def get_volume_gate_report(
     novel_id: str,
     volume_no: int,
     db: Session = Depends(get_db),
+    _: Principal = Depends(require_permission(Permission.NOVEL_READ, resource_loader=load_novel_resource)),
 ):
     """Return the latest volume gate report (quality + checkpoint evidence)."""
     novel = resolve_novel(db, novel_id)
@@ -196,6 +203,7 @@ def get_closure_report(
     novel_id: str,
     task_id: str | None = None,
     db: Session = Depends(get_db),
+    _: Principal = Depends(require_permission(Permission.NOVEL_READ, resource_loader=load_novel_resource)),
 ):
     """Return latest closure-gate state for ending completeness tracking."""
     novel = resolve_novel(db, novel_id)
@@ -234,6 +242,7 @@ def list_feedback(
     novel_id: str,
     limit: int = 200,
     db: Session = Depends(get_db),
+    _: Principal = Depends(require_permission(Permission.NOVEL_READ, resource_loader=load_novel_resource)),
 ):
     novel = resolve_novel(db, novel_id)
     if not novel:
@@ -265,6 +274,7 @@ def create_feedback(
     novel_id: str,
     payload: dict = Body(...),
     db: Session = Depends(get_db),
+    _: Principal = Depends(require_permission(Permission.NOVEL_UPDATE, resource_loader=load_novel_resource)),
 ):
     novel = resolve_novel(db, novel_id)
     if not novel:
@@ -297,6 +307,7 @@ def get_observability(
     novel_id: str,
     limit: int = 50,
     db: Session = Depends(get_db),
+    _: Principal = Depends(require_permission(Permission.NOVEL_READ, resource_loader=load_novel_resource)),
 ):
     """Unified observability payload for quality/checkpoint/feedback trend."""
     novel = resolve_novel(db, novel_id)

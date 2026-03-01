@@ -65,12 +65,6 @@ def _normalize_lang_code(code: str) -> str:
     return c
 
 
-def get_language_name(code: str) -> str:
-    """Get display name for language code."""
-    normalized = _normalize_lang_code(code)
-    return LANGUAGES.get(normalized, code)
-
-
 def get_native_style_profile(code: str) -> str:
     """Get native-writer style profile for a target language."""
     normalized = _normalize_lang_code(code)
@@ -170,9 +164,3 @@ def evaluate_language_quality(text: str, lang_code: str) -> Tuple[float, str]:
     if not report_parts:
         report_parts.append("语言质量良好，符合目标语言表达习惯。")
     return score, " ".join(report_parts)
-
-
-def score_language_quality(text: str, lang_code: str) -> float:
-    """Backward-compatible score-only helper."""
-    score, _ = evaluate_language_quality(text, lang_code)
-    return score

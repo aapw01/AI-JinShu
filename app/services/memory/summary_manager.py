@@ -1,6 +1,7 @@
 """Summary manager - chapter summaries for context."""
 from typing import Optional
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
@@ -88,8 +89,24 @@ class SummaryManager:
             if existing:
                 existing.summary = summary
             else:
-                db.add(ChapterSummary(novel_id=novel_id, chapter_num=chapter_num, summary=summary))
-            db.commit()
+                try:
+                    with db.begin_nested():
+                        db.add(ChapterSummary(novel_id=novel_id, chapter_num=chapter_num, summary=summary))
+                        db.flush()
+                except IntegrityError:
+                    existing = db.execute(stmt).scalar_one_or_none()
+                    if existing:
+                        existing.summary = summary
+                    else:
+                        raise
+            if should_close:
+                db.commit()
+            else:
+                db.flush()
+        except Exception:
+            if should_close:
+                db.rollback()
+            raise
         finally:
             if should_close:
                 db.close()

@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/Input";
 import { Textarea } from "@/components/ui/Textarea";
 import { Select } from "@/components/ui/Select";
 import { TopBar } from "@/components/ui/TopBar";
+import { ErrorDialog } from "@/components/ui/ErrorDialog";
 
 const STEPS = [
   { id: 1, title: "创意", icon: "lightbulb" },
@@ -90,6 +91,7 @@ export default function CreatePage() {
   const [step, setStep] = useState(1);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [errorDialogOpen, setErrorDialogOpen] = useState(false);
   const [ideaGenerating, setIdeaGenerating] = useState(false);
   const [ideaError, setIdeaError] = useState<string | null>(null);
   const [form, setForm] = useState<FormData>({
@@ -170,6 +172,7 @@ export default function CreatePage() {
     try {
       setLoading(true);
       setError(null);
+      setErrorDialogOpen(false);
 
       // Create novel
       const res = await api.createNovel({
@@ -195,6 +198,7 @@ export default function CreatePage() {
       router.push(`/novels/${res.id}/progress`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "创建失败");
+      setErrorDialogOpen(true);
       setLoading(false);
     }
   };
@@ -300,8 +304,9 @@ export default function CreatePage() {
                 placeholder="描述你想要的故事情节、主角设定、世界观等..."
                 value={form.idea}
                 onChange={(e) => updateForm({ idea: e.target.value })}
-                rows={5}
+                rows={6}
                 maxLength={600}
+                className="resize-y min-h-[160px] max-h-[360px] overflow-y-auto"
               />
               <div className="flex items-center justify-between text-xs">
                 <span className="text-[#8E8379]">{form.idea.length}/600</span>
@@ -473,12 +478,6 @@ export default function CreatePage() {
           )}
         </div>
 
-        {error && (
-          <div className="mt-6 p-4 rounded-[8px] bg-[#FFECEB] border border-[#FFD4D2] text-[#C4372D] text-sm">
-            {error}
-          </div>
-        )}
-
         <div className="flex justify-between mt-12">
           <Button
             variant="ghost"
@@ -504,6 +503,12 @@ export default function CreatePage() {
         </div>
         </motion.div>
       </div>
+      <ErrorDialog
+        open={errorDialogOpen}
+        onClose={() => setErrorDialogOpen(false)}
+        title="创建失败"
+        message={error || "请稍后重试"}
+      />
     </main>
   );
 }

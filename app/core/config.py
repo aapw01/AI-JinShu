@@ -20,6 +20,36 @@ class Settings(BaseSettings):
     anthropic_api_key: str | None = None
     gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
     gemini_api_key: str | None = None
+    auth_jwt_secret: str = "change-me-in-production-and-must-be-at-least-32-bytes"
+    auth_jwt_issuer: str = "ai-jinshu"
+    auth_access_token_minutes: int = 15
+    auth_cookie_secure: bool = False
+    auth_cookie_domain: str | None = None
+    auth_require_email_verification: bool = False
+    auth_login_max_failures: int = 5
+    auth_login_lock_minutes: int = 15
+    auth_verify_token_minutes: int = 60 * 24
+    auth_reset_token_minutes: int = 30
+    auth_frontend_base_url: str = "http://localhost:3000"
+    sendgrid_api_key: str | None = None
+    sendgrid_from_email: str | None = None
+    quota_enforce_concurrency_limit: bool = False
+    creation_scheduler_enabled: bool = True
+    creation_default_max_concurrent_tasks: int = 1
+    creation_dispatch_poll_seconds: int = 2
+    creation_max_dispatch_batch: int = 5
+    creation_worker_lease_ttl_seconds: int = 20
+    creation_worker_heartbeat_seconds: int = 5
+    creation_recovery_poll_seconds: int = 5
+    quota_free_monthly_chapter_limit: int = 1_000_000
+    quota_free_monthly_token_limit: int = 10_000_000_000
+    quota_admin_monthly_chapter_limit: int = 10_000_000
+    quota_admin_monthly_token_limit: int = 100_000_000_000
+    log_format: str = "json"
+    log_level: str = "INFO"
+    log_slow_threshold_ms: int = 1500
+    log_node_slow_threshold_ms: int = 2500
+    log_redaction_level: str = "minimal"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

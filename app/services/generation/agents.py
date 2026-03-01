@@ -9,6 +9,7 @@ from langchain_core.output_parsers import PydanticOutputParser
 
 from app.core.llm import get_llm_with_fallback
 from app.prompts import render_prompt
+from app.services.generation.common import normalize_title_text
 
 logger = logging.getLogger(__name__)
 
@@ -76,10 +77,10 @@ def _invoke_json_with_schema(llm: Any, prompt: str, schema_cls: type[BaseModel],
     """Strongly enforce structured output with retry on parse/validation errors."""
     parser = PydanticOutputParser(pydantic_object=schema_cls)
     format_instructions = parser.get_format_instructions()
-    prompt = (
-        f"{prompt}\n\n"
-        f"{format_instructions}\n"
-        "输出要求：只返回 JSON，不要包含 Markdown 或解释。"
+    prompt = render_prompt(
+        "structured_output_enforcer",
+        base_prompt=prompt,
+        format_instructions=format_instructions,
     )
     error = ""
     for attempt in range(retries + 1):
@@ -111,9 +112,10 @@ def _invoke_json_with_schema(llm: Any, prompt: str, schema_cls: type[BaseModel],
                 attempt + 1,
                 error,
             )
-            prompt = (
-                f"{prompt}\n\n上一次输出不符合JSON结构约束，错误为: {error}\n"
-                "请只输出符合要求的纯JSON，不要包含解释、Markdown或代码块。"
+            prompt = render_prompt(
+                "structured_output_retry_suffix",
+                base_prompt=prompt,
+                error=error,
             )
         except Exception as exc:
             error = str(exc)
@@ -276,7 +278,10 @@ class OutlinerAgent:
                 {"novel_id": novel_id, "chapter_num": chapter_num, "provider": provider, "model": model},
             )
             result = _parse_json_response(response.content)
-            if "title" not in result:
+            title = normalize_title_text(result.get("title"))
+            if title:
+                result["title"] = title
+            else:
                 result["title"] = f"Chapter {chapter_num}"
             logger.info(f"OutlinerAgent completed for novel {novel_id} chapter {chapter_num}")
             return result
@@ -310,10 +315,11 @@ class OutlinerAgent:
             normalized = []
             for idx in range(1, num_chapters + 1):
                 item = outlines[idx - 1] if idx - 1 < len(outlines) else {}
+                normalized_title = normalize_title_text(item.get("title"))
                 normalized.append(
                     {
                         "chapter_num": idx,
-                        "title": item.get("title", f"第{idx}章"),
+                        "title": normalized_title or f"第{idx}章",
                         "outline": item.get("outline", ""),
                         "role": item.get("role"),
                         "purpose": item.get("purpose"),
@@ -420,18 +426,12 @@ class ReviewerAgent:
         model: str | None = None,
     ) -> dict[str, Any]:
         llm = get_llm_with_fallback(provider, model)
-        prompt = (
-            "你是小说章节评审器。必须严格输出JSON评分卡，不允许输出额外文本。\n"
-            f"章节: 第{chapter_num}章 语言: {language} 风格: {native_style_profile or '默认'}\n"
-            "评分要求:\n"
-            "- score: 0~1 总分\n"
-            "- confidence: 0~1 评审置信度\n"
-            "- must_fix: 仅保留“有文本证据且影响主线/逻辑”的问题，最多3条\n"
-            "- should_fix: 次要问题，最多3条\n"
-            "- 每条问题必须包含 category/severity/claim/evidence/confidence\n"
-            "- evidence 必须引用正文短句（<=40字）\n"
-            "- 不得臆造上下文，不确定时降低confidence并写入risks\n\n"
-            f"正文:\n{draft[:7000]}"
+        prompt = render_prompt(
+            "reviewer_structured",
+            chapter_num=chapter_num,
+            language=language,
+            native_style_profile=(native_style_profile or "默认"),
+            draft=(draft[:7000]),
         )
         try:
             result = _invoke_json_with_schema(llm, prompt, ReviewScorecardSchema)
@@ -506,12 +506,11 @@ class ReviewerAgent:
         model: str | None = None,
     ) -> dict[str, Any]:
         llm = get_llm_with_fallback(provider, model)
-        prompt = (
-            f"你是事实一致性审稿器。请检查第{chapter_num}章正文是否与上下文冲突。\n"
-            f"上下文要点:\n{json.dumps(context, ensure_ascii=False)[:3000]}\n\n"
-            f"正文:\n{draft[:6000]}\n\n"
-            "输出要求：返回JSON字段 score(0-1), feedback, contradictions, must_fix(问题数组), should_fix(问题数组), risks(数组), confidence(0-1)。"
-            "问题数组每项包含 category/severity/claim/evidence/confidence；evidence必须引用正文原句。"
+        prompt = render_prompt(
+            "reviewer_factual_structured",
+            chapter_num=chapter_num,
+            context_json=(json.dumps(context, ensure_ascii=False)[:3000]),
+            draft=(draft[:6000]),
         )
         try:
             result = _invoke_json_with_schema(llm, prompt, ReviewScorecardSchema)
@@ -559,11 +558,10 @@ class ReviewerAgent:
         model: str | None = None,
     ) -> dict[str, Any]:
         llm = get_llm_with_fallback(provider, model)
-        prompt = (
-            f"你是网文节奏与审美审稿器。请评估第{chapter_num}章可读性、爽点兑现、情绪张力。\n"
-            f"正文:\n{draft[:6000]}\n\n"
-            "输出要求：返回JSON字段 score(0-1), feedback, highlights(数组), must_fix(问题数组), should_fix(问题数组), risks(数组), confidence(0-1)。"
-            "问题数组每项包含 category/severity/claim/evidence/confidence；evidence必须引用正文原句。"
+        prompt = render_prompt(
+            "reviewer_aesthetic_structured",
+            chapter_num=chapter_num,
+            draft=(draft[:6000]),
         )
         try:
             result = _invoke_json_with_schema(llm, prompt, ReviewScorecardSchema)
@@ -604,14 +602,12 @@ class FinalizerAgent:
             return draft
 
         llm = get_llm_with_fallback(provider, model)
-        prompt = f"""Based on the following feedback, polish and improve this chapter content.
-
-Feedback: {feedback}
-
-Original content:
-{draft}
-
-Please provide the improved version. Keep the same language ({language}) and maintain the story flow."""
+        prompt = render_prompt(
+            "finalizer_polish",
+            feedback=feedback,
+            draft=draft,
+            language=language,
+        )
 
         try:
             response = _timed_invoke(
@@ -669,15 +665,12 @@ class FactExtractorAgent:
         model: str | None = None,
     ) -> dict:
         llm = get_llm_with_fallback(provider, model)
-        prompt = (
-            f"请抽取第{chapter_num}章的结构化事实，语言:{language}。\n"
-            f"大纲:\n{json.dumps(outline or {}, ensure_ascii=False)[:1500]}\n\n"
-            f"正文:\n{content[:7000]}\n\n"
-            "输出JSON字段:\n"
-            "- events: [{id,title,type,actors[],summary,time_marker}]\n"
-            "- entities: [{name,entity_type,status,summary}]\n"
-            "- facts: [{entity_name,fact_type,value}]\n"
-            "只输出JSON。"
+        prompt = render_prompt(
+            "fact_extractor_structured",
+            chapter_num=chapter_num,
+            language=language,
+            outline_json=(json.dumps(outline or {}, ensure_ascii=False)[:1500]),
+            content=(content[:7000]),
         )
         try:
             data = _invoke_json_with_schema(llm, prompt, FactExtractionSchema)

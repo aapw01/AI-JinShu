@@ -66,21 +66,19 @@ def test_export_empty(client):
 def test_generation_submit_conflict(client):
     r = client.post("/api/novels", json={"title": "Gen Test", "target_language": "zh"})
     novel_id = r.json()["id"]
-    with patch("app.api.routes.generation.submit_generation_task.delay") as delay:
-        delay.return_value.id = "task-1"
-        r1 = client.post(f"/api/novels/{novel_id}/generate", json={"num_chapters": 3, "start_chapter": 1})
-        assert r1.status_code == 200
-        r2 = client.post(f"/api/novels/{novel_id}/generate", json={"num_chapters": 2, "start_chapter": 1})
-        assert r2.status_code == 409
+    r1 = client.post(f"/api/novels/{novel_id}/generate", json={"num_chapters": 3, "start_chapter": 1})
+    assert r1.status_code == 200
+    r2 = client.post(f"/api/novels/{novel_id}/generate", json={"num_chapters": 2, "start_chapter": 1})
+    assert r2.status_code == 200
+    assert r1.json()["task_id"] != r2.json()["task_id"]
 
 
 def test_generation_status_extended_fields(client):
     r = client.post("/api/novels", json={"title": "Status Test", "target_language": "zh"})
     novel_id = r.json()["id"]
-    with patch("app.api.routes.generation.submit_generation_task.delay") as delay:
-        delay.return_value.id = "task-2"
-        client.post(f"/api/novels/{novel_id}/generate", json={"num_chapters": 2, "start_chapter": 1})
-    s = client.get(f"/api/novels/{novel_id}/generation/status?task_id=task-2")
+    submit = client.post(f"/api/novels/{novel_id}/generate", json={"num_chapters": 2, "start_chapter": 1})
+    task_id = submit.json()["task_id"]
+    s = client.get(f"/api/novels/{novel_id}/generation/status?task_id={task_id}")
     assert s.status_code == 200
     body = s.json()
     assert "total_chapters" in body

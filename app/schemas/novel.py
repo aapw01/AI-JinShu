@@ -86,6 +86,7 @@ class GenerateRequest(BaseModel):
     num_chapters: int = 1
     start_chapter: int = 1
     require_outline_confirmation: bool = False
+    idempotency_key: str | None = None
 
 
 class GenerateResponse(BaseModel):
@@ -100,6 +101,8 @@ class RetryGenerationRequest(BaseModel):
 
 class GenerationStatusResponse(BaseModel):
     status: str
+    trace_id: str | None = None
+    run_state: str | None = None
     step: str | None = None
     current_phase: str | None = None
     subtask_key: str | None = None
@@ -122,3 +125,78 @@ class GenerationStatusResponse(BaseModel):
     eta_label: str | None = None
     message: str | None = None
     error: str | None = None
+    last_error: dict | None = None
+
+
+class NovelVersionResponse(BaseModel):
+    id: int
+    novel_id: str
+    version_no: int
+    parent_version_id: int | None = None
+    status: str
+    is_default: bool
+    created_at: str
+    updated_at: str | None = None
+
+
+class RewriteAnnotationInput(BaseModel):
+    chapter_num: int
+    start_offset: int | None = None
+    end_offset: int | None = None
+    selected_text: str | None = None
+    issue_type: str = "other"
+    instruction: str
+    priority: str = "should"
+    metadata: dict = Field(default_factory=dict)
+
+
+class RewriteRequestCreate(BaseModel):
+    base_version_id: int
+    annotations: list[RewriteAnnotationInput]
+
+
+class RewriteRequestResponse(BaseModel):
+    id: int
+    novel_id: str
+    base_version_id: int
+    target_version_id: int
+    task_id: str | None = None
+    status: str
+    rewrite_from_chapter: int
+    rewrite_to_chapter: int
+    current_chapter: int | None = None
+    progress: float = 0.0
+    eta_seconds: int | None = None
+    eta_label: str | None = None
+    message: str | None = None
+    error: str | None = None
+    created_at: str
+    updated_at: str | None = None
+
+
+class RewriteRetryRequest(BaseModel):
+    request_id: int
+
+
+class CharacterProfileResponse(BaseModel):
+    id: int
+    novel_id: str
+    character_key: str
+    display_name: str
+    gender_presentation: str | None = None
+    age_band: str | None = None
+    skin_tone: str | None = None
+    ethnicity: str | None = None
+    body_type: str | None = None
+    face_features: str | None = None
+    hair_style: str | None = None
+    hair_color: str | None = None
+    eye_color: str | None = None
+    wardrobe_base_style: str | None = None
+    signature_items_json: list[str] = Field(default_factory=list)
+    visual_do_not_change_json: list[str] = Field(default_factory=list)
+    evidence_json: list[dict] = Field(default_factory=list)
+    confidence: float = 0.0
+    updated_chapter_num: int | None = None
+    created_at: str
+    updated_at: str | None = None

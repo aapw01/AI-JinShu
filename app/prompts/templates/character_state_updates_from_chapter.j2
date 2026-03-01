@@ -1,0 +1,7 @@
+Based on this chapter content, report any STATE CHANGES for these characters: {{ character_names }}
+
+Chapter {{ chapter_num }} content (truncated):
+{{ content }}
+
+Output JSON: {"updates": [{"name": "角色名", "status": "alive/injured/dead/unknown", "location": "当前位置", "new_items": [], "lost_items": [], "injuries": [], "can_use_both_hands": true, "limitations": [], "forbidden_actions": [], "relationship_changes": [], "key_action": "本章关键行为"}]}
+Only include characters who actually appeared or were affected. Output pure JSON.

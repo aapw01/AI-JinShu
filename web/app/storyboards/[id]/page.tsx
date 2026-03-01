@@ -1,0 +1,454 @@
+"use client";
+
+import Link from "next/link";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useParams, useSearchParams } from "next/navigation";
+import { ArrowLeft, Gauge, Play, Pause, RotateCcw, Ban, Download, CheckCircle2, Copy } from "lucide-react";
+import { api, StoryboardCharacterPrompt, StoryboardShot, StoryboardTaskStatus, StoryboardVersion } from "@/lib/api";
+import { Card } from "@/components/ui/Card";
+import { Button } from "@/components/ui/Button";
+import { TopBar } from "@/components/ui/TopBar";
+
+export default function StoryboardWorkbenchPage() {
+  const params = useParams();
+  const search = useSearchParams();
+  const projectId = Number(params.id);
+  const taskIdFromUrl = search.get("task_id") || undefined;
+
+  const [status, setStatus] = useState<StoryboardTaskStatus | null>(null);
+  const [versions, setVersions] = useState<StoryboardVersion[]>([]);
+  const [activeVersionId, setActiveVersionId] = useState<number | null>(null);
+  const [shots, setShots] = useState<StoryboardShot[]>([]);
+  const [characterPrompts, setCharacterPrompts] = useState<StoryboardCharacterPrompt[]>([]);
+  const [episodeNo, setEpisodeNo] = useState<number | undefined>(undefined);
+  const [episodeOptions, setEpisodeOptions] = useState<number[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [savingShotId, setSavingShotId] = useState<number | null>(null);
+  const [activeTab, setActiveTab] = useState<"shots" | "characters">("shots");
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [actionBusy, setActionBusy] = useState<string | null>(null);
+  const [actionMessage, setActionMessage] = useState<string>("");
+  const [actionMessageType, setActionMessageType] = useState<"success" | "error">("success");
+  const lastRunStateRef = useRef<string>("");
+
+  const loadVersions = async () => {
+    const vs = await api.listStoryboardVersions(projectId);
+    setVersions(vs);
+    const def = vs.find((v) => v.is_default) || vs[0];
+    if (def && activeVersionId === null) {
+      setActiveVersionId(def.id);
+    }
+    return vs;
+  };
+
+  const loadShots = async (versionId: number, ep?: number) => {
+    const rows = await api.listStoryboardShots(projectId, versionId, ep);
+    setShots(rows);
+  };
+
+  const loadEpisodeOptions = async (versionId: number) => {
+    const rows = await api.listStoryboardShots(projectId, versionId);
+    const set = new Set<number>();
+    rows.forEach((s) => set.add(s.episode_no));
+    setEpisodeOptions(Array.from(set).sort((a, b) => a - b));
+  };
+
+  const loadCharacterPrompts = async (versionId: number) => {
+    const rows = await api.listStoryboardCharacterPrompts(projectId, versionId);
+    setCharacterPrompts(rows);
+  };
+
+  const refresh = async () => {
+    setLoading(true);
+    try {
+      const [st, vs] = await Promise.all([
+        api.getStoryboardStatus(projectId, taskIdFromUrl).catch(() => null),
+        loadVersions(),
+      ]);
+      setStatus(st);
+      const versionId = activeVersionId || vs.find((v) => v.is_default)?.id || vs[0]?.id;
+      if (versionId) {
+        setActiveVersionId(versionId);
+        await loadEpisodeOptions(versionId);
+        await loadShots(versionId, episodeNo);
+        await loadCharacterPrompts(versionId);
+      }
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void refresh();
+  }, [projectId]);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      void (async () => {
+        try {
+          const st = await api.getStoryboardStatus(projectId, taskIdFromUrl);
+          setStatus(st);
+        } catch (e) {
+          if (!(e instanceof Error) || !e.message.includes("404")) {
+            // ignore polling errors
+          }
+        }
+      })();
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [projectId, taskIdFromUrl]);
+
+  useEffect(() => {
+    if (activeVersionId) {
+      void loadEpisodeOptions(activeVersionId);
+      void loadShots(activeVersionId, episodeNo);
+      void loadCharacterPrompts(activeVersionId);
+    }
+  }, [activeVersionId, episodeNo]);
+
+  const activeVersion = versions.find((v) => v.id === activeVersionId) || null;
+  const scoreCard = activeVersion?.quality_report_json || {};
+  const missingIdentityCount = Number(status?.missing_identity_fields_count || scoreCard.missing_identity_fields_count || 0);
+  const failedIdentityCharacters = (status?.failed_identity_characters || scoreCard.failed_identity_characters || []) as Array<Record<string, unknown>>;
+  const isFinal = Boolean(activeVersion?.is_final);
+  const canFinalize = Boolean(activeVersion && !isFinal && missingIdentityCount === 0 && characterPrompts.length > 0);
+  const canExport = Boolean(activeVersion && isFinal && missingIdentityCount === 0 && characterPrompts.length > 0);
+  const runState = status?.run_state || "";
+  const canPause = ["running", "retrying", "submitted"].includes(runState);
+  const canResume = ["paused"].includes(runState);
+  const canCancel = ["running", "retrying", "submitted", "paused"].includes(runState);
+  const canRetry = ["failed", "cancelled"].includes(runState);
+  const canRegenerateCharacters = Boolean(activeVersion && !isFinal);
+  const canOptimize = Boolean(activeVersion && !isFinal);
+  const laneGroups = useMemo(() => {
+    return {
+      vertical: versions.filter((v) => v.lane === "vertical_feed"),
+      horizontal: versions.filter((v) => v.lane === "horizontal_cinematic"),
+    };
+  }, [versions]);
+  const toolbarBtnClass = "h-8 px-3 text-[13px]";
+
+  const onUpdateShot = async (shotId: number, patch: Partial<StoryboardShot>) => {
+    if (!activeVersionId || isFinal) return;
+    setSavingShotId(shotId);
+    try {
+      await api.updateStoryboardShot(projectId, shotId, patch);
+      await loadShots(activeVersionId, episodeNo);
+    } finally {
+      setSavingShotId(null);
+    }
+  };
+
+  const statusText = status?.message || (status?.run_state ? `状态：${status.run_state}` : "暂无任务状态");
+
+  const copyText = async (value: string, key: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopiedKey(key);
+      window.setTimeout(() => setCopiedKey((k) => (k === key ? null : k)), 1300);
+    } catch (_) {
+      setCopiedKey("error");
+      window.setTimeout(() => setCopiedKey(null), 1300);
+    }
+  };
+
+  const runAction = async (key: string, fn: () => Promise<unknown>, success: string) => {
+    setActionBusy(key);
+    setActionMessage("");
+    try {
+      await fn();
+      await refresh();
+      setActionMessageType("success");
+      setActionMessage(success);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "操作失败";
+      setActionMessageType("error");
+      setActionMessage(msg);
+    } finally {
+      setActionBusy(null);
+    }
+  };
+
+  useEffect(() => {
+    const currentState = status?.run_state;
+    if (!currentState) return;
+    const prevState = lastRunStateRef.current;
+    if (prevState && prevState !== currentState && ["completed", "failed", "cancelled"].includes(currentState)) {
+      void refresh();
+    }
+    lastRunStateRef.current = currentState;
+  }, [status?.run_state]);
+
+  return (
+    <main className="min-h-screen">
+      <TopBar
+        title="导演分镜工作台"
+        subtitle={statusText}
+        backHref="/storyboards"
+        icon={<ArrowLeft className="w-5 h-5" />}
+        actions={
+          <div className="flex flex-wrap items-center gap-2 justify-end max-w-[1040px]">
+            <div className="flex items-center gap-1.5 rounded-xl border border-[#E5DED7] bg-[#FAF7F4] p-1">
+              <Button variant="secondary" size="sm" className={toolbarBtnClass} loading={actionBusy === "refresh"} onClick={() => void runAction("refresh", async () => refresh(), "已刷新")}>
+                刷新
+              </Button>
+              <Button variant="secondary" size="sm" className={toolbarBtnClass} disabled={!canPause} loading={actionBusy === "pause"} onClick={() => void runAction("pause", async () => { await api.pauseStoryboard(projectId, status?.task_id); }, "任务已暂停")}>
+                <Pause className="w-4 h-4 mr-1.5" />暂停
+              </Button>
+              <Button variant="secondary" size="sm" className={toolbarBtnClass} disabled={!canResume} loading={actionBusy === "resume"} onClick={() => void runAction("resume", async () => { await api.resumeStoryboard(projectId, status?.task_id); }, "任务已恢复")}>
+                <Play className="w-4 h-4 mr-1.5" />恢复
+              </Button>
+              <Button variant="secondary" size="sm" className={toolbarBtnClass} disabled={!canRetry} loading={actionBusy === "retry"} onClick={() => void runAction("retry", async () => { await api.retryStoryboard(projectId); }, "已提交重试任务")}>
+                <RotateCcw className="w-4 h-4 mr-1.5" />重试
+              </Button>
+              <Button variant="secondary" size="sm" className={toolbarBtnClass} disabled={!canCancel} loading={actionBusy === "cancel"} onClick={() => void runAction("cancel", async () => { await api.cancelStoryboard(projectId, status?.task_id); }, "任务已取消")}>
+                <Ban className="w-4 h-4 mr-1.5" />取消
+              </Button>
+            </div>
+
+            <div className="flex items-center gap-1.5 rounded-xl border border-[#E5DED7] bg-[#FAF7F4] p-1">
+              {activeVersion ? (
+                <Button variant="secondary" size="sm" className={toolbarBtnClass} disabled={!canExport} onClick={() => window.open(api.getStoryboardCsvUrl(projectId, activeVersion.id), "_blank")}>
+                  <Download className="w-4 h-4 mr-1.5" />导出CSV
+                </Button>
+              ) : null}
+              {activeVersion ? (
+                <Button variant="secondary" size="sm" className={toolbarBtnClass} disabled={!canExport} onClick={() => window.open(api.getStoryboardCharacterExportUrl(projectId, activeVersion.id, activeVersion.lane, "csv"), "_blank")}>
+                  <Download className="w-4 h-4 mr-1.5" />导出角色CSV
+                </Button>
+              ) : null}
+              {activeVersion ? (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className={toolbarBtnClass}
+                  disabled={!canRegenerateCharacters}
+                  loading={actionBusy === "regen-char"}
+                  onClick={() => void runAction("regen-char", async () => {
+                    await api.regenerateStoryboardCharacterPrompts(projectId, activeVersion.id, activeVersion.lane);
+                  }, "已生成人物主形象提示词")}
+                >
+                  生成人物主形象提示词
+                </Button>
+              ) : null}
+              {activeVersion ? (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className={toolbarBtnClass}
+                  disabled={!canOptimize}
+                  loading={actionBusy === "optimize"}
+                  onClick={() => void runAction("optimize", async () => {
+                    await api.optimizeStoryboardVersion(projectId, activeVersion.id);
+                  }, "已应用优化建议")}
+                >
+                  一键优化到可拍
+                </Button>
+              ) : null}
+              {activeVersion ? (
+                <Button size="sm" className={toolbarBtnClass} disabled={!canFinalize} loading={actionBusy === "finalize"} onClick={() => void runAction("finalize", async () => { await api.finalizeStoryboardVersion(projectId, activeVersion.id); }, "版本已定稿")}>
+                  <CheckCircle2 className="w-4 h-4 mr-1.5" />确认定稿
+                </Button>
+              ) : null}
+            </div>
+          </div>
+        }
+      />
+
+      <div className="max-w-[1580px] mx-auto px-4 py-5 grid grid-cols-12 gap-4 lg:gap-5">
+        {actionMessage ? (
+          <div className={`col-span-12 rounded-xl border px-4 py-2 text-sm ${actionMessageType === "success" ? "border-[#D6EAD5] bg-[#F4FBF3] text-[#2F6E2D]" : "border-[#E8B4B0] bg-[#FFF3F1] text-[#A52A25]"}`}>
+            {actionMessage}
+          </div>
+        ) : null}
+        {missingIdentityCount > 0 ? (
+          <div className="col-span-12 rounded-xl border border-[#E8B4B0] bg-[#FFF3F1] px-4 py-3 text-sm text-[#A52A25]">
+            角色身份字段门禁未通过：仍有 {missingIdentityCount} 个角色缺少 skin_tone / ethnicity，当前版本不可定稿与导出。
+            {failedIdentityCharacters.length > 0 ? (
+              <span className="block mt-1 text-xs text-[#8A403A]">
+                示例：{failedIdentityCharacters.slice(0, 3).map((x) => String(x.display_name || x.character_key || "未知角色")).join("，")}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+        <aside className="col-span-12 lg:col-span-2 space-y-4 lg:sticky lg:top-[88px] h-fit">
+          <Card className="p-3 bg-[#FEFCFA]">
+            <p className="text-sm font-medium text-[#4A433D] mb-2">Lane 切换</p>
+            <div className="space-y-2">
+              <p className="text-xs text-[#8E8379]">竖屏版</p>
+              {laneGroups.vertical.map((v) => (
+                <button key={v.id} onClick={() => { setEpisodeNo(undefined); setActiveVersionId(v.id); }} className={`w-full text-left text-xs rounded-lg border px-2 py-1.5 ${activeVersionId === v.id ? "border-[#C8211B] bg-[#F8ECEA] text-[#A52A25]" : "border-[#E5DED7] bg-white text-[#6F665F]"}`}>
+                  v{v.version_no} {v.is_final ? "(定稿)" : ""}
+                </button>
+              ))}
+              <p className="text-xs text-[#8E8379] pt-1">横屏版</p>
+              {laneGroups.horizontal.map((v) => (
+                <button key={v.id} onClick={() => { setEpisodeNo(undefined); setActiveVersionId(v.id); }} className={`w-full text-left text-xs rounded-lg border px-2 py-1.5 ${activeVersionId === v.id ? "border-[#C8211B] bg-[#F8ECEA] text-[#A52A25]" : "border-[#E5DED7] bg-white text-[#6F665F]"}`}>
+                  v{v.version_no} {v.is_final ? "(定稿)" : ""}
+                </button>
+              ))}
+            </div>
+          </Card>
+
+          <Card className="p-3 bg-[#FEFCFA]">
+            <p className="text-sm font-medium text-[#4A433D] mb-2">集数过滤</p>
+            <select className="w-full border border-[#E5DED7] rounded-lg h-9 px-2 text-sm" value={episodeNo ?? ""} onChange={(e) => setEpisodeNo(e.target.value ? Number(e.target.value) : undefined)}>
+              <option value="">全部</option>
+              {episodeOptions.map((ep) => (
+                <option key={ep} value={ep}>第{ep}集</option>
+              ))}
+            </select>
+          </Card>
+        </aside>
+
+        <section className="col-span-12 lg:col-span-7">
+          <Card className="p-0 overflow-hidden bg-white">
+            <div className="px-4 py-3 border-b border-[#E5DED7] bg-[#FAF7F4] flex flex-wrap items-center justify-between gap-2">
+              <p className="text-xs text-[#8E8379]">当前版本：{activeVersion ? `v${activeVersion.version_no} · ${activeVersion.lane === "vertical_feed" ? "竖屏版" : "横屏版"}` : "-"}</p>
+              <p className="text-xs text-[#8E8379]">镜头数：{shots.length}</p>
+            </div>
+            <div className="px-4 py-3 border-b border-[#E5DED7] bg-[#FAF7F4] flex items-center gap-2">
+              <button
+                onClick={() => setActiveTab("shots")}
+                className={`h-8 px-3 rounded-full text-sm border ${activeTab === "shots" ? "border-[#C8211B] bg-[#F8ECEA] text-[#A52A25]" : "border-[#E5DED7] bg-white text-[#6F665F]"}`}
+              >
+                分镜表
+              </button>
+              <button
+                onClick={() => setActiveTab("characters")}
+                className={`h-8 px-3 rounded-full text-sm border ${activeTab === "characters" ? "border-[#C8211B] bg-[#F8ECEA] text-[#A52A25]" : "border-[#E5DED7] bg-white text-[#6F665F]"}`}
+              >
+                角色主形象提示词
+              </button>
+            </div>
+            {loading ? <p className="p-4 text-sm text-[#7E756D]">加载中...</p> : null}
+            {!loading && activeTab === "shots" && shots.length === 0 ? <p className="p-4 text-sm text-[#7E756D]">暂无镜头数据</p> : null}
+            {!loading && activeTab === "shots" && shots.length > 0 ? (
+              <div className="overflow-auto max-h-[72vh]">
+                <table className="w-full text-sm">
+                  <thead className="sticky top-0 bg-[#FDF9F6] border-b border-[#E5DED7] shadow-[0_1px_0_0_#EDE4DC]">
+                    <tr className="text-left text-[#6F665F]">
+                      <th className="px-3 py-2">集/场/镜</th>
+                      <th className="px-3 py-2">景别</th>
+                      <th className="px-3 py-2">动作</th>
+                      <th className="px-3 py-2">台词</th>
+                      <th className="px-3 py-2">导演意图</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {shots.map((shot) => (
+                      <tr key={shot.id} className="border-b border-[#F0EBE6] align-top hover:bg-[#FFFCFA] transition-colors">
+                        <td className="px-3 py-2 text-xs text-[#5F5650] whitespace-nowrap">E{shot.episode_no} / S{shot.scene_no} / #{shot.shot_no}</td>
+                        <td className="px-3 py-2 text-xs text-[#5F5650]">{shot.shot_size} · {shot.camera_move}</td>
+                        <td className="px-3 py-2">
+                          <textarea
+                            className="w-full min-h-[70px] border border-[#E5DED7] rounded-md p-2 bg-white text-xs"
+                            defaultValue={shot.action || ""}
+                            disabled={isFinal}
+                            onBlur={(e) => void onUpdateShot(shot.id, { action: e.target.value })}
+                          />
+                        </td>
+                        <td className="px-3 py-2">
+                          <textarea
+                            className="w-full min-h-[70px] border border-[#E5DED7] rounded-md p-2 bg-white text-xs"
+                            defaultValue={shot.dialogue || ""}
+                            disabled={isFinal}
+                            onBlur={(e) => void onUpdateShot(shot.id, { dialogue: e.target.value })}
+                          />
+                        </td>
+                        <td className="px-3 py-2">
+                          <p className="text-xs text-[#3A3A3C]">{shot.motivation || "-"}</p>
+                          <p className="text-[11px] text-[#8E8379] mt-1">走位：{shot.blocking || "-"}</p>
+                          <p className="text-[11px] text-[#8E8379]">表演：{shot.performance_note || "-"}</p>
+                          <p className="text-[11px] text-[#8E8379]">连续：{shot.continuity_anchor || "-"}</p>
+                          {savingShotId === shot.id ? <p className="text-[11px] text-[#A52A25] mt-1">保存中...</p> : null}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
+            {!loading && activeTab === "characters" && characterPrompts.length === 0 ? (
+              <p className="p-4 text-sm text-[#7E756D]">暂无角色提示词，请先点击“生成人物主形象提示词”。</p>
+            ) : null}
+            {!loading && activeTab === "characters" && characterPrompts.length > 0 ? (
+              <div className="p-4 space-y-3 max-h-[72vh] overflow-auto">
+                {characterPrompts.map((item) => (
+                  <div key={item.id} className="rounded-xl border border-[#E5DED7] bg-gradient-to-b from-white to-[#FFFCFA] p-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-semibold text-[#2D2926]">{item.display_name}</p>
+                        <p className="text-xs text-[#8E8379]">{item.skin_tone} · {item.ethnicity}</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Button variant="secondary" size="sm" className="h-8 px-3" onClick={() => void copyText(item.master_prompt_text, `master-${item.id}`)}>
+                          <Copy className="w-4 h-4 mr-1.5" />{copiedKey === `master-${item.id}` ? "已复制" : "复制主提示词"}
+                        </Button>
+                        <Button variant="secondary" size="sm" className="h-8 px-3" disabled={!item.negative_prompt_text?.trim()} onClick={() => void copyText(item.negative_prompt_text || "", `negative-${item.id}`)}>
+                          <Copy className="w-4 h-4 mr-1.5" />{copiedKey === `negative-${item.id}` ? "已复制" : "复制负面词"}
+                        </Button>
+                      </div>
+                    </div>
+                    <p className="mt-2 text-xs text-[#4A433D] whitespace-pre-wrap">{item.master_prompt_text}</p>
+                    {item.negative_prompt_text ? <p className="mt-2 text-[11px] text-[#7E756D]">Negative: {item.negative_prompt_text}</p> : null}
+                    {(item.consistency_anchors_json || []).length ? (
+                      <p className="mt-2 text-[11px] text-[#7E756D]">一致性锚点：{item.consistency_anchors_json.join("；")}</p>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </Card>
+        </section>
+
+        <aside className="col-span-12 lg:col-span-3 space-y-4 lg:sticky lg:top-[88px] h-fit">
+          <Card className="p-4 bg-[#FEFCFA]">
+            <div className="flex items-center gap-2 mb-2">
+              <Gauge className="w-4 h-4 text-[#C8211B]" />
+              <p className="text-sm font-medium text-[#4A433D]">专业评分卡</p>
+            </div>
+            <div className="text-sm text-[#5E5650] space-y-2">
+              <p>风格一致性：{typeof scoreCard.style_consistency_score === "number" ? (scoreCard.style_consistency_score * 100).toFixed(1) + "%" : "-"}</p>
+              <p>可拍性风险：{typeof scoreCard.shot_density_risk === "number" ? (scoreCard.shot_density_risk * 100).toFixed(1) + "%" : "-"}</p>
+              <p>字段完整率：{typeof scoreCard.completeness_rate === "number" ? (scoreCard.completeness_rate * 100).toFixed(1) + "%" : "-"}</p>
+              <div>
+                <p className="text-xs text-[#8E8379] mb-1">爆点评分（按集）</p>
+                <div className="max-h-28 overflow-auto pr-1 space-y-1">
+                  {Object.entries(scoreCard.hook_score_episode || {}).map(([ep, val]) => (
+                    <p key={ep} className="text-xs">第{ep}集：{Number(val).toFixed(0)}</p>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </Card>
+
+          <Card className="p-4 bg-[#FEFCFA]">
+            <p className="text-sm font-medium text-[#4A433D] mb-2">质量门禁原因</p>
+            <ul className="text-xs text-[#6F665F] space-y-1 list-disc list-inside">
+              {(scoreCard.quality_gate_reasons || status?.quality_gate_reasons || []).map((r: string) => (
+                <li key={r}>{r}</li>
+              ))}
+              {!(scoreCard.quality_gate_reasons || status?.quality_gate_reasons || []).length ? <li>无</li> : null}
+            </ul>
+          </Card>
+
+          <Card className="p-4 text-xs text-[#7E756D] bg-[#FEFCFA]">
+            <p>任务状态：{status?.run_state || "-"}</p>
+            <p>阶段：{status?.current_phase || "-"}</p>
+            <p>进度：{status ? `${status.progress.toFixed(1)}%` : "-"}</p>
+            <p>当前 Lane：{status?.current_lane || activeVersion?.lane || "-"}</p>
+            <p>ETA：{status?.eta_label || "-"}</p>
+            <p className="mt-2">完成后请点击“确认定稿”再导出 CSV。</p>
+          </Card>
+        </aside>
+      </div>
+
+      <div className="max-w-[1520px] mx-auto px-4 pb-8">
+        <Link href="/storyboards/create">
+          <Button variant="secondary" size="sm" className="h-8 px-3">新建分镜项目</Button>
+        </Link>
+      </div>
+    </main>
+  );
+}

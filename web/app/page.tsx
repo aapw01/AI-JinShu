@@ -396,8 +396,8 @@ export default function Home() {
                       <Textarea
                         label="一句话创意"
                         placeholder="例如：星际移民飞船上，AI 宣布自己拥有了情感..."
-                        rows={2}
-                        className="min-h-[96px]"
+                        rows={6}
+                        className="resize-y min-h-[170px] max-h-[380px]"
                         maxLength={600}
                         value={form.idea}
                         onChange={(e) => setForm((prev) => ({ ...prev, idea: e.target.value }))}

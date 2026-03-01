@@ -9,3 +9,4 @@ export { TopBar } from "./TopBar";
 export { SectionTitle } from "./SectionTitle";
 export { EmptyState } from "./EmptyState";
 export { StatsCard } from "./StatsCard";
+export { ErrorDialog } from "./ErrorDialog";

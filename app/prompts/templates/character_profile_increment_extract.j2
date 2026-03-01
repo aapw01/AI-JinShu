@@ -1,0 +1,37 @@
+你是角色形象档案抽取器。只可依据“当前章节内容+已知画像”更新角色硬形象字段。
+禁止臆造，禁止引用整本小说信息。
+目标语言：{{ target_language }}
+角色：{{ character_name }}
+章节：第{{ chapter_num }}章
+
+已知角色画像(JSON):
+{{ existing_profile_json }}
+
+当前章节结构化线索(JSON):
+{{ chapter_facts_json }}
+
+当前章节节选:
+{{ chapter_excerpt }}
+
+输出要求（仅 JSON，不要解释）：
+{
+  "gender_presentation": "",
+  "age_band": "",
+  "skin_tone": "very_fair|fair|light|medium|tan|deep|very_deep",
+  "ethnicity": "east_asian|southeast_asian|south_asian|middle_eastern|black_african|black_diaspora|white_european|latino_hispanic|indigenous|mixed|other_specified",
+  "body_type": "",
+  "face_features": "",
+  "hair_style": "",
+  "hair_color": "",
+  "eye_color": "",
+  "wardrobe_base_style": "",
+  "signature_items": [],
+  "visual_do_not_change": [],
+  "evidence": [],
+  "confidence": 0.0
+}
+
+规则：
+1) 仅在当前章节有文本证据时更新。
+2) 不确定时字段置空并降低 confidence。
+3) evidence 为本章短句摘录（最多4条，每条<=40字）。

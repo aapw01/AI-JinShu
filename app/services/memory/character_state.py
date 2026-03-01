@@ -1,6 +1,7 @@
 """Character state manager - uses novel_memory table."""
 from typing import Optional
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
@@ -47,15 +48,31 @@ class CharacterStateManager:
             if existing:
                 existing.content = state
             else:
-                db.add(
-                    NovelMemory(
-                        novel_id=novel_id,
-                        memory_type="character",
-                        key=character_id,
-                        content=state,
-                    )
-                )
-            db.commit()
+                try:
+                    with db.begin_nested():
+                        db.add(
+                            NovelMemory(
+                                novel_id=novel_id,
+                                memory_type="character",
+                                key=character_id,
+                                content=state,
+                            )
+                        )
+                        db.flush()
+                except IntegrityError:
+                    existing = db.execute(stmt).scalar_one_or_none()
+                    if existing:
+                        existing.content = state
+                    else:
+                        raise
+            if should_close:
+                db.commit()
+            else:
+                db.flush()
+        except Exception:
+            if should_close:
+                db.rollback()
+            raise
         finally:
             if should_close:
                 db.close()

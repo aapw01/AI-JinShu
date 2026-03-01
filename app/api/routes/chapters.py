@@ -8,10 +8,15 @@ from sqlalchemy.orm import Session
 import redis
 
 from app.core.config import get_settings
+from app.core.authz.deps import require_permission
+from app.core.authz.resources import load_novel_resource
+from app.core.authz.types import Permission, Principal
 from app.core.database import get_db, resolve_novel
 from app.core.time_utils import to_utc_iso_z
-from app.models.novel import Chapter, ChapterOutline, GenerationTask
+from app.models.novel import Chapter, ChapterOutline, GenerationTask, ChapterVersion
 from app.schemas.novel import ChapterResponse
+from app.services.generation.common import is_effective_title, resolve_chapter_title
+from app.services.rewrite.service import get_chapter_version, list_chapter_versions
 
 router = APIRouter()
 
@@ -25,6 +30,14 @@ class ChapterProgressItem(BaseModel):
     chapter_num: int
     title: str | None = None
     status: str  # pending | generating | completed
+
+
+def _resolve_progress_title(chapter_num: int, outline_title: str | None, chapter_title: str | None) -> str:
+    if is_effective_title(chapter_title, chapter_num):
+        return str(chapter_title).strip()
+    if is_effective_title(outline_title, chapter_num):
+        return str(outline_title).strip()
+    return resolve_chapter_title(chapter_num=chapter_num, title=chapter_title or outline_title)
 
 
 def _get_generating_chapter_from_redis(novel_db_id: int) -> int | None:
@@ -69,33 +82,70 @@ def _to_response(c: Chapter, novel_uuid: str) -> ChapterResponse:
     )
 
 
+def _to_version_response(c: ChapterVersion, novel_uuid: str) -> ChapterResponse:
+    return ChapterResponse(
+        id=c.id,
+        novel_id=novel_uuid,
+        chapter_num=c.chapter_num,
+        title=c.title,
+        content=c.content,
+        summary=c.summary,
+        status=c.status,
+        review_score=None,
+        language_quality_score=None,
+        language_quality_report=None,
+        created_at=to_utc_iso_z(c.created_at),
+    )
+
+
 @router.get("/{novel_id}/chapters", response_model=list[ChapterResponse])
-def list_chapters(novel_id: str, db: Session = Depends(get_db)):
+def list_chapters(
+    novel_id: str,
+    version_id: int | None = None,
+    db: Session = Depends(get_db),
+    _: Principal = Depends(require_permission(Permission.NOVEL_READ, resource_loader=load_novel_resource)),
+):
     """List chapters for a novel."""
     novel = resolve_novel(db, novel_id)
     if not novel:
         raise HTTPException(404, "Novel not found")
-    stmt = select(Chapter).where(Chapter.novel_id == novel.id).order_by(Chapter.chapter_num)
-    chapters = db.execute(stmt).scalars().all()
     uuid_str = novel.uuid or str(novel.id)
-    return [_to_response(c, uuid_str) for c in chapters]
+    try:
+        _, chapters = list_chapter_versions(db, novel.id, version_id)
+        db.commit()
+        return [_to_version_response(c, uuid_str) for c in chapters]
+    except ValueError:
+        raise HTTPException(404, "Version not found")
 
 
 @router.get("/{novel_id}/chapters/{chapter_num}", response_model=ChapterResponse)
-def get_chapter(novel_id: str, chapter_num: int, db: Session = Depends(get_db)):
+def get_chapter(
+    novel_id: str,
+    chapter_num: int,
+    version_id: int | None = None,
+    db: Session = Depends(get_db),
+    _: Principal = Depends(require_permission(Permission.NOVEL_READ, resource_loader=load_novel_resource)),
+):
     """Get a specific chapter."""
     novel = resolve_novel(db, novel_id)
     if not novel:
         raise HTTPException(404, "Novel not found")
-    stmt = select(Chapter).where(Chapter.novel_id == novel.id, Chapter.chapter_num == chapter_num)
-    chapter = db.execute(stmt).scalar_one_or_none()
+    try:
+        _, chapter = get_chapter_version(db, novel.id, chapter_num, version_id)
+    except ValueError:
+        raise HTTPException(404, "Version not found")
     if not chapter:
         raise HTTPException(404, "Chapter not found")
-    return _to_response(chapter, novel.uuid or str(novel.id))
+    db.commit()
+    return _to_version_response(chapter, novel.uuid or str(novel.id))
 
 
 @router.get("/{novel_id}/chapter-progress", response_model=list[ChapterProgressItem])
-def get_chapter_progress(novel_id: str, db: Session = Depends(get_db)):
+def get_chapter_progress(
+    novel_id: str,
+    db: Session = Depends(get_db),
+    _: Principal = Depends(require_permission(Permission.NOVEL_READ, resource_loader=load_novel_resource)),
+):
     """Return full chapter list with generation status for left sidebar."""
     novel = resolve_novel(db, novel_id)
     if not novel:
@@ -124,15 +174,20 @@ def get_chapter_progress(novel_id: str, db: Session = Depends(get_db)):
     if outlines:
         for o in outlines:
             status = "pending"
+            chapter_row = generated_map.get(o.chapter_num)
             if o.chapter_num in generated_map:
-                raw = generated_map[o.chapter_num].status or "completed"
+                raw = chapter_row.status or "completed"
                 status = "completed" if raw == "completed" else "generating"
             elif generating_chapter is not None and o.chapter_num == generating_chapter:
                 status = "generating"
             result.append(
                 ChapterProgressItem(
                     chapter_num=o.chapter_num,
-                    title=o.title or generated_map.get(o.chapter_num).title if o.chapter_num in generated_map else o.title,
+                    title=_resolve_progress_title(
+                        chapter_num=o.chapter_num,
+                        outline_title=o.title,
+                        chapter_title=chapter_row.title if chapter_row else None,
+                    ),
                     status=status,
                 )
             )
@@ -140,20 +195,33 @@ def get_chapter_progress(novel_id: str, db: Session = Depends(get_db)):
 
     # Fallback for old novels without outlines: show generated chapters only.
     for c in chapters:
-        result.append(ChapterProgressItem(chapter_num=c.chapter_num, title=c.title, status="completed"))
+        result.append(
+            ChapterProgressItem(
+                chapter_num=c.chapter_num,
+                title=_resolve_progress_title(chapter_num=c.chapter_num, outline_title=None, chapter_title=c.title),
+                status="completed",
+            )
+        )
     return result
 
 
 @router.put("/{novel_id}/chapters/{chapter_num}", response_model=ChapterResponse)
 def update_chapter(
-    novel_id: str, chapter_num: int, data: ChapterUpdate, db: Session = Depends(get_db)
+    novel_id: str,
+    chapter_num: int,
+    data: ChapterUpdate,
+    version_id: int | None = None,
+    db: Session = Depends(get_db),
+    _: Principal = Depends(require_permission(Permission.NOVEL_UPDATE, resource_loader=load_novel_resource)),
 ):
     """Update a chapter's title or content."""
     novel = resolve_novel(db, novel_id)
     if not novel:
         raise HTTPException(404, "Novel not found")
-    stmt = select(Chapter).where(Chapter.novel_id == novel.id, Chapter.chapter_num == chapter_num)
-    chapter = db.execute(stmt).scalar_one_or_none()
+    try:
+        _, chapter = get_chapter_version(db, novel.id, chapter_num, version_id)
+    except ValueError:
+        raise HTTPException(404, "Version not found")
     if not chapter:
         raise HTTPException(404, "Chapter not found")
     if data.title is not None:
@@ -162,4 +230,4 @@ def update_chapter(
         chapter.content = data.content
     db.commit()
     db.refresh(chapter)
-    return _to_response(chapter, novel.uuid or str(novel.id))
+    return _to_version_response(chapter, novel.uuid or str(novel.id))

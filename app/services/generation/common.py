@@ -1,16 +1,101 @@
 """Shared constants and helpers for generation pipeline modules."""
 import logging
+import re
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 
 from app.core.database import SessionLocal
-from app.core.tokens import estimate_tokens
 from app.models.novel import ChapterOutline, NovelSpecification
+from app.prompts import render_prompt
 from app.services.memory.character_state import CharacterStateManager
 
 logger = logging.getLogger("app.services.generation")
 
 REVIEW_SCORE_THRESHOLD = 0.7
 MAX_RETRIES = 2
+_PLACEHOLDER_TITLE_RE = re.compile(
+    r"^\s*(第\s*[零一二三四五六七八九十百千两\d]+\s*章|chapter\s*\d+|ch\s*\d+)\s*$",
+    re.IGNORECASE,
+)
+
+
+def normalize_title_text(title: str | None) -> str:
+    """Normalize title text by trimming and collapsing repeated chapter prefixes."""
+    text = str(title or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(
+        r"^(第\s*[零一二三四五六七八九十百千两\d]+\s*章)\s*\1+",
+        r"\1",
+        text,
+        flags=re.IGNORECASE,
+    )
+    return text[:80].strip()
+
+
+def is_effective_title(title: str | None, chapter_num: int | None = None) -> bool:
+    """Check if title is meaningful (not empty and not chapter-number placeholder)."""
+    text = normalize_title_text(title)
+    if not text:
+        return False
+    if _PLACEHOLDER_TITLE_RE.match(text):
+        return False
+    if chapter_num is not None:
+        chapter_str = str(chapter_num)
+        if text in {f"第{chapter_str}章", f"Chapter {chapter_str}", f"CH {chapter_str}", f"Ch {chapter_str}"}:
+            return False
+    return True
+
+
+def _extract_title_suffix(text: str | None) -> str:
+    source = str(text or "").strip()
+    if not source:
+        return ""
+    source = source.replace("\r", "\n")
+    source = re.sub(r"第\s*[零一二三四五六七八九十百千两\d]+\s*章[:：]?", "", source)
+    parts = re.split(r"[。！？!?\n；;]", source)
+    for part in parts:
+        segment = part.strip()
+        if not segment:
+            continue
+        segment = re.split(r"[，,、]", segment)[0].strip()
+        segment = re.sub(r"^(本章|这一章|该章|章节)\s*", "", segment)
+        if len(segment) < 2:
+            continue
+        if segment in {"推进主线", "推进剧情", "无", "none", "None"}:
+            continue
+        if len(segment) > 18:
+            segment = segment[:18].rstrip("，,、:： ")
+        if segment:
+            return segment
+    return ""
+
+
+def resolve_chapter_title(
+    chapter_num: int,
+    title: str | None = None,
+    outline: dict | None = None,
+    summary: str | None = None,
+    content: str | None = None,
+) -> str:
+    """Resolve a readable chapter title without overriding valid existing titles."""
+    normalized = normalize_title_text(title)
+    if is_effective_title(normalized, chapter_num):
+        return normalized
+
+    outline_obj = outline or {}
+    candidates = [
+        _extract_title_suffix(outline_obj.get("summary")),
+        _extract_title_suffix(outline_obj.get("purpose")),
+        _extract_title_suffix(outline_obj.get("outline")),
+        _extract_title_suffix(summary),
+        _extract_title_suffix(content),
+    ]
+    suffix = next((x for x in candidates if x), "")
+    if suffix:
+        return normalize_title_text(f"第{chapter_num}章：{suffix}")
+    return f"第{chapter_num}章：关键事件"
 
 def save_prewrite_artifacts(novel_id: int, prewrite: dict) -> None:
     db = SessionLocal()
@@ -24,7 +109,16 @@ def save_prewrite_artifacts(novel_id: int, prewrite: dict) -> None:
             if existing:
                 existing.content = content
             else:
-                db.add(NovelSpecification(novel_id=novel_id, spec_type=spec_type, content=content))
+                try:
+                    with db.begin_nested():
+                        db.add(NovelSpecification(novel_id=novel_id, spec_type=spec_type, content=content))
+                        db.flush()
+                except IntegrityError:
+                    existing = db.execute(stmt).scalar_one_or_none()
+                    if existing:
+                        existing.content = content
+                    else:
+                        raise
         db.commit()
     finally:
         db.close()
@@ -67,11 +161,11 @@ def generate_chapter_summary(
 
     provider, model = get_model_for_stage(strategy, "reviewer")
     llm = get_llm_with_fallback(provider, model)
-    prompt = (
-        f"Summarize this chapter in 200-400 characters. Include: key events, "
-        f"character state changes, new information revealed, and the chapter-end hook.\n\n"
-        f"Chapter {chapter_num} content (truncated):\n{content[:4000]}\n\n"
-        f"Output only the summary text in {language}, no JSON or markdown."
+    prompt = render_prompt(
+        "chapter_summary_generate",
+        chapter_num=chapter_num,
+        content=(content[:4000]),
+        language=language,
     )
     try:
         resp = llm.invoke(prompt)
@@ -102,14 +196,11 @@ def update_character_states_from_content(
     char_names = [c.get("name", "") for c in characters if isinstance(c, dict) and c.get("name")]
     if not char_names:
         return
-    prompt = (
-        f"Based on this chapter content, report any STATE CHANGES for these characters: {', '.join(char_names)}\n\n"
-        f"Chapter {chapter_num} content (truncated):\n{content[:3000]}\n\n"
-        f'Output JSON: {{"updates": [{{"name": "角色名", "status": "alive/injured/dead/unknown", '
-        f'"location": "当前位置", "new_items": [], "lost_items": [], "injuries": [], '
-        f'"can_use_both_hands": true, "limitations": [], "forbidden_actions": [], '
-        f'"relationship_changes": [], "key_action": "本章关键行为"}}]}}\n'
-        f"Only include characters who actually appeared or were affected. Output pure JSON."
+    prompt = render_prompt(
+        "character_state_updates_from_chapter",
+        character_names=", ".join(char_names),
+        chapter_num=chapter_num,
+        content=(content[:3000]),
     )
     try:
         resp = llm.invoke(prompt)

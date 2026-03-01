@@ -43,10 +43,30 @@ dev:
 	cd web && npm install; \
 	cd ..; \
 	uv run alembic upgrade head; \
-	trap 'kill 0' INT TERM EXIT; \
-	uv run uvicorn app.main:app --reload & \
-	uv run celery -A app.workers.celery_app worker -l info & \
-	(cd web && npm run dev) & \
+	kill_tree() { \
+		pid="$$1"; \
+		children="$$(pgrep -P "$$pid" || true)"; \
+		for c in $$children; do kill_tree "$$c"; done; \
+		kill "$$pid" 2>/dev/null || true; \
+	}; \
+	cleanup() { \
+		code=$$?; \
+		trap - INT TERM EXIT; \
+		for p in "$${api_pid:-}" "$${worker_pid:-}" "$${web_pid:-}"; do \
+			[ -n "$$p" ] || continue; \
+			kill_tree "$$p"; \
+		done; \
+		sleep 0.5; \
+		for p in "$${api_pid:-}" "$${worker_pid:-}" "$${web_pid:-}"; do \
+			[ -n "$$p" ] || continue; \
+			kill -9 "$$p" 2>/dev/null || true; \
+		done; \
+		exit $$code; \
+	}; \
+	trap cleanup INT TERM EXIT; \
+	uv run uvicorn app.main:app --reload & api_pid=$$!; \
+	uv run celery -A app.workers.celery_app worker -l info & worker_pid=$$!; \
+	(cd web && npm run dev) & web_pid=$$!; \
 	wait
 
 stop:
