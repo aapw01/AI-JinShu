@@ -78,11 +78,8 @@ def get_current_principal(request: Request, db: Session = Depends(get_db)) -> Pr
             is_authenticated=True,
         )
 
-    # Allow stateless principal in early integration/tests if DB user not yet seeded.
-    role = str(payload.get("role") or "user")
-    status = str(payload.get("status") or "active")
-    log_event(logger, "auth.token.stateless_principal", level=logging.INFO, user_id=user_uuid, role=role, run_state=status)
-    return Principal(user_uuid=user_uuid, role=role, status=status, is_authenticated=True)
+    log_event(logger, "auth.user_not_found", level=logging.WARNING, user_id=user_uuid)
+    raise unauthorized("User not found")
 
 
 def require_auth() -> callable:

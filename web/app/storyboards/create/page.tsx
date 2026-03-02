@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Clapperboard, Sparkles } from "lucide-react";
 import {
   api,
+  getErrorMessage,
   StoryboardLane,
   StoryboardStylePresetItem,
   StoryboardStyleRecommendationItem,
@@ -35,6 +36,12 @@ function StoryboardCreateForm() {
   const [errorDialogOpen, setErrorDialogOpen] = useState(false);
 
   const canSubmit = useMemo(() => Boolean(novelId && copyrightAssertion && lanes.length > 0), [novelId, copyrightAssertion, lanes]);
+
+  useEffect(() => {
+    if (!novelId) {
+      router.replace("/novels");
+    }
+  }, [novelId, router]);
 
   useEffect(() => {
     void (async () => {
@@ -101,10 +108,15 @@ function StoryboardCreateForm() {
         audience_goal: audienceGoal,
         copyright_assertion: copyrightAssertion,
       });
-      const gen = await api.generateStoryboard(project.id);
+      const versions = await api.getVersions(novelId);
+      const activeVersion = versions.find((v) => v.is_default) || versions[0];
+      if (!activeVersion) {
+        throw new Error("小说暂无可用版本，无法生成分镜");
+      }
+      const gen = await api.generateStoryboard(project.id, activeVersion.id);
       router.push(`/storyboards/${project.id}?task_id=${encodeURIComponent(gen.task_id)}`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "创建失败");
+      setError(getErrorMessage(err, "创建失败"));
       setErrorDialogOpen(true);
     } finally {
       setLoading(false);
@@ -149,14 +161,14 @@ function StoryboardCreateForm() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <label className="space-y-1 text-sm text-[#3A3A3C]">
               <span>题材风格</span>
-              <select value={genreStyleKey} onChange={(e) => setGenreStyleKey(e.target.value)} className="w-full border border-[#E5DED7] rounded-lg h-10 px-3 bg-white">
+              <select value={genreStyleKey} onChange={(e) => setGenreStyleKey(e.target.value)} className="w-full border border-[#DDD8D3] rounded-[8px] h-10 px-3 bg-white outline-none focus:border-[#C8211B] focus:ring-2 focus:ring-[#C8211B]/10 transition-colors">
                 <option value="">按推荐自动</option>
                 {presets.genre_styles.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}
               </select>
             </label>
             <label className="space-y-1 text-sm text-[#3A3A3C]">
               <span>导演风格</span>
-              <select value={directorStyleKey} onChange={(e) => setDirectorStyleKey(e.target.value)} className="w-full border border-[#E5DED7] rounded-lg h-10 px-3 bg-white">
+              <select value={directorStyleKey} onChange={(e) => setDirectorStyleKey(e.target.value)} className="w-full border border-[#DDD8D3] rounded-[8px] h-10 px-3 bg-white outline-none focus:border-[#C8211B] focus:ring-2 focus:ring-[#C8211B]/10 transition-colors">
                 <option value="">按推荐自动</option>
                 {presets.director_styles.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}
               </select>
@@ -166,22 +178,22 @@ function StoryboardCreateForm() {
           <div className="grid grid-cols-2 gap-3">
             <label className="space-y-1 text-sm text-[#3A3A3C]">
               <span>目标集数</span>
-              <input type="number" min={1} max={200} value={targetEpisodes} onChange={(e) => setTargetEpisodes(Number(e.target.value || 1))} className="w-full border border-[#E5DED7] rounded-lg h-10 px-3 bg-white" />
+              <input type="number" min={1} max={200} value={targetEpisodes} onChange={(e) => setTargetEpisodes(Number(e.target.value || 1))} className="w-full border border-[#DDD8D3] rounded-[8px] h-10 px-3 bg-white outline-none focus:border-[#C8211B] focus:ring-2 focus:ring-[#C8211B]/10 transition-colors" />
             </label>
             <label className="space-y-1 text-sm text-[#3A3A3C]">
               <span>单集时长（秒）</span>
-              <input type="number" min={30} max={600} value={targetEpisodeSeconds} onChange={(e) => setTargetEpisodeSeconds(Number(e.target.value || 90))} className="w-full border border-[#E5DED7] rounded-lg h-10 px-3 bg-white" />
+              <input type="number" min={30} max={600} value={targetEpisodeSeconds} onChange={(e) => setTargetEpisodeSeconds(Number(e.target.value || 90))} className="w-full border border-[#DDD8D3] rounded-[8px] h-10 px-3 bg-white outline-none focus:border-[#C8211B] focus:ring-2 focus:ring-[#C8211B]/10 transition-colors" />
             </label>
           </div>
 
           <label className="space-y-1 text-sm text-[#3A3A3C] block">
             <span>风格标签（可选覆盖）</span>
-            <input value={styleProfile} onChange={(e) => setStyleProfile(e.target.value)} placeholder="例如：悬疑反转、情绪压迫" className="w-full border border-[#E5DED7] rounded-lg h-10 px-3 bg-white" />
+            <input value={styleProfile} onChange={(e) => setStyleProfile(e.target.value)} placeholder="例如：悬疑反转、情绪压迫" className="w-full border border-[#DDD8D3] rounded-[8px] h-10 px-3 bg-white outline-none focus:border-[#C8211B] focus:ring-2 focus:ring-[#C8211B]/10 transition-colors" />
           </label>
 
           <label className="space-y-1 text-sm text-[#3A3A3C] block">
             <span>观众目标</span>
-            <input value={audienceGoal} onChange={(e) => setAudienceGoal(e.target.value)} placeholder="例如：爽感、反转、泪点" className="w-full border border-[#E5DED7] rounded-lg h-10 px-3 bg-white" />
+            <input value={audienceGoal} onChange={(e) => setAudienceGoal(e.target.value)} placeholder="例如：爽感、反转、泪点" className="w-full border border-[#DDD8D3] rounded-[8px] h-10 px-3 bg-white outline-none focus:border-[#C8211B] focus:ring-2 focus:ring-[#C8211B]/10 transition-colors" />
           </label>
 
           <div>

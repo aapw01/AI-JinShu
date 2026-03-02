@@ -52,6 +52,9 @@ def ensure_default_version(db: Session, novel_id: int) -> NovelVersion:
                 content=chapter.content,
                 summary=chapter.summary,
                 status=chapter.status or "completed",
+                review_score=chapter.review_score,
+                language_quality_score=chapter.language_quality_score,
+                language_quality_report=chapter.language_quality_report,
                 metadata_=chapter.metadata_ or {},
             )
         )
@@ -83,6 +86,9 @@ def _sync_from_chapters_if_needed(db: Session, novel_id: int, version: NovelVers
                 content=chapter.content,
                 summary=chapter.summary,
                 status=chapter.status or "completed",
+                review_score=chapter.review_score,
+                language_quality_score=chapter.language_quality_score,
+                language_quality_report=chapter.language_quality_report,
                 metadata_=chapter.metadata_ or {},
             )
         )
@@ -187,12 +193,21 @@ def create_target_version(db: Session, novel_id: int, base_version: NovelVersion
                 content=row.content,
                 summary=row.summary,
                 status=row.status or "completed",
+                review_score=row.review_score,
+                language_quality_score=row.language_quality_score,
+                language_quality_report=row.language_quality_report,
                 metadata_=row.metadata_ or {},
                 source_chapter_version_id=row.id,
             )
         )
     db.flush()
     return target
+
+
+def get_default_version_id(db: Session, novel_id: int) -> int:
+    """Return current default version id for a novel."""
+    version = ensure_default_version(db, novel_id)
+    return int(version.id)
 
 
 def validate_annotation_payload(content: str, start_offset: int | None, end_offset: int | None, selected_text: str | None) -> None:

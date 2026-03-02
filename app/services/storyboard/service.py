@@ -9,7 +9,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.models.novel import Chapter, Novel
+from app.models.novel import ChapterVersion, Novel, NovelVersion
 from app.models.storyboard import (
     StoryboardAssertion,
     StoryboardProject,
@@ -70,6 +70,7 @@ def create_project(
     db: Session,
     *,
     novel: Novel,
+    source_novel_version_id: int | None,
     owner_user_uuid: str,
     target_episodes: int,
     target_episode_seconds: int,
@@ -83,7 +84,9 @@ def create_project(
     copyright_assertion: bool,
 ) -> StoryboardProject:
     lanes = normalize_lanes(output_lanes)
-    chapter_text = " ".join([(c.summary or c.content or "")[:180] for c in load_novel_chapters(db, novel.id)[:8]])
+    chapter_text = " ".join(
+        [(c.summary or c.content or "")[:180] for c in load_novel_chapters(db, novel.id, source_novel_version_id)[:8]]
+    )
     recommendations = recommend_styles(novel, chapter_text)
     selected_genre = genre_style_key or (recommendations[0]["genre_style_key"] if recommendations else None)
     selected_director = director_style_key or (recommendations[0]["director_style_key"] if recommendations else None)
@@ -141,7 +144,12 @@ def get_latest_task(db: Session, project_id: int) -> StoryboardTask | None:
     ).scalar_one_or_none()
 
 
-def create_generation_versions(db: Session, project_id: int, lanes: list[str]) -> list[StoryboardVersion]:
+def create_generation_versions(
+    db: Session,
+    project_id: int,
+    lanes: list[str],
+    source_novel_version_id: int,
+) -> list[StoryboardVersion]:
     created: list[StoryboardVersion] = []
     for lane in lanes:
         version: StoryboardVersion | None = None
@@ -152,6 +160,7 @@ def create_generation_versions(db: Session, project_id: int, lanes: list[str]) -
             next_no = int(current_max or 0) + 1
             candidate = StoryboardVersion(
                 storyboard_project_id=project_id,
+                source_novel_version_id=source_novel_version_id,
                 version_no=next_no,
                 lane=lane,
                 status="generating",
@@ -196,7 +205,7 @@ def create_task_record(
     return task
 
 
-def to_adapted_chapters(chapters: list[Chapter]) -> list[AdaptedChapter]:
+def to_adapted_chapters(chapters: list[ChapterVersion]) -> list[AdaptedChapter]:
     out: list[AdaptedChapter] = []
     for row in chapters:
         out.append(
@@ -210,11 +219,17 @@ def to_adapted_chapters(chapters: list[Chapter]) -> list[AdaptedChapter]:
     return out
 
 
-def load_novel_chapters(db: Session, novel_id: int) -> list[AdaptedChapter]:
+def load_novel_chapters(db: Session, novel_id: int, novel_version_id: int | None) -> list[AdaptedChapter]:
+    if novel_version_id is None:
+        return []
     rows = db.execute(
-        select(Chapter)
-        .where(Chapter.novel_id == novel_id)
-        .order_by(Chapter.chapter_num.asc())
+        select(ChapterVersion)
+        .join(NovelVersion, NovelVersion.id == ChapterVersion.novel_version_id)
+        .where(
+            ChapterVersion.novel_version_id == novel_version_id,
+            NovelVersion.novel_id == novel_id,
+        )
+        .order_by(ChapterVersion.chapter_num.asc())
     ).scalars().all()
     return to_adapted_chapters(rows)
 

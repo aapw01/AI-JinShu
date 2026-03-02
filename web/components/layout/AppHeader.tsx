@@ -2,16 +2,20 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
-import { BookCopy, LogOut, Plus, Star, Type } from "lucide-react";
-import { api, Novel } from "@/lib/api";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { BookCopy, ChevronDown, LogOut, Plus, Star, Type, UserCircle2 } from "lucide-react";
+import { api, AuthUser, Novel } from "@/lib/api";
+import { formatUserRole, formatUserStatus } from "@/lib/display";
 import { Button } from "@/components/ui/Button";
 
 export function AppHeader() {
   const pathname = usePathname();
   const router = useRouter();
   const [novels, setNovels] = useState<Novel[]>([]);
+  const [user, setUser] = useState<AuthUser | null>(null);
   const [logoutLoading, setLogoutLoading] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     let disposed = false;
@@ -29,6 +33,35 @@ export function AppHeader() {
       disposed = true;
       clearInterval(timer);
     };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    const loadUser = async () => {
+      if (!api.getAuthToken()) {
+        if (!disposed) setUser(null);
+        return;
+      }
+      try {
+        const res = await api.me();
+        if (!disposed) setUser(res.user);
+      } catch {
+        if (!disposed) setUser(null);
+      }
+    };
+    if (!pathname.startsWith("/auth")) loadUser();
+    return () => {
+      disposed = true;
+    };
+  }, [pathname]);
+
+  useEffect(() => {
+    const onDocClick = (event: MouseEvent) => {
+      if (!menuRef.current) return;
+      if (!menuRef.current.contains(event.target as Node)) setMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
   }, []);
 
   const stats = useMemo(() => {
@@ -85,25 +118,66 @@ export function AppHeader() {
             </Button>
           </Link>
           {!pathname.startsWith("/auth") ? (
-            <Button
-              size="sm"
-              variant="ghost"
-              className="h-9 px-3 text-sm border border-[#DDD8D3] hover:bg-[#F2EEEA]"
-              loading={logoutLoading}
-              onClick={async () => {
-                try {
-                  setLogoutLoading(true);
-                  await api.logout();
-                } finally {
-                  api.setAuthToken(null);
-                  setLogoutLoading(false);
-                  router.push("/auth/login");
-                }
-              }}
-            >
-              <LogOut className="w-4 h-4 mr-1" />
-              退出登录
-            </Button>
+            <div className="relative" ref={menuRef}>
+              <button
+                type="button"
+                className="h-9 px-3 text-sm border border-[#DDD8D3] hover:bg-[#F2EEEA] rounded-[10px] inline-flex items-center gap-2 text-[#3E3833]"
+                onClick={() => setMenuOpen((v) => !v)}
+              >
+                <UserCircle2 className="w-4 h-4" />
+                <span>个人中心</span>
+                <ChevronDown className={`w-4 h-4 transition-transform ${menuOpen ? "rotate-180" : ""}`} />
+              </button>
+
+              {menuOpen ? (
+                <div className="absolute right-0 top-11 w-72 rounded-xl border border-[#E6DED6] bg-white shadow-[0_16px_48px_rgba(31,27,24,0.16)] p-2">
+                  <div className="px-3 py-2 border-b border-[#F0EAE2]">
+                    <p className="text-xs text-[#8B8379]">当前账号</p>
+                    <p className="text-sm text-[#1F1B18] font-medium truncate">{user?.email || "未登录"}</p>
+                    <p className="text-xs text-[#8B8379] mt-0.5">
+                      角色：{formatUserRole(user?.role)} · 状态：{formatUserStatus(user?.status)}
+                    </p>
+                  </div>
+
+                  <div className="py-1">
+                    <Link
+                      href="/account/profile"
+                      className="h-9 px-3 rounded-lg text-sm text-[#2E2823] hover:bg-[#F6F3EF] flex items-center"
+                      onClick={() => setMenuOpen(false)}
+                    >
+                      我的信息
+                    </Link>
+                    <Link
+                      href="/account"
+                      className="h-9 px-3 rounded-lg text-sm text-[#2E2823] hover:bg-[#F6F3EF] flex items-center"
+                      onClick={() => setMenuOpen(false)}
+                    >
+                      账户与账单
+                    </Link>
+                  </div>
+
+                  <button
+                    type="button"
+                    className="w-full h-9 px-3 rounded-lg text-sm text-[#B0372F] hover:bg-[#FFF1F0] flex items-center"
+                    onClick={async () => {
+                      try {
+                        setLogoutLoading(true);
+                        await api.logout();
+                      } finally {
+                        api.setAuthToken(null);
+                        setLogoutLoading(false);
+                        setMenuOpen(false);
+                        router.push("/auth/login");
+                      }
+                    }}
+                    disabled={logoutLoading}
+                  >
+                    <LogOut className="w-4 h-4 mr-2" />
+                    {logoutLoading ? "退出中..." : "退出登录"}
+                  </button>
+                </div>
+              ) : null}
+            </div>
           ) : null}
         </div>
       </div>

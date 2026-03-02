@@ -70,27 +70,27 @@ def _clean_enum(value: str | None, allowed: set[str]) -> str | None:
     return text if text in allowed else None
 
 
-def list_character_profiles(db: Session, novel_id: int) -> list[StoryCharacterProfile]:
-    return db.execute(
-        select(StoryCharacterProfile)
-        .where(StoryCharacterProfile.novel_id == novel_id)
-        .order_by(StoryCharacterProfile.updated_chapter_num.desc().nullslast(), StoryCharacterProfile.id.asc())
-    ).scalars().all()
+def list_character_profiles(db: Session, novel_id: int, novel_version_id: int | None = None) -> list[StoryCharacterProfile]:
+    stmt = select(StoryCharacterProfile).where(StoryCharacterProfile.novel_id == novel_id)
+    if novel_version_id is not None:
+        stmt = stmt.where(StoryCharacterProfile.novel_version_id == novel_version_id)
+    stmt = stmt.order_by(StoryCharacterProfile.updated_chapter_num.desc().nullslast(), StoryCharacterProfile.id.asc())
+    return db.execute(stmt).scalars().all()
 
 
-def _upsert_stub_profiles_from_prewrite(db: Session, novel_id: int, prewrite: dict) -> None:
+def _upsert_stub_profiles_from_prewrite(
+    db: Session,
+    novel_id: int,
+    novel_version_id: int | None,
+    prewrite: dict,
+) -> None:
     chars = ((prewrite or {}).get("specification") or {}).get("characters") or []
     if not isinstance(chars, list):
         return
-    existing_keys = {
-        str(x).strip()
-        for x in (
-            db.execute(select(StoryCharacterProfile.character_key).where(StoryCharacterProfile.novel_id == novel_id))
-            .scalars()
-            .all()
-        )
-        if str(x).strip()
-    }
+    stmt_keys = select(StoryCharacterProfile.character_key).where(StoryCharacterProfile.novel_id == novel_id)
+    if novel_version_id is not None:
+        stmt_keys = stmt_keys.where(StoryCharacterProfile.novel_version_id == novel_version_id)
+    existing_keys = {str(x).strip() for x in db.execute(stmt_keys).scalars().all() if str(x).strip()}
     for c in chars[:120]:
         if not isinstance(c, dict):
             continue
@@ -107,6 +107,7 @@ def _upsert_stub_profiles_from_prewrite(db: Session, novel_id: int, prewrite: di
                 db.add(
                     StoryCharacterProfile(
                         novel_id=novel_id,
+                        novel_version_id=novel_version_id,
                         character_key=key,
                         display_name=display_name,
                         confidence=0.0,
@@ -183,6 +184,7 @@ def update_character_profiles_incremental(
     *,
     db: Session,
     novel_id: int,
+    novel_version_id: int | None = None,
     chapter_num: int,
     content: str,
     prewrite: dict,
@@ -191,7 +193,7 @@ def update_character_profiles_incremental(
     strategy: str | None,
 ) -> None:
     """Update hard-identity character profiles with chapter-local evidence only."""
-    _upsert_stub_profiles_from_prewrite(db, novel_id, prewrite)
+    _upsert_stub_profiles_from_prewrite(db, novel_id, novel_version_id, prewrite)
     db.flush()
     chars = ((prewrite or {}).get("specification") or {}).get("characters") or []
     if not isinstance(chars, list):
@@ -200,7 +202,7 @@ def update_character_profiles_incremental(
     provider, model = get_model_for_stage(strategy or "web-novel", "reviewer")
     llm = get_llm_with_fallback(provider, model)
     extracted = extracted_facts or {}
-    profile_map = {row.character_key: row for row in list_character_profiles(db, novel_id)}
+    profile_map = {row.character_key: row for row in list_character_profiles(db, novel_id, novel_version_id)}
     processed_keys: set[str] = set()
 
     for c in chars[:80]:
@@ -222,6 +224,7 @@ def update_character_profiles_incremental(
                 with db.begin_nested():
                     row = StoryCharacterProfile(
                         novel_id=novel_id,
+                        novel_version_id=novel_version_id,
                         character_key=key,
                         display_name=name,
                         evidence_json=[],
@@ -233,6 +236,7 @@ def update_character_profiles_incremental(
                 row = db.execute(
                     select(StoryCharacterProfile).where(
                         StoryCharacterProfile.novel_id == novel_id,
+                        StoryCharacterProfile.novel_version_id == novel_version_id,
                         StoryCharacterProfile.character_key == key,
                     )
                 ).scalar_one_or_none()

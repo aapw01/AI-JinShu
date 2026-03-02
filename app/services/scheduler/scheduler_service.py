@@ -1,7 +1,7 @@
 """Unified task submission and dispatching for creation workloads."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import Select, asc, select
@@ -12,6 +12,11 @@ from app.models.creation_task import CreationTask
 from app.services.scheduler.concurrency_service import count_user_running_slots, get_user_concurrency_limit
 from app.services.scheduler.lock_service import acquire_user_dispatch_lock
 from app.services.task_runtime.lease_service import acquire_or_refresh_lease
+
+import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 ACTIVE_STATUSES = {"queued", "dispatching", "running", "paused"}
@@ -76,7 +81,9 @@ def get_task_by_id(db: Session, *, task_id: int) -> CreationTask | None:
 
 
 def mark_task_running(db: Session, *, task_id: int) -> CreationTask | None:
-    task = get_task_by_id(db, task_id=task_id)
+    task = db.execute(
+        select(CreationTask).where(CreationTask.id == task_id).with_for_update()
+    ).scalar_one_or_none()
     if not task:
         return None
     if task.status != "dispatching":
@@ -187,7 +194,9 @@ def finalize_task(
     error_detail: str | None = None,
     result_json: dict[str, Any] | None = None,
 ) -> CreationTask | None:
-    task = get_task_by_id(db, task_id=task_id)
+    task = db.execute(
+        select(CreationTask).where(CreationTask.id == task_id).with_for_update()
+    ).scalar_one_or_none()
     if not task:
         return None
     if task.status in TERMINAL_STATUSES and final_status in TERMINAL_STATUSES:
@@ -285,19 +294,64 @@ def heartbeat_task(db: Session, *, task_id: int) -> CreationTask | None:
     return acquire_or_refresh_lease(db, creation_task_id=task_id, ttl_seconds=ttl)
 
 
+def _reclaim_update_redis(items: list[tuple[str | None, str | None, str | None]]) -> None:
+    """Clear Redis status for reclaimed tasks so frontend doesn't show stale 'running'."""
+    try:
+        from app.core.database import get_redis
+        r = get_redis()
+        queued_payload = json.dumps({
+            "status": "queued", "run_state": "queued", "step": "queued",
+            "current_phase": "queued", "progress": 0,
+            "message": "任务自动恢复：已重新入队",
+        }, ensure_ascii=False)
+        for worker_id, public_id, novel_id in items:
+            if worker_id:
+                r.setex(f"generation:task:{worker_id}", 86400, queued_payload)
+            if public_id:
+                r.setex(f"generation:task:{public_id}", 86400, queued_payload)
+            if novel_id:
+                r.setex(f"generation:novel:{novel_id}", 86400, queued_payload)
+    except Exception:
+        logger.warning("Failed to update Redis during reclaim", exc_info=True)
+
+
 def reclaim_stale_running_tasks(db: Session) -> int:
     now = _utc_now()
+    dispatching_timeout = now - timedelta(seconds=120)
     stale = list(
         db.execute(
-            select(CreationTask).where(
+            select(CreationTask)
+            .where(
                 CreationTask.status.in_(("dispatching", "running")),
                 CreationTask.worker_lease_expires_at.is_not(None),
                 CreationTask.worker_lease_expires_at < now,
             )
+            .with_for_update(skip_locked=True)
         ).scalars().all()
     )
+    orphaned_dispatching = list(
+        db.execute(
+            select(CreationTask)
+            .where(
+                CreationTask.status == "dispatching",
+                CreationTask.worker_lease_expires_at.is_(None),
+                CreationTask.updated_at < dispatching_timeout,
+            )
+            .with_for_update(skip_locked=True)
+        ).scalars().all()
+    )
+    all_stale = stale + orphaned_dispatching
     reclaimed = 0
-    for row in stale:
+    old_worker_ids: list[str] = []
+    redis_cleanup: list[tuple[str | None, str | None, str | None]] = []
+    for row in all_stale:
+        if row.worker_task_id:
+            old_worker_ids.append(str(row.worker_task_id))
+        redis_cleanup.append((
+            str(row.worker_task_id) if row.worker_task_id else None,
+            row.public_id,
+            str(row.resource_id) if row.task_type == "generation" and row.resource_type == "novel" else None,
+        ))
         row.status = "queued"
         row.phase = "queued"
         row.message = "任务自动恢复：检测到worker中断，已重新入队"
@@ -306,9 +360,18 @@ def reclaim_stale_running_tasks(db: Session) -> int:
         row.recovery_count = int(row.recovery_count or 0) + 1
         row.finished_at = None
         reclaimed += 1
+    if old_worker_ids:
+        try:
+            from app.workers.celery_app import app as celery_app
+            for wid in old_worker_ids:
+                celery_app.control.revoke(wid, terminate=True)
+        except Exception:
+            pass
+    if redis_cleanup:
+        _reclaim_update_redis(redis_cleanup)
     if reclaimed:
         db.flush()
-        users = {str(r.user_uuid) for r in stale if r.user_uuid}
+        users = {str(r.user_uuid) for r in all_stale if r.user_uuid}
         for user_uuid in users:
             dispatch_user_queue(db, user_uuid=user_uuid)
     return reclaimed
@@ -340,6 +403,8 @@ def dispatch_user_queue(db: Session, *, user_uuid: str) -> list[CreationTask]:
     dispatched: list[CreationTask] = []
     for task in queued:
         transition_task_status(db, task=task, to_status="dispatching", phase="dispatching", message="任务调度中")
+        task.worker_lease_expires_at = _utc_now() + timedelta(seconds=120)
+        db.flush()
         try:
             _enqueue_worker_task(db, task=task)
             dispatched.append(task)
@@ -379,16 +444,17 @@ def _enqueue_worker_task(db: Session, *, task: CreationTask) -> None:
         from app.tasks.generation import submit_generation_task
 
         payload = task.payload_json or {}
-        for key in ("novel_id", "num_chapters", "start_chapter"):
+        for key in ("novel_id", "novel_version_id", "num_chapters", "start_chapter"):
             if payload.get(key) is None:
                 raise ValueError(f"missing payload key for generation: {key}")
         async_result = submit_generation_task.delay(
-            payload["novel_id"],
-            payload["num_chapters"],
-            payload["start_chapter"],
-            None,
-            payload.get("trace_id"),
-            task.id,
+            novel_id=payload["novel_id"],
+            novel_version_id=payload["novel_version_id"],
+            num_chapters=payload["num_chapters"],
+            start_chapter=payload["start_chapter"],
+            parent_task_id=None,
+            trace_id=payload.get("trace_id"),
+            creation_task_id=task.id,
         )
         db.add(
             GenerationTask(
@@ -427,16 +493,48 @@ def _enqueue_worker_task(db: Session, *, task: CreationTask) -> None:
             req.status = "queued"
             req.message = "重写任务已入队"
     elif task.task_type == "storyboard":
+        from app.models.novel import NovelVersion
+        from app.models.storyboard import StoryboardProject, StoryboardTask, StoryboardVersion
         from app.tasks.storyboard import run_storyboard_pipeline
 
         payload = task.payload_json or {}
-        for key in ("project_id", "task_db_id"):
+        for key in ("project_id", "task_db_id", "novel_version_id"):
             if payload.get(key) is None:
                 raise ValueError(f"missing payload key for storyboard: {key}")
+        project_id = int(payload["project_id"])
+        task_db_id = int(payload["task_db_id"])
+        novel_version_id = int(payload["novel_version_id"])
+        version_ids = [int(x) for x in (payload.get("version_ids") or [])]
+        if not version_ids:
+            raise ValueError("missing payload key for storyboard: version_ids")
+
+        project = db.execute(select(StoryboardProject).where(StoryboardProject.id == project_id)).scalar_one_or_none()
+        if not project:
+            raise ValueError(f"storyboard project not found: {project_id}")
+        task_row = db.execute(select(StoryboardTask).where(StoryboardTask.id == task_db_id)).scalar_one_or_none()
+        if not task_row or int(task_row.storyboard_project_id) != project_id:
+            raise ValueError(f"storyboard task context not found: {task_db_id}")
+        matched_version_ids = set(
+            db.execute(
+                select(StoryboardVersion.id).where(
+                    StoryboardVersion.id.in_(version_ids),
+                    StoryboardVersion.storyboard_project_id == project_id,
+                )
+            ).scalars().all()
+        )
+        requested_version_ids = set(version_ids)
+        if matched_version_ids != requested_version_ids:
+            raise ValueError("storyboard versions context invalid")
+
+        source_version = db.execute(select(NovelVersion).where(NovelVersion.id == novel_version_id)).scalar_one_or_none()
+        if not source_version or int(source_version.novel_id) != int(project.novel_id):
+            raise ValueError("storyboard novel_version context invalid")
+
         async_result = run_storyboard_pipeline.delay(
-            project_id=int(payload["project_id"]),
-            version_ids=[int(x) for x in (payload.get("version_ids") or [])],
-            task_db_id=(int(payload["task_db_id"]) if payload.get("task_db_id") is not None else None),
+            project_id=project_id,
+            version_ids=version_ids,
+            novel_version_id=novel_version_id,
+            task_db_id=task_db_id,
             creation_task_id=int(task.id),
         )
     else:

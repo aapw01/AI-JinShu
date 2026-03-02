@@ -69,8 +69,7 @@ def test_generation_submit_conflict(client):
     r1 = client.post(f"/api/novels/{novel_id}/generate", json={"num_chapters": 3, "start_chapter": 1})
     assert r1.status_code == 200
     r2 = client.post(f"/api/novels/{novel_id}/generate", json={"num_chapters": 2, "start_chapter": 1})
-    assert r2.status_code == 200
-    assert r1.json()["task_id"] != r2.json()["task_id"]
+    assert r2.status_code == 409
 
 
 def test_generation_status_extended_fields(client):

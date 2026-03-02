@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
 import { ArrowLeft, ArrowRight, Globe, PenSquare, Sparkles, WandSparkles } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, getErrorMessage } from "@/lib/api";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Textarea } from "@/components/ui/Textarea";
@@ -197,7 +197,7 @@ export default function CreatePage() {
       // Go to progress page
       router.push(`/novels/${res.id}/progress`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "创建失败");
+      setError(getErrorMessage(err, "创建失败"));
       setErrorDialogOpen(true);
       setLoading(false);
     }
@@ -217,7 +217,7 @@ export default function CreatePage() {
       });
       updateForm({ idea: result.editable_framework || result.one_liner });
     } catch (err) {
-      setIdeaError(err instanceof Error ? err.message : "AI 创意生成失败");
+      setIdeaError(getErrorMessage(err, "AI 创意生成失败"));
     } finally {
       setIdeaGenerating(false);
     }

@@ -20,6 +20,7 @@ class VectorStoreWrapper:
     def search(
         self,
         novel_id: int,
+        novel_version_id: int,
         query_text: Optional[str] = None,
         query_embedding: Optional[list[float]] = None,
         limit: int = 5,
@@ -29,7 +30,10 @@ class VectorStoreWrapper:
         should_close = db is None
         db = db or SessionLocal()
         try:
-            stmt = select(KnowledgeChunk).where(KnowledgeChunk.novel_id == novel_id)
+            stmt = select(KnowledgeChunk).where(
+                KnowledgeChunk.novel_id == novel_id,
+                KnowledgeChunk.novel_version_id == novel_version_id,
+            )
             if query_embedding is None and query_text:
                 query_embedding = embed_query(query_text)
             if query_embedding is not None:
@@ -59,6 +63,7 @@ class VectorStoreWrapper:
     def add_chunk(
         self,
         novel_id: int,
+        novel_version_id: int,
         content: str,
         chunk_type: Optional[str] = None,
         embedding: Optional[list[float]] = None,
@@ -72,6 +77,7 @@ class VectorStoreWrapper:
             started = time.perf_counter()
             db.add(KnowledgeChunk(
                 novel_id=novel_id,
+                novel_version_id=novel_version_id,
                 content=content,
                 chunk_type=chunk_type,
                 embedding=embedding if embedding is not None else embed_query(content[:2000]),

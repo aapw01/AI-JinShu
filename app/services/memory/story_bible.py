@@ -30,16 +30,16 @@ class StoryBibleStore:
         status: str | None = None,
         summary: str | None = None,
         metadata: dict | None = None,
+        novel_version_id: int | None = None,
         db: Optional[Session] = None,
     ) -> StoryEntity:
         should_close = db is None
         db = db or SessionLocal()
         try:
-            stmt = select(StoryEntity).where(
-                StoryEntity.novel_id == novel_id,
-                StoryEntity.entity_type == entity_type,
-                StoryEntity.name == name,
-            )
+            stmt = select(StoryEntity).where(StoryEntity.novel_id == novel_id)
+            if novel_version_id is not None:
+                stmt = stmt.where(StoryEntity.novel_version_id == novel_version_id)
+            stmt = stmt.where(StoryEntity.entity_type == entity_type, StoryEntity.name == name)
             row = db.execute(stmt).scalar_one_or_none()
             if row:
                 row.status = status if status is not None else row.status
@@ -51,6 +51,7 @@ class StoryBibleStore:
                     with db.begin_nested():
                         row = StoryEntity(
                             novel_id=novel_id,
+                            novel_version_id=novel_version_id,
                             entity_type=entity_type,
                             name=name,
                             status=status,
@@ -90,6 +91,7 @@ class StoryBibleStore:
         value_json: dict,
         chapter_from: int,
         chapter_to: int | None = None,
+        novel_version_id: int | None = None,
         db: Optional[Session] = None,
     ) -> StoryFact:
         should_close = db is None
@@ -97,6 +99,7 @@ class StoryBibleStore:
         try:
             row = StoryFact(
                 novel_id=novel_id,
+                novel_version_id=novel_version_id,
                 entity_id=entity_id,
                 fact_type=fact_type,
                 value_json=value_json,
@@ -130,6 +133,7 @@ class StoryBibleStore:
         causes: list | None = None,
         effects: list | None = None,
         payload: dict | None = None,
+        novel_version_id: int | None = None,
         db: Optional[Session] = None,
     ) -> StoryEvent:
         should_close = db is None
@@ -137,6 +141,7 @@ class StoryBibleStore:
         try:
             row = StoryEvent(
                 novel_id=novel_id,
+                novel_version_id=novel_version_id,
                 event_id=event_id,
                 chapter_num=chapter_num,
                 title=title,
@@ -170,15 +175,16 @@ class StoryBibleStore:
         state: str = "planted",
         resolved_chapter: int | None = None,
         payload: dict | None = None,
+        novel_version_id: int | None = None,
         db: Optional[Session] = None,
     ) -> StoryForeshadow:
         should_close = db is None
         db = db or SessionLocal()
         try:
-            stmt = select(StoryForeshadow).where(
-                StoryForeshadow.novel_id == novel_id,
-                StoryForeshadow.foreshadow_id == foreshadow_id,
-            )
+            stmt = select(StoryForeshadow).where(StoryForeshadow.novel_id == novel_id)
+            if novel_version_id is not None:
+                stmt = stmt.where(StoryForeshadow.novel_version_id == novel_version_id)
+            stmt = stmt.where(StoryForeshadow.foreshadow_id == foreshadow_id)
             row = db.execute(stmt).scalar_one_or_none()
             if row:
                 row.title = title if title is not None else row.title
@@ -190,6 +196,7 @@ class StoryBibleStore:
                     with db.begin_nested():
                         row = StoryForeshadow(
                             novel_id=novel_id,
+                            novel_version_id=novel_version_id,
                             foreshadow_id=foreshadow_id,
                             title=title,
                             planted_chapter=planted_chapter,
@@ -227,6 +234,7 @@ class StoryBibleStore:
         volume_no: int,
         chapter_end: int,
         snapshot_json: dict,
+        novel_version_id: int | None = None,
         db: Optional[Session] = None,
     ) -> StorySnapshot:
         should_close = db is None
@@ -234,6 +242,7 @@ class StoryBibleStore:
         try:
             row = StorySnapshot(
                 novel_id=novel_id,
+                novel_version_id=novel_version_id,
                 volume_no=volume_no,
                 chapter_end=chapter_end,
                 snapshot_json=snapshot_json,
@@ -257,20 +266,17 @@ class StoryBibleStore:
         self,
         novel_id: int,
         volume_no: int,
+        novel_version_id: int | None = None,
         db: Optional[Session] = None,
     ) -> StorySnapshot | None:
         """Return the newest snapshot for a volume."""
         should_close = db is None
         db = db or SessionLocal()
         try:
-            stmt = (
-                select(StorySnapshot)
-                .where(
-                    StorySnapshot.novel_id == novel_id,
-                    StorySnapshot.volume_no == volume_no,
-                )
-                .order_by(StorySnapshot.id.desc())
-            )
+            stmt = select(StorySnapshot).where(StorySnapshot.novel_id == novel_id)
+            if novel_version_id is not None:
+                stmt = stmt.where(StorySnapshot.novel_version_id == novel_version_id)
+            stmt = stmt.where(StorySnapshot.volume_no == volume_no).order_by(StorySnapshot.id.desc())
             return db.execute(stmt).scalars().first()
         finally:
             if should_close:
@@ -280,29 +286,31 @@ class StoryBibleStore:
         self,
         novel_id: int,
         chapter_num: int,
+        novel_version_id: int | None = None,
         db: Optional[Session] = None,
     ) -> dict:
         """Return hard constraints for a target chapter."""
         should_close = db is None
         db = db or SessionLocal()
         try:
-            dead_stmt = select(StoryEntity.name).where(
-                StoryEntity.novel_id == novel_id,
-                StoryEntity.entity_type == "character",
-                StoryEntity.status == "dead",
-            )
+            dead_stmt = select(StoryEntity.name).where(StoryEntity.novel_id == novel_id)
+            if novel_version_id is not None:
+                dead_stmt = dead_stmt.where(StoryEntity.novel_version_id == novel_version_id)
+            dead_stmt = dead_stmt.where(StoryEntity.entity_type == "character", StoryEntity.status == "dead")
             dead_names = [r[0] for r in db.execute(dead_stmt).all() if r and r[0]]
 
-            unresolved_stmt = select(StoryForeshadow).where(
-                StoryForeshadow.novel_id == novel_id,
+            unresolved_stmt = select(StoryForeshadow).where(StoryForeshadow.novel_id == novel_id)
+            if novel_version_id is not None:
+                unresolved_stmt = unresolved_stmt.where(StoryForeshadow.novel_version_id == novel_version_id)
+            unresolved_stmt = unresolved_stmt.where(
                 StoryForeshadow.state == "planted",
                 StoryForeshadow.planted_chapter < chapter_num,
             )
             unresolved = db.execute(unresolved_stmt).scalars().all()
-            memory_stmt = select(NovelMemory).where(
-                NovelMemory.novel_id == novel_id,
-                NovelMemory.memory_type == "character",
-            )
+            memory_stmt = select(NovelMemory).where(NovelMemory.novel_id == novel_id)
+            if novel_version_id is not None:
+                memory_stmt = memory_stmt.where(NovelMemory.novel_version_id == novel_version_id)
+            memory_stmt = memory_stmt.where(NovelMemory.memory_type == "character")
             memory_rows = db.execute(memory_stmt).scalars().all()
 
             entity_hard_constraints: list[dict] = []
@@ -379,6 +387,7 @@ class StoryBibleStore:
         self,
         novel_id: int,
         entity_type: str | None = None,
+        novel_version_id: int | None = None,
         db: Optional[Session] = None,
     ) -> list[StoryEntity]:
         """List entities for a novel, optionally filtered by type."""
@@ -386,6 +395,8 @@ class StoryBibleStore:
         db = db or SessionLocal()
         try:
             stmt = select(StoryEntity).where(StoryEntity.novel_id == novel_id)
+            if novel_version_id is not None:
+                stmt = stmt.where(StoryEntity.novel_version_id == novel_version_id)
             if entity_type:
                 stmt = stmt.where(StoryEntity.entity_type == entity_type)
             stmt = stmt.order_by(StoryEntity.id.asc())
@@ -399,15 +410,18 @@ class StoryBibleStore:
         novel_id: int,
         chapter_num: int,
         limit: int = 30,
+        novel_version_id: int | None = None,
         db: Optional[Session] = None,
     ) -> list[StoryEvent]:
         """List recent events before (and including) a chapter."""
         should_close = db is None
         db = db or SessionLocal()
         try:
+            stmt = select(StoryEvent).where(StoryEvent.novel_id == novel_id)
+            if novel_version_id is not None:
+                stmt = stmt.where(StoryEvent.novel_version_id == novel_version_id)
             stmt = (
-                select(StoryEvent)
-                .where(StoryEvent.novel_id == novel_id, StoryEvent.chapter_num <= chapter_num)
+                stmt.where(StoryEvent.chapter_num <= chapter_num)
                 .order_by(StoryEvent.chapter_num.desc(), StoryEvent.id.desc())
                 .limit(max(1, limit))
             )
@@ -467,6 +481,7 @@ class QualityReportStore:
         scope_id: str,
         metrics_json: dict,
         verdict: str,
+        novel_version_id: int | None = None,
         db: Optional[Session] = None,
     ) -> QualityReport:
         should_close = db is None
@@ -474,6 +489,7 @@ class QualityReportStore:
         try:
             row = QualityReport(
                 novel_id=novel_id,
+                novel_version_id=novel_version_id,
                 scope=scope,
                 scope_id=scope_id,
                 metrics_json=metrics_json,
@@ -499,16 +515,16 @@ class QualityReportStore:
         novel_id: int,
         scope: str,
         scope_id: str | None = None,
+        novel_version_id: int | None = None,
         db: Optional[Session] = None,
     ) -> list[QualityReport]:
         """List reports by scope, optionally narrowed to scope_id."""
         should_close = db is None
         db = db or SessionLocal()
         try:
-            stmt = select(QualityReport).where(
-                QualityReport.novel_id == novel_id,
-                QualityReport.scope == scope,
-            )
+            stmt = select(QualityReport).where(QualityReport.novel_id == novel_id, QualityReport.scope == scope)
+            if novel_version_id is not None:
+                stmt = stmt.where(QualityReport.novel_version_id == novel_version_id)
             if scope_id is not None:
                 stmt = stmt.where(QualityReport.scope_id == scope_id)
             stmt = stmt.order_by(QualityReport.id.desc())

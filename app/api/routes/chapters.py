@@ -13,7 +13,7 @@ from app.core.authz.resources import load_novel_resource
 from app.core.authz.types import Permission, Principal
 from app.core.database import get_db, resolve_novel
 from app.core.time_utils import to_utc_iso_z
-from app.models.novel import Chapter, ChapterOutline, GenerationTask, ChapterVersion
+from app.models.novel import ChapterOutline, GenerationTask, ChapterVersion
 from app.schemas.novel import ChapterResponse
 from app.services.generation.common import is_effective_title, resolve_chapter_title
 from app.services.rewrite.service import get_chapter_version, list_chapter_versions
@@ -66,7 +66,10 @@ def _get_generating_chapter_from_redis(novel_db_id: int) -> int | None:
     return None
 
 
-def _to_response(c: Chapter, novel_uuid: str) -> ChapterResponse:
+def _to_version_response(
+    c: ChapterVersion,
+    novel_uuid: str,
+) -> ChapterResponse:
     return ChapterResponse(
         id=c.id,
         novel_id=novel_uuid,
@@ -78,22 +81,6 @@ def _to_response(c: Chapter, novel_uuid: str) -> ChapterResponse:
         review_score=c.review_score,
         language_quality_score=c.language_quality_score,
         language_quality_report=c.language_quality_report,
-        created_at=to_utc_iso_z(c.created_at),
-    )
-
-
-def _to_version_response(c: ChapterVersion, novel_uuid: str) -> ChapterResponse:
-    return ChapterResponse(
-        id=c.id,
-        novel_id=novel_uuid,
-        chapter_num=c.chapter_num,
-        title=c.title,
-        content=c.content,
-        summary=c.summary,
-        status=c.status,
-        review_score=None,
-        language_quality_score=None,
-        language_quality_report=None,
         created_at=to_utc_iso_z(c.created_at),
     )
 
@@ -111,7 +98,7 @@ def list_chapters(
         raise HTTPException(404, "Novel not found")
     uuid_str = novel.uuid or str(novel.id)
     try:
-        _, chapters = list_chapter_versions(db, novel.id, version_id)
+        version, chapters = list_chapter_versions(db, novel.id, version_id)
         db.commit()
         return [_to_version_response(c, uuid_str) for c in chapters]
     except ValueError:
@@ -131,7 +118,7 @@ def get_chapter(
     if not novel:
         raise HTTPException(404, "Novel not found")
     try:
-        _, chapter = get_chapter_version(db, novel.id, chapter_num, version_id)
+        version, chapter = get_chapter_version(db, novel.id, chapter_num, version_id)
     except ValueError:
         raise HTTPException(404, "Version not found")
     if not chapter:
@@ -153,9 +140,8 @@ def get_chapter_progress(
 
     outlines_stmt = select(ChapterOutline).where(ChapterOutline.novel_id == novel.id).order_by(ChapterOutline.chapter_num)
     outlines = db.execute(outlines_stmt).scalars().all()
-    chapters_stmt = select(Chapter).where(Chapter.novel_id == novel.id).order_by(Chapter.chapter_num)
-    chapters = db.execute(chapters_stmt).scalars().all()
-    generated_map = {c.chapter_num: c for c in chapters}
+    _, version_chapters = list_chapter_versions(db, novel.id, None)
+    generated_map = {c.chapter_num: c for c in version_chapters}
 
     active_stmt = (
         select(GenerationTask)
@@ -164,6 +150,7 @@ def get_chapter_progress(
             GenerationTask.status.in_(["submitted", "running"]),
         )
         .order_by(GenerationTask.updated_at.desc())
+        .limit(1)
     )
     active_task = db.execute(active_stmt).scalar_one_or_none()
     generating_chapter = _get_generating_chapter_from_redis(novel.id)
@@ -194,7 +181,7 @@ def get_chapter_progress(
         return result
 
     # Fallback for old novels without outlines: show generated chapters only.
-    for c in chapters:
+    for c in version_chapters:
         result.append(
             ChapterProgressItem(
                 chapter_num=c.chapter_num,

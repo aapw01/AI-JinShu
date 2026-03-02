@@ -1,4 +1,4 @@
-const BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const BASE = (process.env.NEXT_PUBLIC_API_URL || "").replace(/\/+$/, "");
 
 const AUTH_TOKEN_KEY = "auth_token";
 
@@ -282,6 +282,15 @@ export interface AuthResponse {
   user: AuthUser;
 }
 
+export interface AdminUserListItem {
+  uuid: string;
+  email: string;
+  role: string;
+  status: string;
+  created_at: string;
+  last_login_at?: string | null;
+}
+
 export interface AccountQuota {
   plan_key: string;
   max_concurrent_tasks: number;
@@ -318,6 +327,7 @@ export interface StoryboardProject {
   id: number;
   uuid: string;
   novel_id: string;
+  novel_title?: string;
   status: "draft" | "generating" | "ready" | "finalized" | "failed";
   target_episodes: number;
   target_episode_seconds: number;
@@ -337,6 +347,7 @@ export interface StoryboardProject {
 export interface StoryboardVersion {
   id: number;
   storyboard_project_id: number;
+  source_novel_version_id: number | null;
   version_no: number;
   parent_version_id?: number | null;
   lane: StoryboardLane;
@@ -486,39 +497,76 @@ export interface PresetCategory {
 
 // API Error class
 export class ApiError extends Error {
-  constructor(public status: number, message: string) {
+  constructor(
+    public status: number,
+    message: string,
+    public errorCode?: string,
+    public retryable?: boolean,
+  ) {
     super(message);
-    this.name = 'ApiError';
+    this.name = "ApiError";
   }
 }
 
-function parseApiErrorMessage(status: number, rawText: string): string {
+interface ParsedApiError {
+  message: string;
+  errorCode?: string;
+  retryable?: boolean;
+}
+
+export function getErrorMessage(error: unknown, fallback = "请求失败，请稍后重试"): string {
+  if (error instanceof ApiError) return error.message;
+  if (error instanceof Error && error.message.trim()) return error.message;
+  return fallback;
+}
+
+function parseApiError(status: number, rawText: string): ParsedApiError {
   const fallback = rawText || `HTTP ${status}`;
   const text = (rawText || "").trim();
-  if (!text) return humanizeApiErrorMessage(fallback);
+  if (!text) return { message: humanizeApiErrorMessage(fallback) };
 
   try {
     const data = JSON.parse(text) as Record<string, unknown>;
     const detail = data.detail;
-    if (typeof detail === "string" && detail.trim()) return humanizeApiErrorMessage(detail.trim());
+    if (detail && typeof detail === "object" && !Array.isArray(detail)) {
+      const detailObj = detail as { message?: string; error_code?: string; retryable?: boolean };
+      const message =
+        typeof detailObj.message === "string" && detailObj.message.trim()
+          ? humanizeApiErrorMessage(detailObj.message.trim())
+          : undefined;
+      const errorCode = typeof detailObj.error_code === "string" && detailObj.error_code.trim() ? detailObj.error_code.trim() : undefined;
+      const retryable = typeof detailObj.retryable === "boolean" ? detailObj.retryable : undefined;
+      if (message) return { message, errorCode, retryable };
+    }
+
+    if (typeof detail === "string" && detail.trim()) {
+      return { message: humanizeApiErrorMessage(detail.trim()) };
+    }
+
     if (Array.isArray(detail) && detail.length > 0) {
       const first = detail[0] as { msg?: string; message?: string } | undefined;
-      if (typeof first?.msg === "string" && first.msg.trim()) return humanizeApiErrorMessage(first.msg.trim());
-      if (typeof first?.message === "string" && first.message.trim()) return humanizeApiErrorMessage(first.message.trim());
-    }
-    if (detail && typeof detail === "object" && !Array.isArray(detail)) {
-      const detailObj = detail as { message?: string };
-      if (typeof detailObj.message === "string" && detailObj.message.trim()) {
-        return humanizeApiErrorMessage(detailObj.message.trim());
+      if (typeof first?.msg === "string" && first.msg.trim()) {
+        return { message: humanizeApiErrorMessage(first.msg.trim()) };
+      }
+      if (typeof first?.message === "string" && first.message.trim()) {
+        return { message: humanizeApiErrorMessage(first.message.trim()) };
       }
     }
-    if (typeof data.message === "string" && data.message.trim()) return humanizeApiErrorMessage(data.message.trim());
-    if (typeof data.error === "string" && data.error.trim()) return humanizeApiErrorMessage(data.error.trim());
+
+    const message =
+      typeof data.message === "string" && data.message.trim()
+        ? humanizeApiErrorMessage(data.message.trim())
+        : typeof data.error === "string" && data.error.trim()
+        ? humanizeApiErrorMessage(data.error.trim())
+        : undefined;
+    const errorCode = typeof data.error_code === "string" && data.error_code.trim() ? data.error_code.trim() : undefined;
+    const retryable = typeof data.retryable === "boolean" ? data.retryable : undefined;
+    if (message) return { message, errorCode, retryable };
   } catch {
     // non-JSON payload
   }
 
-  return humanizeApiErrorMessage(fallback);
+  return { message: humanizeApiErrorMessage(fallback) };
 }
 
 function humanizeApiErrorMessage(message: string): string {
@@ -545,26 +593,38 @@ function humanizeApiErrorMessage(message: string): string {
 async function fetchApi<T>(path: string, options?: RequestInit): Promise<T> {
   const token =
     typeof window !== "undefined" ? window.localStorage.getItem(AUTH_TOKEN_KEY) : null;
-  const res = await fetch(`${BASE}${path}`, {
-    ...options,
-    credentials: "include",
-    headers: {
-      "Content-Type": "application/json",
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...options?.headers,
-    },
-  });
+
+  const url = `${BASE}${path}`;
+
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      ...options,
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...options?.headers,
+      },
+    });
+  } catch (error) {
+    const message = error instanceof Error && error.message.trim() ? error.message.trim() : "Network request failed";
+    throw new ApiError(0, `网络请求失败：${message}（${url}）`);
+  }
 
   if (!res.ok) {
     const text = await res.text();
     if (res.status === 401 && typeof window !== "undefined") {
+      window.localStorage.removeItem(AUTH_TOKEN_KEY);
       const current = `${window.location.pathname}${window.location.search || ""}`;
       if (!window.location.pathname.startsWith("/auth")) {
         const next = encodeURIComponent(current);
         window.location.href = `/auth/login?next=${next}`;
       }
     }
-    throw new ApiError(res.status, parseApiErrorMessage(res.status, text));
+    const parsed = parseApiError(res.status, text);
+    const message = res.status >= 500 ? `${parsed.message}（${path}）` : parsed.message;
+    throw new ApiError(res.status, message, parsed.errorCode, parsed.retryable);
   }
 
   // Handle empty responses
@@ -583,6 +643,11 @@ export const api = {
     } else {
       window.localStorage.removeItem(AUTH_TOKEN_KEY);
     }
+  },
+
+  getAuthToken: () => {
+    if (typeof window === "undefined") return null;
+    return window.localStorage.getItem(AUTH_TOKEN_KEY);
   },
 
   // Auth
@@ -637,8 +702,27 @@ export const api = {
       body: JSON.stringify({ token, new_password: newPassword }),
     }),
 
-  // Novels
-  listNovels: () => fetchApi<Novel[]>("/api/novels"),
+  changePassword: (currentPassword: string, newPassword: string) =>
+    fetchApi<{ ok: boolean }>("/api/auth/password/change", {
+      method: "POST",
+      body: JSON.stringify({
+        current_password: currentPassword,
+        new_password: newPassword,
+      }),
+    }),
+
+  getAdminUsers: () =>
+    fetchApi<AdminUserListItem[]>("/api/admin/users"),
+
+  listNovels: (params?: { skip?: number; limit?: number; user_uuid?: string; only_mine?: boolean }) => {
+    const qs = new URLSearchParams();
+    if (params?.skip !== undefined) qs.set("skip", String(params.skip));
+    if (params?.limit !== undefined) qs.set("limit", String(params.limit));
+    if (params?.user_uuid) qs.set("user_uuid", params.user_uuid);
+    if (params?.only_mine) qs.set("only_mine", "true");
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return fetchApi<Novel[]>(`/api/novels${suffix}`);
+  },
 
   createNovel: (data: CreateNovelData) =>
     fetchApi<{ id: string }>("/api/novels", {
@@ -833,9 +917,10 @@ export const api = {
       }
     ),
 
-  generateStoryboard: (projectId: number) =>
+  generateStoryboard: (projectId: number, novelVersionId: number) =>
     fetchApi<StoryboardGenerateResponse>(`/api/storyboards/${projectId}/generate`, {
       method: "POST",
+      body: JSON.stringify({ novel_version_id: novelVersionId }),
     }),
 
   getStoryboardStatus: (projectId: number, taskId?: string) =>

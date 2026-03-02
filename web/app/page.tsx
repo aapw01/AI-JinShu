@@ -5,13 +5,14 @@ import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
 import { BookOpen, CircleAlert, LoaderCircle, RotateCcw, Sparkles, WandSparkles, Zap } from "lucide-react";
-import { api, Novel } from "@/lib/api";
+import { api, Novel, getErrorMessage } from "@/lib/api";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { Textarea } from "@/components/ui/Textarea";
 import { Badge } from "@/components/ui/Badge";
+import { formatNovelStatus } from "@/lib/display";
 
 type FilterStatus = "all" | "generating" | "completed" | "failed";
 
@@ -296,7 +297,7 @@ export default function Home() {
         idea: result.editable_framework || result.one_liner,
       }));
     } catch (err) {
-      setIdeaError(err instanceof Error ? err.message : "AI 创意生成失败");
+      setIdeaError(getErrorMessage(err, "AI 创意生成失败"));
     } finally {
       setIdeaGenerating(false);
     }
@@ -324,7 +325,7 @@ export default function Home() {
       await api.submitGeneration(res.id, numChapters, 1);
       router.push(`/novels/${res.id}/progress`);
     } catch (err) {
-      setSubmitError(err instanceof Error ? err.message : "创建失败");
+      setSubmitError(getErrorMessage(err, "创建失败"));
       setSubmitting(false);
     }
   };
@@ -640,7 +641,7 @@ export default function Home() {
                             </span>
                           ) : (
                             <Badge variant={STATUS_MAP[novel.status]?.variant || "default"}>
-                              {STATUS_MAP[novel.status]?.label || novel.status}
+                              {STATUS_MAP[novel.status]?.label || formatNovelStatus(novel.status)}
                             </Badge>
                           )}
                         </div>

@@ -33,7 +33,10 @@ from app.services.task_runtime.checkpoint_repo import (
 )
 from app.services.task_runtime.cursor_service import resume_from_last_completed
 
+from app.services.task_runtime.lease_service import background_heartbeat
+
 logger = logging.getLogger(__name__)
+
 
 SUBTASK_LABELS: dict[str, str] = {
     "queued": "任务已入队",
@@ -110,8 +113,11 @@ def _volume_chunks(start_chapter: int, num_chapters: int, volume_size: int) -> l
 
 def _set_status(r: redis.Redis, key: str, novel_key: str, payload: dict[str, Any]) -> None:
     data = _with_subtask(payload)
-    r.setex(key, 86400, json.dumps(data, ensure_ascii=False))
-    r.setex(novel_key, 86400, json.dumps(data, ensure_ascii=False))
+    status = str(data.get("status") or "")
+    ttl = 172800 if status in {"completed", "failed", "cancelled"} else 86400
+    encoded = json.dumps(data, ensure_ascii=False)
+    r.setex(key, ttl, encoded)
+    r.setex(novel_key, ttl, encoded)
 
 
 def _persist_generation_task(
@@ -268,6 +274,22 @@ def _resolve_generation_resume(
         db.close()
 
 
+def _check_worker_superseded(task_db_id: int, current_celery_id: str) -> None:
+    """Abort if this worker was reclaimed and a new worker dispatched."""
+    db = SessionLocal()
+    try:
+        row = get_creation_task_by_id(db, task_id=task_db_id)
+        if not row:
+            return
+        if row.worker_task_id and row.worker_task_id != current_celery_id:
+            raise RuntimeError(
+                f"worker superseded: creation_task.worker_task_id={row.worker_task_id}, "
+                f"current={current_celery_id}"
+            )
+    finally:
+        db.close()
+
+
 def _finalize_creation(
     task_db_id: int,
     *,
@@ -301,6 +323,7 @@ def _finalize_creation(
 
 def _run_volume_generation(
     novel_id: int,
+    novel_version_id: int,
     chunk_chapters: int,
     chunk_start: int,
     parent_task_id: str,
@@ -354,7 +377,12 @@ def _run_volume_generation(
                     logger.exception("failed to mark generation checkpoint task=%s chapter=%s", creation_task_id, chapter)
         if task_status == "cancelled" or run_state == "cancelled":
             raise RuntimeError("generation_cancelled")
+        paused_iterations = 0
+        max_paused_iterations = 3600
         while task_status == "paused" or run_state == "paused":
+            paused_iterations += 1
+            if paused_iterations > max_paused_iterations:
+                raise RuntimeError("generation_paused_timeout")
             payload_pause = {
                 "status": "paused",
                 "run_state": "paused",
@@ -368,6 +396,11 @@ def _run_volume_generation(
                 "trace_id": metric_state["trace_id"],
             }
             _set_status(r, key, novel_key, payload_pause)
+            if creation_task_id is not None and paused_iterations % 5 == 0:
+                try:
+                    _heartbeat_creation(creation_task_id)
+                except Exception:
+                    pass
             import time
 
             time.sleep(1.0)
@@ -425,6 +458,7 @@ def _run_volume_generation(
 
     run_generation_pipeline(
         novel_id=novel_id,
+        novel_version_id=novel_version_id,
         num_chapters=chunk_chapters,
         start_chapter=chunk_start,
         progress_callback=progress_cb,
@@ -437,6 +471,7 @@ def _run_volume_generation(
 def submit_volume_generation_task(
     self,
     novel_id: int,
+    novel_version_id: int,
     chunk_chapters: int,
     chunk_start: int,
     parent_task_id: str,
@@ -449,6 +484,7 @@ def submit_volume_generation_task(
     """Run one volume chunk as an independent task."""
     return _run_volume_generation(
         novel_id=novel_id,
+        novel_version_id=novel_version_id,
         chunk_chapters=chunk_chapters,
         chunk_start=chunk_start,
         parent_task_id=parent_task_id,
@@ -464,6 +500,7 @@ def submit_volume_generation_task(
 def submit_book_generation_task(
     self,
     novel_id: str,
+    novel_version_id: int,
     num_chapters: int,
     start_chapter: int,
     parent_task_id: str | None = None,
@@ -482,15 +519,42 @@ def submit_book_generation_task(
     begin_usage_session(f"generation:{task_id}")
     key = f"generation:{task_id}"
     novel_key = f"generation:novel:{novel_id}"
-    db = SessionLocal()
+    db: Any = None
+    data: dict[str, Any] = {
+        "status": "running",
+        "run_state": "running",
+        "step": "queued",
+        "current_phase": "queued",
+        "current_subtask": {"key": "queued", "label": SUBTASK_LABELS.get("queued"), "progress": 0},
+        "progress": 0,
+        "current_chapter": int(start_chapter),
+        "total_chapters": int(num_chapters),
+        "novel_version_id": int(novel_version_id),
+        "message": "任务已入队",
+        "trace_id": trace_id or "",
+    }
 
+    hb_ctx = None
     try:
         if creation_task_id is not None:
+            _check_worker_superseded(creation_task_id, task_id)
             c_status = _get_creation_task_state(creation_task_id)
-            if c_status not in {"dispatching", "running"}:
+            if c_status in {"paused", "cancelled", "failed", "completed"}:
                 logger.info("Skip generation execution because creation_task status=%s", c_status)
+                data.update(
+                    {
+                        "status": str(c_status),
+                        "run_state": str(c_status),
+                        "step": "skipped",
+                        "current_phase": "skipped",
+                        "message": f"跳过执行：creation_task 状态为 {c_status}",
+                    }
+                )
                 return task_id
-            _mark_creation_running(creation_task_id)
+            if c_status is None:
+                logger.warning("creation_task not visible yet, continue execution task=%s", creation_task_id)
+            else:
+                _mark_creation_running(creation_task_id)
             start_chapter, num_chapters = _resolve_generation_resume(
                 creation_task_id,
                 start_chapter=int(start_chapter),
@@ -522,10 +586,27 @@ def submit_book_generation_task(
                 return task_id
 
         from app.models.novel import GenerationTask
+        from app.core.config import get_settings as _get_settings
 
-        gt_stmt = select(GenerationTask).where(GenerationTask.task_id == task_id)
-        gt = db.execute(gt_stmt).scalar_one_or_none()
-        trace_id = trace_id or (gt.trace_id if gt else None) or ""
+        hb_interval = max(5, int(_get_settings().creation_worker_heartbeat_seconds or 30))
+        hb_ctx = background_heartbeat(creation_task_id, heartbeat_fn=_heartbeat_creation, interval_seconds=hb_interval)
+        hb_ctx.__enter__()
+
+        db = SessionLocal()
+        try:
+            gt_stmt = select(GenerationTask).where(GenerationTask.task_id == task_id)
+            gt = db.execute(gt_stmt).scalar_one_or_none()
+            trace_id = trace_id or (gt.trace_id if gt else None) or ""
+            gt_status = gt.status if gt else None
+            gt_run_state = gt.run_state if gt else None
+
+            novel_stmt = select(Novel).where(Novel.id == novel_id)
+            novel = db.execute(novel_stmt).scalar_one_or_none()
+            volume_size = int(((novel.config or {}).get("volume_size") or 30)) if novel else 30
+        finally:
+            db.close()
+            db = None
+
         if trace_id:
             set_trace_id(trace_id)
         with bind_log_context(trace_id=trace_id, task_id=task_id, novel_id=novel_id):
@@ -538,13 +619,20 @@ def submit_book_generation_task(
                 chapter_num=start_chapter,
                 total_chapters=num_chapters,
             )
-        if gt and gt.status in {"completed", "cancelled"}:
-            logger.info("Skip replay for task %s because status=%s", task_id, gt.status)
+        if gt_status in {"completed", "cancelled"}:
+            logger.info("Skip replay for task %s because status=%s", task_id, gt_status)
+            data.update(
+                {
+                    "status": str(gt_status),
+                    "run_state": str(gt_run_state or gt_status),
+                    "step": "skipped",
+                    "current_phase": "skipped",
+                    "message": f"跳过重放：任务状态为 {gt_status}",
+                    "trace_id": trace_id,
+                }
+            )
             return task_id
 
-        novel_stmt = select(Novel).where(Novel.id == novel_id)
-        novel = db.execute(novel_stmt).scalar_one_or_none()
-        volume_size = int(((novel.config or {}).get("volume_size") or 30)) if novel else 30
         chunks = _volume_chunks(start_chapter, num_chapters, volume_size)
 
         data = {
@@ -555,6 +643,7 @@ def submit_book_generation_task(
             "current_subtask": {"key": "book_planning", "label": SUBTASK_LABELS.get("book_planning"), "progress": 5},
             "current_chapter": start_chapter,
             "total_chapters": num_chapters,
+            "novel_version_id": int(novel_version_id),
             "progress": 5,
             "volume_no": 1,
             "volume_size": volume_size,
@@ -562,7 +651,12 @@ def submit_book_generation_task(
             "trace_id": trace_id,
         }
         _set_status(r, key, novel_key, data)
-        _persist_generation_task(db, task_id, data)
+        db = SessionLocal()
+        try:
+            _persist_generation_task(db, task_id, data)
+        finally:
+            db.close()
+            db = None
 
         for volume_no, chunk_start, chunk_len in chunks:
             announce = {
@@ -573,6 +667,7 @@ def submit_book_generation_task(
                 "current_subtask": {"key": "volume_dispatch", "label": SUBTASK_LABELS.get("volume_dispatch")},
                 "current_chapter": chunk_start,
                 "total_chapters": num_chapters,
+                "novel_version_id": int(novel_version_id),
                 "progress": round(10 + ((volume_no - 1) / max(len(chunks), 1)) * 70, 2),
                 "volume_no": volume_no,
                 "volume_size": volume_size,
@@ -580,9 +675,15 @@ def submit_book_generation_task(
                 "trace_id": trace_id,
             }
             _set_status(r, key, novel_key, announce)
-            _persist_generation_task(db, task_id, announce)
+            db = SessionLocal()
+            try:
+                _persist_generation_task(db, task_id, announce)
+            finally:
+                db.close()
+                db = None
             _run_volume_generation(
                 novel_id=int(novel_id),
+                novel_version_id=int(novel_version_id),
                 chunk_chapters=chunk_len,
                 chunk_start=chunk_start,
                 parent_task_id=task_id,
@@ -602,14 +703,21 @@ def submit_book_generation_task(
             "progress": 100,
             "current_chapter": start_chapter + num_chapters - 1,
             "total_chapters": num_chapters,
+            "novel_version_id": int(novel_version_id),
             "volume_no": chunks[-1][0] if chunks else 1,
             "volume_size": volume_size,
             "message": "总控任务完成",
             "trace_id": trace_id,
         }
-        if novel:
-            novel.status = "completed"
-            db.commit()
+        db = SessionLocal()
+        try:
+            novel = db.execute(select(Novel).where(Novel.id == novel_id)).scalar_one_or_none()
+            if novel:
+                novel.status = "completed"
+                db.commit()
+        finally:
+            db.close()
+            db = None
     except Exception as e:
         logger.error(f"Book generation failed for novel {novel_id}: {e}")
         err = str(e)
@@ -628,6 +736,7 @@ def submit_book_generation_task(
             },
             "progress": 0,
             "total_chapters": num_chapters,
+            "novel_version_id": int(novel_version_id),
             "error": None if (is_paused or is_cancelled) else str(e),
             "error_code": None if (is_paused or is_cancelled) else "GENERATION_FAILED",
             "error_category": None if (is_paused or is_cancelled) else "transient",
@@ -635,17 +744,23 @@ def submit_book_generation_task(
             "message": "任务暂停并等待恢复" if is_paused else ("任务已取消" if is_cancelled else "总控任务失败"),
             "trace_id": trace_id,
         }
-        novel_stmt = select(Novel).where(Novel.id == novel_id)
-        novel = db.execute(novel_stmt).scalar_one_or_none()
-        if novel and not is_paused:
-            novel.status = "failed"
-            db.commit()
+        db = SessionLocal()
+        try:
+            novel = db.execute(select(Novel).where(Novel.id == novel_id)).scalar_one_or_none()
+            if novel and not is_paused:
+                novel.status = "failed"
+                db.commit()
+        finally:
+            db.close()
+            db = None
     finally:
+        if hb_ctx is not None:
+            hb_ctx.__exit__(None, None, None)
         usage = snapshot_usage()
         data["token_usage_input"] = int(usage.get("input_tokens") or data.get("token_usage_input") or 0)
         data["token_usage_output"] = int(usage.get("output_tokens") or data.get("token_usage_output") or 0)
         data["estimated_cost"] = float(usage.get("estimated_cost") or data.get("estimated_cost") or 0.0)
-        _set_status(r, key, novel_key, data)
+        db = SessionLocal()
         try:
             _persist_generation_task(db, task_id, data)
             record_generation_usage(db, task_id=task_id, novel_id=int(novel_id), source="generation")
@@ -664,7 +779,9 @@ def submit_book_generation_task(
         except Exception as e:  # pragma: no cover
             logger.error(f"Failed to update final status in DB: {e}")
             db.rollback()
-        db.close()
+        finally:
+            db.close()
+        _set_status(r, key, novel_key, data)
         if creation_task_id is not None:
             try:
                 status = str(data.get("status") or "")

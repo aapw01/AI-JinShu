@@ -48,6 +48,7 @@ class StoryboardVersion(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     storyboard_project_id = Column(Integer, ForeignKey("storyboard_projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_novel_version_id = Column(Integer, ForeignKey("novel_versions.id", ondelete="CASCADE"), nullable=True, index=True)
     version_no = Column(Integer, nullable=False)
     parent_version_id = Column(Integer, ForeignKey("storyboard_versions.id", ondelete="SET NULL"), nullable=True)
     lane = Column(String(32), nullable=False, default="vertical_feed")

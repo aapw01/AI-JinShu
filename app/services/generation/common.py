@@ -124,14 +124,18 @@ def save_prewrite_artifacts(novel_id: int, prewrite: dict) -> None:
         db.close()
 
 
-def save_full_outlines(novel_id: int, outlines: list[dict]) -> None:
+def save_full_outlines(novel_id: int, outlines: list[dict], novel_version_id: int | None = None) -> None:
     db = SessionLocal()
     try:
-        db.execute(delete(ChapterOutline).where(ChapterOutline.novel_id == novel_id))
+        del_stmt = delete(ChapterOutline).where(ChapterOutline.novel_id == novel_id)
+        if novel_version_id is not None:
+            del_stmt = del_stmt.where(ChapterOutline.novel_version_id == novel_version_id)
+        db.execute(del_stmt)
         for o in outlines:
             db.add(
                 ChapterOutline(
                     novel_id=novel_id,
+                    novel_version_id=novel_version_id,
                     chapter_num=o.get("chapter_num"),
                     title=o.get("title"),
                     outline=o.get("outline"),
@@ -156,7 +160,7 @@ def save_full_outlines(novel_id: int, outlines: list[dict]) -> None:
 def generate_chapter_summary(
     content: str, outline: dict, chapter_num: int, language: str, strategy: str
 ) -> str:
-    from app.core.llm import get_llm_with_fallback
+    from app.core.llm import get_llm_with_fallback, response_to_text
     from app.core.strategy import get_model_for_stage
 
     provider, model = get_model_for_stage(strategy, "reviewer")
@@ -169,7 +173,7 @@ def generate_chapter_summary(
     )
     try:
         resp = llm.invoke(prompt)
-        return resp.content.strip()[:800]
+        return response_to_text(resp).strip()[:800]
     except Exception:
         return outline.get("summary") or f"第{chapter_num}章摘要"
 
@@ -183,8 +187,9 @@ def update_character_states_from_content(
     language: str,
     strategy: str,
     db=None,
+    novel_version_id: int | None = None,
 ) -> None:
-    from app.core.llm import get_llm_with_fallback
+    from app.core.llm import get_llm_with_fallback, response_to_text
     from app.core.strategy import get_model_for_stage
     from app.services.generation.agents import _parse_json_response
 
@@ -204,9 +209,23 @@ def update_character_states_from_content(
     )
     try:
         resp = llm.invoke(prompt)
-        data = _parse_json_response(resp.content)
+        data = _parse_json_response(response_to_text(resp))
         for update in data.get("updates", []):
             if isinstance(update, dict) and update.get("name"):
-                char_mgr.update_state(novel_id, update["name"], {"chapter_num": chapter_num, **update}, db=db)
+                payload = {"chapter_num": chapter_num, **update}
+                if novel_version_id is None:
+                    char_mgr.update_state(novel_id, update["name"], payload, db=db)
+                else:
+                    try:
+                        char_mgr.update_state(
+                            novel_id,
+                            update["name"],
+                            payload,
+                            db=db,
+                            novel_version_id=novel_version_id,
+                        )
+                    except TypeError:
+                        # Backward-compatible path for legacy managers in tests.
+                        char_mgr.update_state(novel_id, update["name"], payload, db=db)
     except Exception as e:
         logger.warning(f"Character state update from content failed: {e}")

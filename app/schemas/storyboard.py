@@ -28,6 +28,7 @@ class StoryboardProjectResponse(BaseModel):
     id: int
     uuid: str
     novel_id: str
+    novel_title: str | None = None
     status: str
     target_episodes: int
     target_episode_seconds: int
@@ -48,6 +49,10 @@ class StoryboardGenerateResponse(BaseModel):
     task_id: str
     storyboard_project_id: int
     created_version_ids: list[int]
+
+
+class StoryboardGenerateRequest(BaseModel):
+    novel_version_id: int = Field(ge=1)
 
 
 class StoryboardStyleRecommendationRequest(BaseModel):
@@ -92,6 +97,7 @@ class StoryboardTaskStatusResponse(BaseModel):
 class StoryboardVersionResponse(BaseModel):
     id: int
     storyboard_project_id: int
+    source_novel_version_id: int | None = None
     version_no: int
     parent_version_id: int | None = None
     lane: str

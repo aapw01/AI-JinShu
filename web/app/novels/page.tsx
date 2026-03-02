@@ -4,15 +4,23 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { BookOpen, Filter, Plus, Trash2 } from "lucide-react";
-import { api, Novel } from "@/lib/api";
+import { api, AuthUser, Novel, getErrorMessage } from "@/lib/api";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
+import { Select } from "@/components/ui/Select";
 import { Badge } from "@/components/ui/Badge";
 import { ConfirmModal } from "@/components/ui/Modal";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { TopBar } from "@/components/ui/TopBar";
+import { Spinner } from "@/components/ui/Spinner";
+import { formatNovelStatus } from "@/lib/display";
 
-type FilterStatus = "all" | "draft" | "generating" | "completed";
+type FilterStatus = "all" | "draft" | "generating" | "completed" | "failed";
+
+type AdminUserOption = {
+  value: string;
+  label: string;
+};
 
 const STATUS_MAP: Record<string, { label: string; variant: "default" | "success" | "warning" | "error" | "info" }> = {
   draft: { label: "草稿", variant: "default" },
@@ -47,16 +55,58 @@ export default function NovelsPage() {
   const [filter, setFilter] = useState<FilterStatus>("all");
   const [deleteTarget, setDeleteTarget] = useState<Novel | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [viewer, setViewer] = useState<AuthUser | null>(null);
+  const [adminUsers, setAdminUsers] = useState<AdminUserOption[]>([]);
+  const [selectedUserUuid, setSelectedUserUuid] = useState("");
+  const [onlyMine, setOnlyMine] = useState(false);
+
+  const isAdmin = viewer?.role === "admin";
 
   useEffect(() => {
-    loadNovels();
+    loadViewer();
   }, []);
+
+  useEffect(() => {
+    if (!viewer) return;
+    void loadNovels();
+  }, [viewer, selectedUserUuid, onlyMine]);
+
+  useEffect(() => {
+    if (viewer?.role !== "admin") return;
+    void loadAdminUsers();
+  }, [viewer]);
+
+  const loadViewer = async () => {
+    try {
+      const res = await api.me();
+      setViewer(res.user);
+    } catch {
+      setViewer(null);
+    }
+  };
+
+  const loadAdminUsers = async () => {
+    try {
+      const rows = await api.getAdminUsers();
+      setAdminUsers(rows.map((row) => ({ value: row.uuid, label: row.email })));
+    } catch {
+      setAdminUsers([]);
+    }
+  };
 
   const loadNovels = async () => {
     try {
       setLoading(true);
       setError(null);
-      const data = await api.listNovels();
+      const data = await api.listNovels(
+        isAdmin
+          ? {
+              user_uuid: onlyMine ? undefined : selectedUserUuid || undefined,
+              only_mine: onlyMine,
+            }
+          : undefined
+      );
       setNovels(data);
     } catch (err) {
       setError("加载失败，请稍后重试");
@@ -70,11 +120,12 @@ export default function NovelsPage() {
     if (!deleteTarget) return;
     try {
       setDeleting(true);
+      setDeleteError(null);
       await api.deleteNovel(deleteTarget.id);
       setNovels(novels.filter((n) => n.id !== deleteTarget.id));
       setDeleteTarget(null);
     } catch (err) {
-      console.error(err);
+      setDeleteError(getErrorMessage(err, "删除失败，请稍后重试"));
     } finally {
       setDeleting(false);
     }
@@ -125,11 +176,42 @@ export default function NovelsPage() {
       />
 
       <div className="max-w-6xl mx-auto px-4 py-6">
+        {isAdmin && (
+          <div className="rounded-[14px] border border-[#DDD8D3] bg-[#FBFAF8] p-3 mb-4 grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_auto] gap-3 items-end">
+            <Select
+              value={selectedUserUuid}
+              onChange={(e) => {
+                setSelectedUserUuid(e.target.value);
+                setOnlyMine(false);
+              }}
+              options={[
+                { value: "", label: "全部用户" },
+                ...adminUsers,
+              ]}
+              disabled={onlyMine}
+            />
+            <Button
+              variant={onlyMine ? "primary" : "secondary"}
+              onClick={() => {
+                if (onlyMine) {
+                  setOnlyMine(false);
+                  setSelectedUserUuid("");
+                } else {
+                  setOnlyMine(true);
+                  setSelectedUserUuid("");
+                }
+              }}
+            >
+              我的作品
+            </Button>
+          </div>
+        )}
+
         <div className="rounded-[14px] border border-[#DDD8D3] bg-[#FBFAF8] p-3 mb-6 flex items-center gap-2 overflow-x-auto">
           <div className="shrink-0 px-2 text-[#7E756D]">
             <Filter className="w-4 h-4" />
           </div>
-          {(["all", "draft", "generating", "completed"] as FilterStatus[]).map((status) => (
+          {(["all", "draft", "generating", "completed", "failed"] as FilterStatus[]).map((status) => (
             <button
               key={status}
               onClick={() => setFilter(status)}
@@ -146,7 +228,7 @@ export default function NovelsPage() {
 
         {loading ? (
           <div className="flex items-center justify-center py-20">
-            <div className="animate-spin w-8 h-8 border-2 border-[#C8211B] border-t-transparent rounded-full" />
+            <Spinner />
           </div>
         ) : error ? (
           <div className="text-center py-20">
@@ -187,7 +269,7 @@ export default function NovelsPage() {
                   <div className="flex items-start justify-between mb-3">
                     <h3 className="font-semibold text-[#1F1B18] line-clamp-1 pr-3">{novel.title}</h3>
                     <Badge variant={STATUS_MAP[novel.status]?.variant || "default"}>
-                      {STATUS_MAP[novel.status]?.label || novel.status}
+                      {STATUS_MAP[novel.status]?.label || formatNovelStatus(novel.status)}
                     </Badge>
                   </div>
                   <div className="flex items-center gap-2 text-sm text-[#7E756D] mb-1">
@@ -227,10 +309,10 @@ export default function NovelsPage() {
 
       <ConfirmModal
         open={!!deleteTarget}
-        onClose={() => setDeleteTarget(null)}
+        onClose={() => { setDeleteTarget(null); setDeleteError(null); }}
         onConfirm={handleDelete}
         title="删除小说"
-        message={`确定要删除「${deleteTarget?.title}」吗？此操作无法撤销。`}
+        message={deleteError ? `${deleteError}\n\n确定要删除「${deleteTarget?.title}」吗？此操作无法撤销。` : `确定要删除「${deleteTarget?.title}」吗？此操作无法撤销。`}
         confirmText="删除"
         loading={deleting}
       />

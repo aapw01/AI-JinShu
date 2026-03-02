@@ -7,36 +7,55 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 from langchain_core.output_parsers import PydanticOutputParser
 
-from app.core.llm import get_llm_with_fallback
+from app.core.llm import get_llm_with_fallback, response_to_text, _is_retryable
 from app.prompts import render_prompt
 from app.services.generation.common import normalize_title_text
 
 logger = logging.getLogger(__name__)
 
+_AGENT_MAX_RETRIES = 3
+_AGENT_RETRY_BACKOFF = [2.0, 5.0, 10.0]
+
 
 def _timed_invoke(llm: Any, prompt: str, op: str, meta: dict[str, Any] | None = None):
-    started = time.perf_counter()
-    try:
-        resp = llm.invoke(prompt)
-        elapsed = time.perf_counter() - started
-        logger.info(
-            "LLM invoke success op=%s elapsed=%.2fs prompt_chars=%s meta=%s",
-            op,
-            elapsed,
-            len(prompt),
-            meta or {},
-        )
-        return resp
-    except Exception:
-        elapsed = time.perf_counter() - started
-        logger.exception(
-            "LLM invoke failed op=%s elapsed=%.2fs prompt_chars=%s meta=%s",
-            op,
-            elapsed,
-            len(prompt),
-            meta or {},
-        )
-        raise
+    last_exc: Exception | None = None
+    for attempt in range(_AGENT_MAX_RETRIES):
+        started = time.perf_counter()
+        try:
+            resp = llm.invoke(prompt)
+            elapsed = time.perf_counter() - started
+            logger.info(
+                "LLM invoke success op=%s elapsed=%.2fs prompt_chars=%s attempt=%s meta=%s",
+                op,
+                elapsed,
+                len(prompt),
+                attempt + 1,
+                meta or {},
+            )
+            return resp
+        except Exception as exc:
+            elapsed = time.perf_counter() - started
+            last_exc = exc
+            if not _is_retryable(exc) or attempt >= _AGENT_MAX_RETRIES - 1:
+                logger.exception(
+                    "LLM invoke failed op=%s elapsed=%.2fs prompt_chars=%s attempt=%s meta=%s",
+                    op,
+                    elapsed,
+                    len(prompt),
+                    attempt + 1,
+                    meta or {},
+                )
+                raise
+            delay = _AGENT_RETRY_BACKOFF[attempt] if attempt < len(_AGENT_RETRY_BACKOFF) else 10.0
+            logger.warning(
+                "LLM invoke transient error op=%s attempt=%s error=%s delay=%.1fs",
+                op,
+                attempt + 1,
+                type(exc).__name__,
+                delay,
+            )
+            time.sleep(delay)
+    raise last_exc  # type: ignore[misc]
 
 
 def _parse_json_response(content: str) -> dict:
@@ -74,7 +93,7 @@ def _extract_json_block(content: str) -> str:
 
 
 def _invoke_json_with_schema(llm: Any, prompt: str, schema_cls: type[BaseModel], retries: int = 2) -> dict:
-    """Strongly enforce structured output with retry on parse/validation errors."""
+    """Strongly enforce structured output with retry on parse/validation AND transient API errors."""
     parser = PydanticOutputParser(pydantic_object=schema_cls)
     format_instructions = parser.get_format_instructions()
     prompt = render_prompt(
@@ -95,7 +114,7 @@ def _invoke_json_with_schema(llm: Any, prompt: str, schema_cls: type[BaseModel],
                 elapsed,
                 len(prompt),
             )
-            content = str(resp.content).strip()
+            content = response_to_text(resp).strip()
             try:
                 parsed = parser.parse(content)
                 return parsed.model_dump()
@@ -119,7 +138,18 @@ def _invoke_json_with_schema(llm: Any, prompt: str, schema_cls: type[BaseModel],
             )
         except Exception as exc:
             error = str(exc)
-            break
+            if _is_retryable(exc) and attempt < retries:
+                delay = _AGENT_RETRY_BACKOFF[attempt] if attempt < len(_AGENT_RETRY_BACKOFF) else 10.0
+                logger.warning(
+                    "LLM structured invoke transient error schema=%s attempt=%s error=%s delay=%.1fs",
+                    schema_cls.__name__,
+                    attempt + 1,
+                    type(exc).__name__,
+                    delay,
+                )
+                time.sleep(delay)
+            else:
+                break
     logger.warning(f"Structured output failed after retries: {error}")
     return {"raw": "structured_output_fallback", "error": error}
 
@@ -247,7 +277,7 @@ class PrewritePlannerAgent:
                     f"prewrite.{key}",
                     {"num_chapters": num_chapters, "provider": provider, "model": model},
                 )
-                parsed = _parse_json_response(resp.content)
+                parsed = _parse_json_response(response_to_text(resp))
                 result[key] = parsed if isinstance(parsed, dict) else {"raw": str(parsed)}
             except Exception as e:
                 logger.error(f"PrewritePlannerAgent {key} failed: {e}")
@@ -360,6 +390,7 @@ class ContextLoaderAgent:
     def run(
         self,
         novel_id: int | str,
+        novel_version_id: int | None,
         chapter_num: int,
         prewrite: dict | None = None,
         outline: dict | None = None,
@@ -369,7 +400,12 @@ class ContextLoaderAgent:
 
         # get_context_for_chapter uses build_chapter_context internally for layered context
         return get_context_for_chapter(
-            novel_id, chapter_num, db=db, prewrite=prewrite, outline=outline
+            novel_id,
+            chapter_num,
+            db=db,
+            prewrite=prewrite,
+            outline=outline,
+            novel_version_id=novel_version_id,
         )
 
 
@@ -405,12 +441,23 @@ class WriterAgent:
                 "writer",
                 {"novel_id": novel_id, "chapter_num": chapter_num, "provider": provider, "model": model, "template": template},
             )
-            content = response.content.strip()
+            content = response_to_text(response).strip()
             logger.info(f"WriterAgent completed for novel {novel_id} chapter {chapter_num}, length: {len(content)}")
             return content
         except Exception as e:
             logger.error(f"WriterAgent failed: {e}")
-            return f"[Chapter {chapter_num} content generation failed: {e}]"
+            root = e
+            while getattr(root, "__cause__", None) is not None:
+                root = root.__cause__
+            root_type = type(root).__name__
+            root_msg = str(root).strip().replace("\n", " ")
+            if len(root_msg) > 240:
+                root_msg = root_msg[:240]
+            raise RuntimeError(
+                f"writer generation failed for chapter={chapter_num} "
+                f"provider={provider or '__default__'} model={model or '__default__'} "
+                f"cause={root_type}: {root_msg or 'unknown error'}"
+            ) from e
 
 
 class ReviewerAgent:
@@ -616,7 +663,7 @@ class FinalizerAgent:
                 "finalizer",
                 {"provider": provider, "model": model, "language": language},
             )
-            content = response.content.strip()
+            content = response_to_text(response).strip()
             logger.info(f"FinalizerAgent completed, length: {len(content)}")
             return content
         except Exception as e:

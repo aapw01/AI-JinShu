@@ -1,9 +1,11 @@
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy import select
 
 from app.core.database import SessionLocal
 from app.models.novel import ChapterOutline, Novel, NovelSpecification
+from app.services.generation.agents import WriterAgent
 from app.services.generation.common import (
     generate_chapter_summary,
     save_full_outlines,
@@ -128,6 +130,10 @@ def test_update_character_states_from_content_updates(monkeypatch):
     assert mgr.calls[0][2]["chapter_num"] == 7
 
 
+
+
+
+
 def test_update_character_states_from_content_no_character_short_circuit(monkeypatch):
     called = {"v": False}
 
@@ -149,3 +155,30 @@ def test_update_character_states_from_content_no_character_short_circuit(monkeyp
         strategy="web-novel",
     )
     assert called["v"] is False
+
+
+def test_writer_agent_error_includes_provider_model_and_root_cause(monkeypatch):
+    class _FailLLM:
+        def invoke(self, _prompt):
+            raise RuntimeError("upstream timeout")
+
+    monkeypatch.setattr("app.services.generation.agents.get_llm_with_fallback", lambda *_: _FailLLM())
+
+    writer = WriterAgent()
+    with pytest.raises(RuntimeError) as exc_info:
+        writer.run(
+            novel_id="n-1",
+            chapter_num=1,
+            outline={"title": "开篇"},
+            context={"scene": "测试"},
+            language="zh",
+            native_style_profile="",
+            provider="openai",
+            model="gpt-4o-mini",
+        )
+
+    msg = str(exc_info.value)
+    assert "writer generation failed for chapter=1" in msg
+    assert "provider=openai" in msg
+    assert "model=gpt-4o-mini" in msg
+    assert "cause=RuntimeError: upstream timeout" in msg

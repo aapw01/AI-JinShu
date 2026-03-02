@@ -7,18 +7,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.responses import Response
 
 from app.api.routes import novels, chapters, export, presets, generation, longform, rewrite, admin, auth, account, storyboards
-from app.core.config import get_settings
+from app.core.config import get_settings, validate_settings_for_production
 from app.core.logging_config import bind_log_context, log_event, setup_logging
 from app.core.trace import new_trace_id, set_trace_id
 
 setup_logging()
 logger = logging.getLogger(__name__)
 
+validate_settings_for_production()
+
 app = FastAPI(title="AI-JinShu API", version="0.1.0")
 
+_settings = get_settings()
+_cors_origins = [o.strip() for o in _settings.auth_frontend_base_url.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins or ["http://localhost:3000"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -38,8 +38,8 @@ class Settings(BaseSettings):
     creation_default_max_concurrent_tasks: int = 1
     creation_dispatch_poll_seconds: int = 2
     creation_max_dispatch_batch: int = 5
-    creation_worker_lease_ttl_seconds: int = 20
-    creation_worker_heartbeat_seconds: int = 5
+    creation_worker_lease_ttl_seconds: int = 300
+    creation_worker_heartbeat_seconds: int = 30
     creation_recovery_poll_seconds: int = 5
     quota_free_monthly_chapter_limit: int = 1_000_000
     quota_free_monthly_token_limit: int = 10_000_000_000
@@ -56,6 +56,12 @@ class Settings(BaseSettings):
 
 _settings: Settings | None = None
 
+_JWT_SECRET_DEFAULTS = frozenset({
+    "change-me-in-production-and-must-be-at-least-32-bytes",
+    "change-me",
+    "",
+})
+
 
 def get_settings() -> Settings:
     """Get cached settings instance."""
@@ -63,3 +69,15 @@ def get_settings() -> Settings:
     if _settings is None:
         _settings = Settings()
     return _settings
+
+
+def validate_settings_for_production() -> None:
+    """Called at app startup to reject insecure defaults in non-dev environments."""
+    import os
+    if os.getenv("ENV", "development").lower() in ("development", "test"):
+        return
+    s = get_settings()
+    if s.auth_jwt_secret in _JWT_SECRET_DEFAULTS or len(s.auth_jwt_secret) < 32:
+        raise RuntimeError(
+            "AUTH_JWT_SECRET must be explicitly set to a strong value (>= 32 chars) in production."
+        )
