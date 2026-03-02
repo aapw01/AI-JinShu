@@ -310,8 +310,11 @@ def heartbeat_task(db: Session, *, task_id: int) -> CreationTask | None:
 def _reclaim_update_redis(items: list[tuple[str | None, str | None, str | None]]) -> None:
     """Clear Redis status for reclaimed tasks so frontend doesn't show stale 'running'."""
     try:
-        from app.core.database import get_redis
-        r = get_redis()
+        import redis
+
+        from app.core.config import get_settings
+
+        r = redis.Redis.from_url(get_settings().redis_url)
         queued_payload = json.dumps({
             "status": "queued", "run_state": "queued", "step": "queued",
             "current_phase": "queued", "progress": 0,
