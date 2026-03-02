@@ -187,6 +187,7 @@ def run_storyboard_pipeline(
     hb_interval = max(5, int(get_settings().creation_worker_heartbeat_seconds or 30))
     hb_ctx = background_heartbeat(creation_task_id, heartbeat_fn=_heartbeat_creation, interval_seconds=hb_interval)
     hb_ctx.__enter__()
+    _worker_superseded = False
     db = SessionLocal()
     try:
         project = db.execute(select(StoryboardProject).where(StoryboardProject.id == project_id)).scalar_one_or_none()
@@ -616,63 +617,69 @@ def run_storyboard_pipeline(
             storyboard_project_id=project.id,
         )
     except Exception as exc:
-        db.rollback()
-        task = _reload_task(db, task_db_id) if task_db_id is not None else None
-        project = db.execute(select(StoryboardProject).where(StoryboardProject.id == project_id)).scalar_one_or_none()
-        is_paused = str(exc) == "storyboard_paused"
-        is_cancelled = str(exc) == "storyboard_cancelled"
-        if task:
-            update_task_state(
-                db,
-                task,
-                status="paused" if is_paused else ("cancelled" if is_cancelled else "failed"),
-                run_state="paused" if is_paused else ("cancelled" if is_cancelled else "failed"),
-                phase="paused" if is_paused else ("cancelled" if is_cancelled else "failed"),
-                message="分镜生成已暂停" if is_paused else ("分镜生成已取消" if is_cancelled else "导演分镜生成失败"),
-                error=None if (is_paused or is_cancelled) else str(exc),
-                error_code=None if (is_paused or is_cancelled) else "STORYBOARD_PIPELINE_FAILED",
-                error_category=None if (is_paused or is_cancelled) else "transient",
-                retryable=0 if is_cancelled else 1,
-            )
-        if project and not is_paused:
-            project.status = "failed"
-        db.commit()
-        if task:
-            _publish(task)
-        if creation_task_id is not None:
-            try:
-                usage = snapshot_usage()
-                _finalize_creation(
-                    creation_task_id,
-                    final_status="paused" if is_paused else ("cancelled" if is_cancelled else "failed"),
-                    progress=0.0,
+        err_text = str(exc)
+        _worker_superseded = "worker superseded" in err_text
+        if _worker_superseded:
+            logger.warning("Storyboard worker superseded, exiting gracefully: %s", err_text)
+            db.rollback()
+        else:
+            db.rollback()
+            task = _reload_task(db, task_db_id) if task_db_id is not None else None
+            project = db.execute(select(StoryboardProject).where(StoryboardProject.id == project_id)).scalar_one_or_none()
+            is_paused = err_text == "storyboard_paused"
+            is_cancelled = err_text == "storyboard_cancelled"
+            if task:
+                update_task_state(
+                    db,
+                    task,
+                    status="paused" if is_paused else ("cancelled" if is_cancelled else "failed"),
+                    run_state="paused" if is_paused else ("cancelled" if is_cancelled else "failed"),
                     phase="paused" if is_paused else ("cancelled" if is_cancelled else "failed"),
                     message="分镜生成已暂停" if is_paused else ("分镜生成已取消" if is_cancelled else "导演分镜生成失败"),
+                    error=None if (is_paused or is_cancelled) else str(exc),
                     error_code=None if (is_paused or is_cancelled) else "STORYBOARD_PIPELINE_FAILED",
                     error_category=None if (is_paused or is_cancelled) else "transient",
-                    error_detail=None if (is_paused or is_cancelled) else str(exc),
-                    result_json={
-                        "token_usage_input": int(usage.get("input_tokens") or 0),
-                        "token_usage_output": int(usage.get("output_tokens") or 0),
-                        "estimated_cost": float(usage.get("estimated_cost") or 0.0),
-                        "usage_calls": int(usage.get("calls") or 0),
-                        "usage_stages": usage.get("stages") or {},
-                    },
+                    retryable=0 if is_cancelled else 1,
                 )
-            except Exception:
-                logger.exception("Failed to finalize creation task %s", creation_task_id)
-        log_event(
-            logger,
-            "storyboard.task.stopped" if (is_paused or is_cancelled) else "storyboard.task.failed",
-            level=logging.WARNING if (is_paused or is_cancelled) else logging.ERROR,
-            task_id=getattr(task, "task_id", None),
-            storyboard_project_id=project_id,
-            error_class=type(exc).__name__,
-            error_code=None if (is_paused or is_cancelled) else "STORYBOARD_PIPELINE_FAILED",
-            error_category=None if (is_paused or is_cancelled) else "transient",
-        )
-        if not (is_paused or is_cancelled):
-            raise
+            if project and not is_paused:
+                project.status = "failed"
+            db.commit()
+            if task:
+                _publish(task)
+            if creation_task_id is not None:
+                try:
+                    usage = snapshot_usage()
+                    _finalize_creation(
+                        creation_task_id,
+                        final_status="paused" if is_paused else ("cancelled" if is_cancelled else "failed"),
+                        progress=0.0,
+                        phase="paused" if is_paused else ("cancelled" if is_cancelled else "failed"),
+                        message="分镜生成已暂停" if is_paused else ("分镜生成已取消" if is_cancelled else "导演分镜生成失败"),
+                        error_code=None if (is_paused or is_cancelled) else "STORYBOARD_PIPELINE_FAILED",
+                        error_category=None if (is_paused or is_cancelled) else "transient",
+                        error_detail=None if (is_paused or is_cancelled) else str(exc),
+                        result_json={
+                            "token_usage_input": int(usage.get("input_tokens") or 0),
+                            "token_usage_output": int(usage.get("output_tokens") or 0),
+                            "estimated_cost": float(usage.get("estimated_cost") or 0.0),
+                            "usage_calls": int(usage.get("calls") or 0),
+                            "usage_stages": usage.get("stages") or {},
+                        },
+                    )
+                except Exception:
+                    logger.exception("Failed to finalize creation task %s", creation_task_id)
+            log_event(
+                logger,
+                "storyboard.task.stopped" if (is_paused or is_cancelled) else "storyboard.task.failed",
+                level=logging.WARNING if (is_paused or is_cancelled) else logging.ERROR,
+                task_id=getattr(task, "task_id", None),
+                storyboard_project_id=project_id,
+                error_class=type(exc).__name__,
+                error_code=None if (is_paused or is_cancelled) else "STORYBOARD_PIPELINE_FAILED",
+                error_category=None if (is_paused or is_cancelled) else "transient",
+            )
+            if not (is_paused or is_cancelled):
+                raise
     finally:
         hb_ctx.__exit__(None, None, None)
         db.close()

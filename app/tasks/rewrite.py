@@ -247,6 +247,7 @@ def submit_rewrite_task(
     hb_interval = max(5, int(_get_settings().creation_worker_heartbeat_seconds or 30))
     hb_ctx = background_heartbeat(creation_task_id, heartbeat_fn=_heartbeat_creation, interval_seconds=hb_interval)
     hb_ctx.__enter__()
+    _worker_superseded = False
     db = SessionLocal()
     try:
         if creation_task_id is not None:
@@ -465,54 +466,59 @@ def submit_rewrite_task(
                 },
             )
     except Exception as exc:
-        db.rollback()
         err_text = str(exc)
-        is_paused = err_text == "rewrite_paused"
-        is_cancelled = err_text == "rewrite_cancelled"
-        log_event(
-            logger,
-            "rewrite.failed" if not (is_paused or is_cancelled) else "rewrite.stopped",
-            level=logging.ERROR if not (is_paused or is_cancelled) else logging.WARNING,
-            task_id=self.request.id,
-            novel_id=novel_id,
-            run_state="failed" if not (is_paused or is_cancelled) else ("paused" if is_paused else "cancelled"),
-            error_class=type(exc).__name__,
-            error_code=None if (is_paused or is_cancelled) else "REWRITE_TASK_FAILED",
-            error_category=None if (is_paused or is_cancelled) else "transient",
-        )
-        req = db.execute(select(RewriteRequest).where(RewriteRequest.id == rewrite_request_id)).scalar_one_or_none()
-        if req:
-            req.status = "paused" if is_paused else ("cancelled" if is_cancelled else "failed")
-            req.error = None if (is_paused or is_cancelled) else str(exc)
-            req.message = "重写任务已暂停" if is_paused else ("重写任务已取消" if is_cancelled else "重写失败")
-        target_version = db.execute(select(NovelVersion).where(NovelVersion.id == target_version_id)).scalar_one_or_none()
-        if target_version and not is_paused:
-            target_version.status = "failed"
-        db.commit()
-        if creation_task_id is not None:
-            try:
-                usage = snapshot_usage()
-                _finalize_creation(
-                    creation_task_id,
-                    final_status="paused" if is_paused else ("cancelled" if is_cancelled else "failed"),
-                    progress=float(req.progress if req else 0.0),
-                    message=str(req.message if req else "任务结束"),
-                    phase="paused" if is_paused else ("cancelled" if is_cancelled else "failed"),
-                    error_code=None if (is_paused or is_cancelled) else "REWRITE_TASK_FAILED",
-                    error_category=None if (is_paused or is_cancelled) else "transient",
-                    error_detail=None if (is_paused or is_cancelled) else str(exc),
-                    result_json={
-                        "token_usage_input": int(usage.get("input_tokens") or 0),
-                        "token_usage_output": int(usage.get("output_tokens") or 0),
-                        "estimated_cost": float(usage.get("estimated_cost") or 0.0),
-                        "usage_calls": int(usage.get("calls") or 0),
-                        "usage_stages": usage.get("stages") or {},
-                    },
-                )
-            except Exception:
-                logger.exception("Failed to finalize creation task %s", creation_task_id)
-        if not (is_paused or is_cancelled):
-            raise
+        _worker_superseded = "worker superseded" in err_text
+        if _worker_superseded:
+            logger.warning("Rewrite worker superseded, exiting gracefully: %s", err_text)
+            db.rollback()
+        else:
+            db.rollback()
+            is_paused = err_text == "rewrite_paused"
+            is_cancelled = err_text == "rewrite_cancelled"
+            log_event(
+                logger,
+                "rewrite.failed" if not (is_paused or is_cancelled) else "rewrite.stopped",
+                level=logging.ERROR if not (is_paused or is_cancelled) else logging.WARNING,
+                task_id=self.request.id,
+                novel_id=novel_id,
+                run_state="failed" if not (is_paused or is_cancelled) else ("paused" if is_paused else "cancelled"),
+                error_class=type(exc).__name__,
+                error_code=None if (is_paused or is_cancelled) else "REWRITE_TASK_FAILED",
+                error_category=None if (is_paused or is_cancelled) else "transient",
+            )
+            req = db.execute(select(RewriteRequest).where(RewriteRequest.id == rewrite_request_id)).scalar_one_or_none()
+            if req:
+                req.status = "paused" if is_paused else ("cancelled" if is_cancelled else "failed")
+                req.error = None if (is_paused or is_cancelled) else str(exc)
+                req.message = "重写任务已暂停" if is_paused else ("重写任务已取消" if is_cancelled else "重写失败")
+            target_version = db.execute(select(NovelVersion).where(NovelVersion.id == target_version_id)).scalar_one_or_none()
+            if target_version and not is_paused:
+                target_version.status = "failed"
+            db.commit()
+            if creation_task_id is not None:
+                try:
+                    usage = snapshot_usage()
+                    _finalize_creation(
+                        creation_task_id,
+                        final_status="paused" if is_paused else ("cancelled" if is_cancelled else "failed"),
+                        progress=float(req.progress if req else 0.0),
+                        message=str(req.message if req else "任务结束"),
+                        phase="paused" if is_paused else ("cancelled" if is_cancelled else "failed"),
+                        error_code=None if (is_paused or is_cancelled) else "REWRITE_TASK_FAILED",
+                        error_category=None if (is_paused or is_cancelled) else "transient",
+                        error_detail=None if (is_paused or is_cancelled) else str(exc),
+                        result_json={
+                            "token_usage_input": int(usage.get("input_tokens") or 0),
+                            "token_usage_output": int(usage.get("output_tokens") or 0),
+                            "estimated_cost": float(usage.get("estimated_cost") or 0.0),
+                            "usage_calls": int(usage.get("calls") or 0),
+                            "usage_stages": usage.get("stages") or {},
+                        },
+                    )
+                except Exception:
+                    logger.exception("Failed to finalize creation task %s", creation_task_id)
+            if not (is_paused or is_cancelled):
+                raise
     finally:
         hb_ctx.__exit__(None, None, None)
         db.close()
