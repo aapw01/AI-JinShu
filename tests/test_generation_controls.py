@@ -61,6 +61,10 @@ def test_generation_retry_keeps_source_novel_version(client):
         ).scalar_one()
         source_version_id = int((source_creation.payload_json or {}).get("novel_version_id"))
 
+        source_creation.status = "failed"
+        source_creation.phase = "failed"
+        source_creation.message = "seed failed task"
+
         source_gt = db.execute(select(GenerationTask).where(GenerationTask.task_id == source_public_task_id)).scalar_one_or_none()
         if source_gt is None:
             source_gt = GenerationTask(

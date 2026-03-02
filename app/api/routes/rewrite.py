@@ -33,7 +33,8 @@ from app.services.rewrite.service import (
     persist_annotations,
     validate_annotation_payload,
 )
-from app.services.scheduler.scheduler_service import get_task_by_public_id, submit_task
+from app.models.creation_task import CreationTask
+from app.services.scheduler.scheduler_service import get_task_by_public_id, submit_task, resume_task
 from app.tasks.rewrite import submit_rewrite_task  # legacy patch target for tests
 
 router = APIRouter()
@@ -351,6 +352,40 @@ def retry_rewrite_request(
         raise http_error(404, "rewrite_request_not_found", "Rewrite request not found")
     if row.status not in {"failed", "cancelled"}:
         raise http_error(409, "rewrite_not_retryable", f"当前状态 {row.status} 不支持重试")
+
+    existing_creation = db.execute(
+        select(CreationTask)
+        .where(
+            CreationTask.task_type == "rewrite",
+            CreationTask.resource_type == "rewrite_request",
+            CreationTask.resource_id == int(row.id),
+            CreationTask.user_uuid == (principal.user_uuid or ""),
+            CreationTask.status.in_({"failed", "paused"}),
+        )
+        .order_by(CreationTask.updated_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+    if existing_creation:
+        try:
+            resumed = resume_task(db, public_id=existing_creation.public_id, user_uuid=principal.user_uuid or "")
+        except ValueError:
+            resumed = None
+        if resumed:
+            cursor = resumed.resume_cursor_json if isinstance(resumed.resume_cursor_json, dict) else {}
+            next_ch = cursor.get("next")
+            row.task_id = resumed.public_id
+            row.status = "queued"
+            row.error = None
+            row.message = f"重试已入队：从第{int(next_ch)}章继续" if next_ch else "重试已入队"
+            target = db.execute(select(NovelVersion).where(NovelVersion.id == row.target_version_id)).scalar_one_or_none()
+            if target:
+                target.status = "draft"
+                target.source_task_id = resumed.public_id
+            db.commit()
+            db.refresh(row)
+            log_event(logger, "rewrite.request.retry.resumed", novel_id=novel.id, task_id=resumed.public_id, run_state="queued")
+            return _to_rewrite_response(row, novel.uuid or str(novel.id))
 
     creation_task = submit_task(
         db,
