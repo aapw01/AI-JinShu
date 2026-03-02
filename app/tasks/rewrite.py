@@ -27,6 +27,7 @@ from app.services.task_runtime.checkpoint_repo import (
     update_resume_cursor,
 )
 from app.services.task_runtime.cursor_service import resume_from_last_completed
+from app.services.task_runtime.lease_service import background_heartbeat
 from app.workers.celery_app import app
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,21 @@ def _get_creation_task_state(task_db_id: int) -> str | None:
     try:
         row = get_creation_task_by_id(db, task_id=task_db_id)
         return row.status if row else None
+    finally:
+        db.close()
+
+
+def _check_worker_superseded(task_db_id: int, current_celery_id: str) -> None:
+    db = SessionLocal()
+    try:
+        row = get_creation_task_by_id(db, task_id=task_db_id)
+        if not row:
+            return
+        if row.worker_task_id and row.worker_task_id != current_celery_id:
+            raise RuntimeError(
+                f"worker superseded: creation_task.worker_task_id={row.worker_task_id}, "
+                f"current={current_celery_id}"
+            )
     finally:
         db.close()
 
@@ -227,9 +243,14 @@ def submit_rewrite_task(
     creation_task_id: int | None = None,
 ):
     begin_usage_session(f"rewrite:{self.request.id}")
+    from app.core.config import get_settings as _get_settings
+    hb_interval = max(5, int(_get_settings().creation_worker_heartbeat_seconds or 30))
+    hb_ctx = background_heartbeat(creation_task_id, heartbeat_fn=_heartbeat_creation, interval_seconds=hb_interval)
+    hb_ctx.__enter__()
     db = SessionLocal()
     try:
         if creation_task_id is not None:
+            _check_worker_superseded(creation_task_id, self.request.id)
             c_status = _get_creation_task_state(creation_task_id)
             if c_status not in {"dispatching", "running"}:
                 logger.info("Skip rewrite execution because creation_task status=%s", c_status)
@@ -336,14 +357,14 @@ def submit_rewrite_task(
                 log_event(
                     logger,
                     "rewrite.chapter.llm_error",
-                    level=logging.WARNING,
+                    level=logging.ERROR,
                     task_id=self.request.id,
                     novel_id=novel_id,
                     chapter_num=chapter_num,
                     error_class=type(e).__name__,
                     error_category="transient",
                 )
-                rewritten = (base_chapter.content or "").strip()
+                raise RuntimeError(f"重写第{chapter_num}章时LLM调用失败: {type(e).__name__}: {e}") from e
 
             if not rewritten:
                 rewritten = (base_chapter.content or "").strip()
@@ -444,6 +465,7 @@ def submit_rewrite_task(
                 },
             )
     except Exception as exc:
+        db.rollback()
         err_text = str(exc)
         is_paused = err_text == "rewrite_paused"
         is_cancelled = err_text == "rewrite_cancelled"
@@ -468,26 +490,30 @@ def submit_rewrite_task(
             target_version.status = "failed"
         db.commit()
         if creation_task_id is not None:
-            usage = snapshot_usage()
-            _finalize_creation(
-                creation_task_id,
-                final_status="paused" if is_paused else ("cancelled" if is_cancelled else "failed"),
-                progress=float(req.progress if req else 0.0),
-                message=str(req.message if req else "任务结束"),
-                phase="paused" if is_paused else ("cancelled" if is_cancelled else "failed"),
-                error_code=None if (is_paused or is_cancelled) else "REWRITE_TASK_FAILED",
-                error_category=None if (is_paused or is_cancelled) else "transient",
-                error_detail=None if (is_paused or is_cancelled) else str(exc),
-                result_json={
-                    "token_usage_input": int(usage.get("input_tokens") or 0),
-                    "token_usage_output": int(usage.get("output_tokens") or 0),
-                    "estimated_cost": float(usage.get("estimated_cost") or 0.0),
-                    "usage_calls": int(usage.get("calls") or 0),
-                    "usage_stages": usage.get("stages") or {},
-                },
-            )
+            try:
+                usage = snapshot_usage()
+                _finalize_creation(
+                    creation_task_id,
+                    final_status="paused" if is_paused else ("cancelled" if is_cancelled else "failed"),
+                    progress=float(req.progress if req else 0.0),
+                    message=str(req.message if req else "任务结束"),
+                    phase="paused" if is_paused else ("cancelled" if is_cancelled else "failed"),
+                    error_code=None if (is_paused or is_cancelled) else "REWRITE_TASK_FAILED",
+                    error_category=None if (is_paused or is_cancelled) else "transient",
+                    error_detail=None if (is_paused or is_cancelled) else str(exc),
+                    result_json={
+                        "token_usage_input": int(usage.get("input_tokens") or 0),
+                        "token_usage_output": int(usage.get("output_tokens") or 0),
+                        "estimated_cost": float(usage.get("estimated_cost") or 0.0),
+                        "usage_calls": int(usage.get("calls") or 0),
+                        "usage_stages": usage.get("stages") or {},
+                    },
+                )
+            except Exception:
+                logger.exception("Failed to finalize creation task %s", creation_task_id)
         if not (is_paused or is_cancelled):
             raise
     finally:
+        hb_ctx.__exit__(None, None, None)
         db.close()
         end_usage_session()

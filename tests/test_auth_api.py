@@ -73,7 +73,9 @@ def test_register_verification_required_without_sendgrid(anon_client, monkeypatc
     try:
         r = anon_client.post("/api/auth/register", json={"email": "auth3@example.com", "password": "Strong#Pass123"})
         assert r.status_code == 503
-        assert "mail service is not configured" in r.json().get("detail", "")
+        detail = r.json().get("detail", {})
+        assert detail.get("error_code") == "mail_service_not_configured"
+        assert "mail service is not configured" in detail.get("message", "")
     finally:
         monkeypatch.delenv("AUTH_REQUIRE_EMAIL_VERIFICATION", raising=False)
         _reset_settings()
@@ -99,7 +101,9 @@ def test_pending_user_login_stays_unverified_when_verification_disabled(anon_cli
     try:
         login = anon_client.post("/api/auth/login", json={"email": "pending-login@example.com", "password": "Strong#Pass123"})
         assert login.status_code == 403
-        assert "Email not verified" in login.json().get("detail", "")
+        detail = login.json().get("detail", {})
+        assert detail.get("error_code") == "email_not_verified"
+        assert "Email not verified" in detail.get("message", "")
 
         db2 = SessionLocal()
         try:
@@ -111,3 +115,91 @@ def test_pending_user_login_stays_unverified_when_verification_disabled(anon_cli
     finally:
         monkeypatch.delenv("AUTH_REQUIRE_EMAIL_VERIFICATION", raising=False)
         _reset_settings()
+
+
+def test_change_password_success(anon_client):
+    email = "change-pass-success@example.com"
+    original = "Strong#Pass123"
+    updated = "Better#Pass456"
+
+    register = anon_client.post("/api/auth/register", json={"email": email, "password": original})
+    assert register.status_code == 200
+
+    login_old = anon_client.post("/api/auth/login", json={"email": email, "password": original})
+    assert login_old.status_code == 200
+    token = login_old.json()["access_token"]
+
+    changed = anon_client.post(
+        "/api/auth/password/change",
+        json={"current_password": original, "new_password": updated},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert changed.status_code == 200
+    assert changed.json() == {"ok": True}
+
+    login_old_after = anon_client.post("/api/auth/login", json={"email": email, "password": original})
+    assert login_old_after.status_code == 401
+    old_detail = login_old_after.json().get("detail", {})
+    assert old_detail.get("error_code") == "invalid_credentials"
+    assert "Invalid email or password" in str(old_detail.get("message") or "")
+
+    login_new = anon_client.post("/api/auth/login", json={"email": email, "password": updated})
+    assert login_new.status_code == 200
+    assert login_new.json()["user"]["email"] == email
+
+
+def test_change_password_wrong_current_password(anon_client):
+    email = "change-pass-wrong-current@example.com"
+    original = "Strong#Pass123"
+    wrong_current = "Wrong#Pass123"
+    updated = "Better#Pass456"
+
+    register = anon_client.post("/api/auth/register", json={"email": email, "password": original})
+    assert register.status_code == 200
+
+    login = anon_client.post("/api/auth/login", json={"email": email, "password": original})
+    assert login.status_code == 200
+    token = login.json()["access_token"]
+
+    changed = anon_client.post(
+        "/api/auth/password/change",
+        json={"current_password": wrong_current, "new_password": updated},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert changed.status_code == 400
+    detail = changed.json().get("detail", {})
+    assert detail.get("error_code") == "current_password_incorrect"
+    assert "Current password is incorrect" in str(detail.get("message") or "")
+
+
+def test_change_password_weak_new_password(anon_client):
+    email = "change-pass-weak-new@example.com"
+    original = "Strong#Pass123"
+
+    register = anon_client.post("/api/auth/register", json={"email": email, "password": original})
+    assert register.status_code == 200
+
+    login = anon_client.post("/api/auth/login", json={"email": email, "password": original})
+    assert login.status_code == 200
+    token = login.json()["access_token"]
+
+    changed = anon_client.post(
+        "/api/auth/password/change",
+        json={"current_password": original, "new_password": "aaaaaaaaaa"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert changed.status_code == 400
+    detail = changed.json().get("detail", {})
+    assert detail.get("error_code") == "weak_password"
+    assert isinstance(detail.get("message"), str) and detail.get("message")
+
+
+def test_change_password_requires_auth(anon_client):
+    changed = anon_client.post(
+        "/api/auth/password/change",
+        json={"current_password": "Strong#Pass123", "new_password": "Better#Pass456"},
+    )
+    assert changed.status_code == 401
+    detail = changed.json().get("detail", {})
+    assert detail.get("error_code") == "unauthorized"
+    assert "Missing token" in str(detail.get("message") or "")

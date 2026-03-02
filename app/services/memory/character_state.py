@@ -12,7 +12,11 @@ class CharacterStateManager:
     """Manage character states via novel_memory table."""
 
     def get_states(
-        self, novel_id: int, chapter_num: int, db: Optional[Session] = None
+        self,
+        novel_id: int,
+        chapter_num: int,
+        db: Optional[Session] = None,
+        novel_version_id: int | None = None,
     ) -> list[dict]:
         """Get character states at given chapter from novel_memory."""
         should_close = db is None
@@ -22,6 +26,8 @@ class CharacterStateManager:
                 NovelMemory.novel_id == novel_id,
                 NovelMemory.memory_type == "character",
             )
+            if novel_version_id is not None:
+                stmt = stmt.where(NovelMemory.novel_version_id == novel_version_id)
             rows = db.execute(stmt).scalars().all()
             return [{"key": r.key, "content": r.content} for r in rows]
         finally:
@@ -34,6 +40,7 @@ class CharacterStateManager:
         character_id: str,
         state: dict,
         db: Optional[Session] = None,
+        novel_version_id: int | None = None,
     ):
         """Update character state in novel_memory."""
         should_close = db is None
@@ -44,6 +51,8 @@ class CharacterStateManager:
                 NovelMemory.memory_type == "character",
                 NovelMemory.key == character_id,
             )
+            if novel_version_id is not None:
+                stmt = stmt.where(NovelMemory.novel_version_id == novel_version_id)
             existing = db.execute(stmt).scalar_one_or_none()
             if existing:
                 existing.content = state
@@ -53,6 +62,7 @@ class CharacterStateManager:
                         db.add(
                             NovelMemory(
                                 novel_id=novel_id,
+                                novel_version_id=novel_version_id,
                                 memory_type="character",
                                 key=character_id,
                                 content=state,

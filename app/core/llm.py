@@ -15,6 +15,43 @@ from app.core.logging_config import log_event
 logger = logging.getLogger(__name__)
 
 
+def _coerce_part_text(part: Any) -> str:
+    if part is None:
+        return ""
+    if isinstance(part, str):
+        return part
+    if isinstance(part, dict):
+        text = part.get("text")
+        if isinstance(text, str):
+            return text
+        content = part.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "\n".join(x for x in (_coerce_part_text(i) for i in content) if x)
+        return ""
+    text_attr = getattr(part, "text", None)
+    if isinstance(text_attr, str):
+        return text_attr
+    content_attr = getattr(part, "content", None)
+    if isinstance(content_attr, str):
+        return content_attr
+    if isinstance(content_attr, list):
+        return "\n".join(x for x in (_coerce_part_text(i) for i in content_attr) if x)
+    return str(part)
+
+
+def response_to_text(resp: Any) -> str:
+    """Normalize LangChain/OpenAI response content to plain text."""
+    content = getattr(resp, "content", resp)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [p for p in (_coerce_part_text(item) for item in content) if p]
+        return "\n".join(parts)
+    return str(content or "")
+
+
 def _resolve_api_key(provider: str) -> str:
     settings = get_settings()
     if settings.llm_api_key:
@@ -48,28 +85,57 @@ def _resolve_base_url(provider: str) -> str | None:
     return None
 
 
+_LLM_REQUEST_TIMEOUT = 120
+
 _REGISTRY = {
     "openai": lambda model=None: ChatOpenAI(
         base_url=_resolve_base_url("openai") or "https://api.openai.com/v1",
         model=model or get_settings().default_llm_model,
         api_key=_resolve_api_key("openai"),
+        request_timeout=_LLM_REQUEST_TIMEOUT,
+        max_retries=0,
     ),
     "anthropic": lambda model=None: ChatAnthropic(
         base_url=_resolve_base_url("anthropic") or "https://api.anthropic.com/v1",
-        model=model or "claude-3-sonnet-20240229",
+        model=model or get_settings().default_llm_model,
         api_key=_resolve_api_key("anthropic"),
+        timeout=_LLM_REQUEST_TIMEOUT,
+        max_retries=0,
     ),
     "gemini": lambda model=None: ChatGoogleGenerativeAI(
-        model=model or "gemini-pro",
+        model=model or get_settings().default_llm_model,
         google_api_key=_resolve_api_key("gemini"),
+        timeout=_LLM_REQUEST_TIMEOUT,
     ),
 }
 
 _FALLBACK_ORDER = ["openai", "anthropic", "gemini"]
 
 
+_RETRYABLE_EXCEPTIONS = (
+    ConnectionError,
+    TimeoutError,
+    OSError,
+)
+
+_MAX_RETRIES = 3
+_RETRY_BACKOFF = [1.0, 2.0, 4.0]
+
+
+def _is_retryable(exc: Exception) -> bool:
+    if isinstance(exc, _RETRYABLE_EXCEPTIONS):
+        return True
+    name = type(exc).__name__
+    if any(kw in name for kw in ("Timeout", "Connection", "RateLimit", "ServiceUnavailable", "APIConnectionError")):
+        return True
+    status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    if isinstance(status, int) and status in {429, 500, 502, 503, 504}:
+        return True
+    return False
+
+
 class _TrackedLLMProxy:
-    """Thin proxy that records provider usage for every invoke call."""
+    """Thin proxy that records provider usage for every invoke call with retry."""
 
     def __init__(self, inner: Any, *, stage_prefix: str):
         self._inner = inner
@@ -78,16 +144,54 @@ class _TrackedLLMProxy:
     def invoke(self, *args: Any, **kwargs: Any):
         if not hasattr(self._inner, "invoke"):
             return self._inner
-        resp = self._inner.invoke(*args, **kwargs)
-        record_usage_from_response(resp, stage=self._stage_prefix)
-        return resp
+        last_exc: Exception | None = None
+        for attempt in range(_MAX_RETRIES):
+            try:
+                resp = self._inner.invoke(*args, **kwargs)
+                record_usage_from_response(resp, stage=self._stage_prefix)
+                return resp
+            except Exception as exc:
+                last_exc = exc
+                if not _is_retryable(exc) or attempt >= _MAX_RETRIES - 1:
+                    raise
+                delay = _RETRY_BACKOFF[attempt] if attempt < len(_RETRY_BACKOFF) else 4.0
+                log_event(
+                    logger,
+                    "llm.invoke.retry",
+                    level=logging.WARNING,
+                    attempt=attempt + 1,
+                    error_class=type(exc).__name__,
+                    delay=delay,
+                )
+                time.sleep(delay)
+        raise last_exc  # type: ignore[misc]
 
     async def ainvoke(self, *args: Any, **kwargs: Any):
+        import asyncio
+
         if not hasattr(self._inner, "ainvoke"):
             return self._inner
-        resp = await self._inner.ainvoke(*args, **kwargs)
-        record_usage_from_response(resp, stage=self._stage_prefix)
-        return resp
+        last_exc: Exception | None = None
+        for attempt in range(_MAX_RETRIES):
+            try:
+                resp = await self._inner.ainvoke(*args, **kwargs)
+                record_usage_from_response(resp, stage=self._stage_prefix)
+                return resp
+            except Exception as exc:
+                last_exc = exc
+                if not _is_retryable(exc) or attempt >= _MAX_RETRIES - 1:
+                    raise
+                delay = _RETRY_BACKOFF[attempt] if attempt < len(_RETRY_BACKOFF) else 4.0
+                log_event(
+                    logger,
+                    "llm.ainvoke.retry",
+                    level=logging.WARNING,
+                    attempt=attempt + 1,
+                    error_class=type(exc).__name__,
+                    delay=delay,
+                )
+                await asyncio.sleep(delay)
+        raise last_exc  # type: ignore[misc]
 
     def __getattr__(self, item: str):
         return getattr(self._inner, item)

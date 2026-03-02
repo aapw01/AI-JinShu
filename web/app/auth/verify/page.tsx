@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
 
-import { api, ApiError } from "@/lib/api";
+import { api, getErrorMessage } from "@/lib/api";
 import { Button } from "@/components/ui/Button";
 
 function VerifyPageContent() {
@@ -29,8 +29,7 @@ function VerifyPageContent() {
       } catch (err) {
         if (!mounted) return;
         setState("failed");
-        if (err instanceof ApiError) setMessage(err.message);
-        else setMessage("验证失败");
+        setMessage(getErrorMessage(err, "验证失败"));
       }
     };
     run();

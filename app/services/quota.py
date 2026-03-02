@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import func, select
@@ -12,10 +13,28 @@ from app.core.config import get_settings
 from app.models.novel import GenerationTask, Novel, UsageLedger, User, UserQuota
 
 
+class QuotaReason(str, Enum):
+    QUOTA_SUSPENDED = "quota_suspended"
+    CONCURRENCY_LIMIT_EXCEEDED = "concurrency_limit_exceeded"
+    MONTHLY_CHAPTER_LIMIT_EXCEEDED = "monthly_chapter_limit_exceeded"
+    MONTHLY_TOKEN_LIMIT_EXCEEDED = "monthly_token_limit_exceeded"
+
+
 @dataclass
 class QuotaCheckResult:
     ok: bool
-    reason: str | None = None
+    reason: QuotaReason | None = None
+    user_message: str | None = None
+
+
+def _quota_user_message(reason: QuotaReason) -> str:
+    mapping = {
+        QuotaReason.MONTHLY_TOKEN_LIMIT_EXCEEDED: "本月可用 token 已用尽，请下月再试或联系管理员调整额度",
+        QuotaReason.MONTHLY_CHAPTER_LIMIT_EXCEEDED: "本月可生成章节额度已用尽，请下月再试或联系管理员调整额度",
+        QuotaReason.QUOTA_SUSPENDED: "当前账号配额状态不可用，请联系管理员",
+        QuotaReason.CONCURRENCY_LIMIT_EXCEEDED: "当前进行中的任务数已达上限，请稍后再试",
+    }
+    return mapping.get(reason, "当前请求超出配额限制，请稍后再试")
 
 
 def _month_range_utc(now: datetime) -> tuple[datetime, datetime]:
@@ -71,7 +90,7 @@ def check_generation_quota(
 ) -> QuotaCheckResult:
     quota = ensure_user_quota(db, user)
     if quota.status != "active":
-        return QuotaCheckResult(False, "quota_suspended")
+        return QuotaCheckResult(False, QuotaReason.QUOTA_SUSPENDED, _quota_user_message(QuotaReason.QUOTA_SUSPENDED))
 
     if get_settings().quota_enforce_concurrency_limit:
         active_count = (
@@ -87,7 +106,11 @@ def check_generation_quota(
             or 0
         )
         if int(active_count) >= int(quota.max_concurrent_tasks or 1):
-            return QuotaCheckResult(False, "concurrency_limit_exceeded")
+            return QuotaCheckResult(
+                False,
+                QuotaReason.CONCURRENCY_LIMIT_EXCEEDED,
+                _quota_user_message(QuotaReason.CONCURRENCY_LIMIT_EXCEEDED),
+            )
 
     now = datetime.now(timezone.utc)
     month_start, month_end = _month_range_utc(now)
@@ -103,7 +126,11 @@ def check_generation_quota(
         or 0
     )
     if int(used_chapters) + max(1, int(requested_chapters)) > int(quota.monthly_chapter_limit or 0):
-        return QuotaCheckResult(False, "monthly_chapter_limit_exceeded")
+        return QuotaCheckResult(
+            False,
+            QuotaReason.MONTHLY_CHAPTER_LIMIT_EXCEEDED,
+            _quota_user_message(QuotaReason.MONTHLY_CHAPTER_LIMIT_EXCEEDED),
+        )
 
     used_tokens = (
         db.execute(
@@ -117,7 +144,11 @@ def check_generation_quota(
         or 0
     )
     if int(used_tokens) >= int(quota.monthly_token_limit or 0):
-        return QuotaCheckResult(False, "monthly_token_limit_exceeded")
+        return QuotaCheckResult(
+            False,
+            QuotaReason.MONTHLY_TOKEN_LIMIT_EXCEEDED,
+            _quota_user_message(QuotaReason.MONTHLY_TOKEN_LIMIT_EXCEEDED),
+        )
     return QuotaCheckResult(True)
 
 

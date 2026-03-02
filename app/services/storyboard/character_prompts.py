@@ -106,7 +106,10 @@ def compose_character_prompts_for_version(
 ) -> dict[str, Any]:
     profiles = db.execute(
         select(StoryCharacterProfile)
-        .where(StoryCharacterProfile.novel_id == novel.id)
+        .where(
+            StoryCharacterProfile.novel_id == novel.id,
+            StoryCharacterProfile.novel_version_id == version.source_novel_version_id,
+        )
         .order_by(StoryCharacterProfile.updated_chapter_num.desc().nullslast(), StoryCharacterProfile.id.asc())
     ).scalars().all()
     shots = db.execute(

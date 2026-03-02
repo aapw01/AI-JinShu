@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { FormEvent, Suspense, useState } from "react";
 
-import { api, ApiError } from "@/lib/api";
+import { api, getErrorMessage } from "@/lib/api";
 import { Button } from "@/components/ui/Button";
 import { ErrorDialog } from "@/components/ui/ErrorDialog";
 
@@ -28,14 +28,14 @@ function ForgotPasswordPageContent() {
     try {
       if (isResetMode) {
         await api.resetPassword(token, newPassword);
-        setNotice("密码已重置，请使用新密码登录。");
+        setNotice("密码已重置，3秒后跳转登录页...");
+        setTimeout(() => { window.location.href = "/auth/login"; }, 3000);
       } else {
         await api.forgotPassword(email);
         setNotice("若邮箱存在，将收到重置邮件。");
       }
     } catch (err) {
-      if (err instanceof ApiError) setErrorMessage(err.message);
-      else setErrorMessage("操作失败");
+      setErrorMessage(getErrorMessage(err, "操作失败"));
       setErrorDialogOpen(true);
     } finally {
       setLoading(false);
@@ -45,14 +45,14 @@ function ForgotPasswordPageContent() {
   return (
     <main className="min-h-screen bg-[radial-gradient(circle_at_0%_0%,#FBEDEA_0%,#F5F1ED_35%,#F2F0EC_100%)]">
       <div className="max-w-md mx-auto px-4 py-24">
-        <div className="rounded-2xl border border-[#E5DED7] bg-white/90 p-6 shadow-[0_18px_40px_rgba(31,27,24,0.08)]">
+          <div className="rounded-[14px] border border-[#DDD8D3] bg-white/90 p-6 shadow-[0_18px_40px_rgba(31,27,24,0.08)]">
           <h1 className="text-2xl font-semibold text-[#1F1B18]">{isResetMode ? "重置密码" : "找回密码"}</h1>
           <form className="mt-6 space-y-4" onSubmit={onSubmit}>
             {isResetMode ? (
               <div>
                 <label className="block text-sm text-[#5E5650] mb-1">新密码</label>
                 <input
-                  className="w-full h-10 rounded-lg border border-[#E5DED7] px-3 text-sm outline-none focus:border-[#C8211B]"
+                  className="w-full h-10 rounded-[8px] border border-[#DDD8D3] px-3 text-sm outline-none focus:border-[#C8211B] focus:ring-2 focus:ring-[#C8211B]/10 transition-colors"
                   type="password"
                   value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
@@ -63,7 +63,7 @@ function ForgotPasswordPageContent() {
               <div>
                 <label className="block text-sm text-[#5E5650] mb-1">邮箱</label>
                 <input
-                  className="w-full h-10 rounded-lg border border-[#E5DED7] px-3 text-sm outline-none focus:border-[#C8211B]"
+                  className="w-full h-10 rounded-[8px] border border-[#DDD8D3] px-3 text-sm outline-none focus:border-[#C8211B] focus:ring-2 focus:ring-[#C8211B]/10 transition-colors"
                   type="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}

@@ -5,6 +5,7 @@ from app.services.generation.consistency import ConsistencyReport, ConsistencyIs
 from app.services.generation.langgraph_pipeline import (
     _node_volume_replan,
     _node_review,
+    _node_writer,
     _route_consistency,
     _route_after_confirmation,
     _route_finalize,
@@ -86,7 +87,7 @@ class _DummySnapshot:
 
 
 class _DummyQualityStore:
-    def list_reports(self, novel_id, scope, scope_id=None):
+    def list_reports(self, novel_id, scope, scope_id=None, novel_version_id=None):
         if scope == "volume" and scope_id == "1":
             return [
                 _DummyReport(
@@ -103,12 +104,12 @@ class _DummyQualityStore:
 
 
 class _DummyBibleStore:
-    def get_latest_snapshot(self, novel_id, volume_no):
+    def get_latest_snapshot(self, novel_id, volume_no, novel_version_id=None):
         if volume_no == 1:
             return _DummySnapshot({"chapter_end": 30, "avg_review_score": 0.62})
         return None
 
-    def get_chapter_constraints(self, novel_id, chapter_num):
+    def get_chapter_constraints(self, novel_id, chapter_num, novel_version_id=None):
         return {
             "unresolved_foreshadows": [
                 {"foreshadow_id": "F-001", "title": "神秘石碑", "planted_chapter": 28},
@@ -160,17 +161,32 @@ class _DummyReviewer:
         return (0.65 if "A文" in draft else 0.95), "审美反馈", []
 
 
-class TestNodeReview:
-    def test_review_selects_best_ab_candidate(self):
+
+
+class _AlwaysFailWriter:
+    def run(self, novel_id, chapter_num, outline, context, language, native_style_profile, provider, model):
+        variant = context.get("ab_variant") or "?"
+        raise RuntimeError(f"writer generation failed for chapter={chapter_num} provider={provider} model={model} variant={variant}")
+
+
+class TestNodeWriterFailures:
+    def test_writer_error_surfaces_both_ab_variant_details(self):
         state = _base_state(
-            current_chapter=3,
-            reviewer=_DummyReviewer(),
-            candidate_drafts=[{"variant": "A", "draft": "A文"}, {"variant": "B", "draft": "B文"}],
-            context={},
+            current_chapter=1,
+            strategy="web-novel",
+            writer=_AlwaysFailWriter(),
+            outline={"chapter_num": 1, "title": "开篇"},
+            context={"foo": "bar"},
             target_language="zh",
             native_style_profile="",
-            strategy="web-novel",
+            progress_callback=None,
         )
-        out = _node_review(state)
-        assert out["draft"] == "A文"
-        assert out["score"] > 0.7
+
+        with pytest.raises(RuntimeError) as exc_info:
+            _node_writer(state)
+
+        msg = str(exc_info.value)
+        assert "writer failed for both variants" in msg
+        assert "A=writer generation failed for chapter=1" in msg
+        assert "variant=A" in msg
+        assert "variant=B" in msg

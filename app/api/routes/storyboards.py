@@ -8,11 +8,12 @@ from datetime import datetime, timezone
 from difflib import SequenceMatcher
 
 import redis
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.api_errors import http_error
 from app.core.authz.deps import require_permission
 from app.core.authz.resources import load_storyboard_resource
 from app.core.authz.types import Permission, Principal
@@ -21,7 +22,7 @@ from app.core.database import get_db, resolve_novel
 from app.core.logging_config import log_event
 from app.prompts import render_prompt
 from app.core.time_utils import to_utc_iso_z
-from app.models.novel import Chapter, Novel
+from app.models.novel import ChapterVersion, Novel, NovelVersion
 from app.models.storyboard import (
     StoryboardAssertion,
     StoryboardCharacterPrompt,
@@ -37,6 +38,7 @@ from app.schemas.storyboard import (
     StoryboardCreateRequest,
     StoryboardDiffResponse,
     StoryboardGenerateResponse,
+    StoryboardGenerateRequest,
     StoryboardOptimizeResponse,
     StoryboardProjectResponse,
     StoryboardStylePresetsResponse,
@@ -68,6 +70,7 @@ from app.services.storyboard.service import (
     task_status_payload,
     update_task_state,
 )
+from app.services.rewrite.service import get_default_version_id
 from app.services.storyboard.style_catalog import list_style_presets, recommend_styles
 from app.services.scheduler.scheduler_service import (
     cancel_task as cancel_creation_task,
@@ -94,13 +97,14 @@ def _redis_key(task_id: str) -> str:
     return f"storyboard:task:{task_id}"
 
 
-def _to_project_response(p: StoryboardProject, novel_public_id: str) -> StoryboardProjectResponse:
+def _to_project_response(p: StoryboardProject, novel_public_id: str, novel_title: str | None = None) -> StoryboardProjectResponse:
     lanes = p.output_lanes if isinstance(p.output_lanes, list) else ["vertical_feed", "horizontal_cinematic"]
     cfg = project_config(p)
     return StoryboardProjectResponse(
         id=p.id,
         uuid=p.uuid,
         novel_id=novel_public_id,
+        novel_title=novel_title,
         status=p.status,
         target_episodes=p.target_episodes,
         target_episode_seconds=p.target_episode_seconds,
@@ -122,6 +126,7 @@ def _to_version_response(v: StoryboardVersion) -> StoryboardVersionResponse:
     return StoryboardVersionResponse(
         id=v.id,
         storyboard_project_id=v.storyboard_project_id,
+        source_novel_version_id=(int(v.source_novel_version_id) if v.source_novel_version_id is not None else None),
         version_no=v.version_no,
         parent_version_id=v.parent_version_id,
         lane=v.lane,
@@ -192,11 +197,11 @@ def _active_task_or_404(db: Session, project_id: int, task_id: str | None) -> St
         ).scalar_one_or_none()
         if row:
             return row
-        raise HTTPException(404, "Storyboard task not found")
+        raise http_error(404, "storyboard_task_not_found", "Storyboard task not found")
     row = get_latest_task(db, project_id)
     if row:
         return row
-    raise HTTPException(404, "Storyboard task not found")
+    raise http_error(404, "storyboard_task_not_found", "Storyboard task not found")
 
 
 @router.get("/style-presets", response_model=StoryboardStylePresetsResponse)
@@ -214,9 +219,12 @@ def get_storyboard_style_recommendations(
 ):
     novel = resolve_novel(db, req.novel_id)
     if not novel:
-        raise HTTPException(404, "Novel not found")
+        raise http_error(404, "novel_not_found", "Novel not found")
     rows = db.execute(
-        select(Chapter).where(Chapter.novel_id == novel.id).order_by(Chapter.chapter_num.asc()).limit(12)
+        select(ChapterVersion)
+        .where(ChapterVersion.novel_version_id == get_default_version_id(db, novel.id))
+        .order_by(ChapterVersion.chapter_num.asc())
+        .limit(12)
     ).scalars().all()
     chapter_text = " ".join([((c.summary or c.content or "")[:180]) for c in rows])
     return StoryboardStyleRecommendationResponse(
@@ -232,11 +240,18 @@ def get_storyboard_projects(
 ):
     rows = list_projects(db, principal.role, principal.user_uuid)
     novel_ids = {int(r.novel_id) for r in rows}
-    novel_map: dict[int, str] = {}
+    novel_map: dict[int, tuple[str, str]] = {}
     if novel_ids:
         novels = db.execute(select(Novel).where(Novel.id.in_(novel_ids))).scalars().all()
-        novel_map = {int(n.id): (n.uuid or str(n.id)) for n in novels}
-    return [_to_project_response(r, novel_map.get(int(r.novel_id), str(r.novel_id))) for r in rows]
+        novel_map = {int(n.id): (n.uuid or str(n.id), n.title or "") for n in novels}
+    return [
+        _to_project_response(
+            r,
+            novel_map.get(int(r.novel_id), (str(r.novel_id), ""))[0],
+            novel_map.get(int(r.novel_id), (str(r.novel_id), ""))[1],
+        )
+        for r in rows
+    ]
 
 
 @router.post("", response_model=StoryboardProjectResponse)
@@ -247,17 +262,18 @@ def create_storyboard_project(
 ):
     novel = resolve_novel(db, req.novel_id)
     if not novel:
-        raise HTTPException(404, "Novel not found")
+        raise http_error(404, "novel_not_found", "Novel not found")
     if novel.status != "completed":
-        raise HTTPException(409, "仅已完成小说可创建导演分镜项目")
+        raise http_error(409, "storyboard_create_novel_not_completed", "仅已完成小说可创建导演分镜项目")
     if not req.professional_mode:
-        raise HTTPException(400, "professional_mode 在 V1 必须为 true")
+        raise http_error(400, "professional_mode_required", "professional_mode 在 V1 必须为 true")
     if not req.copyright_assertion:
-        raise HTTPException(400, "请先确认改编权声明")
+        raise http_error(400, "copyright_assertion_required", "请先确认改编权声明")
 
     project = create_project(
         db,
         novel=novel,
+        source_novel_version_id=get_default_version_id(db, novel.id),
         owner_user_uuid=principal.user_uuid or "",
         target_episodes=req.target_episodes,
         target_episode_seconds=req.target_episode_seconds,
@@ -286,13 +302,14 @@ def create_storyboard_project(
 @router.post("/{project_id}/generate", response_model=StoryboardGenerateResponse)
 def generate_storyboard(
     project_id: int,
+    req: StoryboardGenerateRequest,
     request: Request,
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission(Permission.STORYBOARD_GENERATE, resource_loader=load_storyboard_resource)),
 ):
     project = get_project_or_404(db, project_id)
     if not project:
-        raise HTTPException(404, "Storyboard project not found")
+        raise http_error(404, "storyboard_project_not_found", "Storyboard project not found")
 
     active = db.execute(
         select(StoryboardTask)
@@ -303,10 +320,23 @@ def generate_storyboard(
         .limit(1)
     ).scalar_one_or_none()
     if active:
-        raise HTTPException(409, "已有进行中的分镜生成任务")
+        raise http_error(409, "storyboard_task_running", "已有进行中的分镜生成任务")
 
+    source_version = db.execute(
+        select(NovelVersion).where(
+            NovelVersion.id == int(req.novel_version_id),
+            NovelVersion.novel_id == project.novel_id,
+        )
+    ).scalar_one_or_none()
+    if not source_version:
+        raise http_error(400, "invalid_novel_version", "小说版本无效")
     lanes = normalize_lanes(project.output_lanes if isinstance(project.output_lanes, list) else None)
-    versions = create_generation_versions(db, project.id, lanes)
+    versions = create_generation_versions(
+        db,
+        project.id,
+        lanes,
+        source_novel_version_id=int(source_version.id),
+    )
     task = create_task_record(
         db,
         project_id=project.id,
@@ -322,6 +352,7 @@ def generate_storyboard(
         payload={
             "project_id": int(project.id),
             "version_ids": [int(v.id) for v in versions],
+            "novel_version_id": int(source_version.id),
             "task_db_id": int(task.id),
         },
     )
@@ -382,12 +413,17 @@ def pause_storyboard_task(
 ):
     row = _active_task_or_404(db, project_id, task_id)
     if row.run_state not in {"running", "retrying", "submitted"}:
-        raise HTTPException(409, f"当前状态 {row.run_state} 不支持暂停")
+        raise http_error(409, "storyboard_task_state_not_pausable", f"当前状态 {row.run_state} 不支持暂停")
     try:
         pause_creation_task(db, public_id=row.task_id, user_uuid=principal.user_uuid or "")
-    except ValueError:
+    except ValueError as exc:
         db.rollback()
-        raise HTTPException(409, "当前任务不可暂停")
+        code = str(exc)
+        if code == "task_not_found":
+            raise http_error(404, "task_not_found", "Task not found")
+        if code == "task_not_active":
+            raise http_error(409, "task_not_active", "Task is not active")
+        raise http_error(409, "task_not_pausable", "当前任务不可暂停")
     update_task_state(db, row, status="paused", run_state="paused", phase="paused", message="分镜任务已暂停")
     db.commit()
     return StoryboardActionResponse(ok=True, storyboard_project_id=project_id, task_id=row.task_id, run_state=row.run_state)
@@ -402,12 +438,17 @@ def resume_storyboard_task(
 ):
     row = _active_task_or_404(db, project_id, task_id)
     if row.run_state != "paused":
-        raise HTTPException(409, f"当前状态 {row.run_state} 不支持恢复")
+        raise http_error(409, "storyboard_task_state_not_resumable", f"当前状态 {row.run_state} 不支持恢复")
     try:
         resume_creation_task(db, public_id=row.task_id, user_uuid=principal.user_uuid or "")
-    except ValueError:
+    except ValueError as exc:
         db.rollback()
-        raise HTTPException(409, "当前任务不可恢复")
+        code = str(exc)
+        if code == "task_not_found":
+            raise http_error(404, "task_not_found", "Task not found")
+        if code == "task_not_active":
+            raise http_error(409, "task_not_active", "Task is not active")
+        raise http_error(409, "task_not_resumable", "当前任务不可恢复")
     update_task_state(db, row, status="running", run_state="running", phase="resume", message="分镜任务已恢复")
     db.commit()
     return StoryboardActionResponse(ok=True, storyboard_project_id=project_id, task_id=row.task_id, run_state=row.run_state)
@@ -422,12 +463,17 @@ def cancel_storyboard_task(
 ):
     row = _active_task_or_404(db, project_id, task_id)
     if row.run_state in {"completed", "failed", "cancelled"}:
-        raise HTTPException(409, f"当前状态 {row.run_state} 不支持取消")
+        raise http_error(409, "storyboard_task_state_not_cancellable", f"当前状态 {row.run_state} 不支持取消")
     try:
         cancel_creation_task(db, public_id=row.task_id, user_uuid=principal.user_uuid or "")
-    except ValueError:
+    except ValueError as exc:
         db.rollback()
-        raise HTTPException(404, "Task not found")
+        code = str(exc)
+        if code == "task_not_found":
+            raise http_error(404, "task_not_found", "Task not found")
+        if code == "task_not_active":
+            raise http_error(409, "task_not_active", "Task is not active")
+        raise http_error(409, "task_not_cancellable", "当前任务不可取消")
     update_task_state(db, row, status="cancelled", run_state="cancelled", phase="cancelled", message="分镜任务已取消")
     project = get_project_or_404(db, project_id)
     if project:
@@ -444,13 +490,28 @@ def retry_storyboard_task(
 ):
     project = get_project_or_404(db, project_id)
     if not project:
-        raise HTTPException(404, "Storyboard project not found")
+        raise http_error(404, "storyboard_project_not_found", "Storyboard project not found")
     latest = get_latest_task(db, project_id)
     if latest and latest.status in RUNNING_STATES:
-        raise HTTPException(409, "已有进行中的分镜任务")
+        raise http_error(409, "storyboard_task_running", "已有进行中的分镜任务")
+
+    source_novel_version_id = get_default_version_id(db, project.novel_id)
+    latest_version = db.execute(
+        select(StoryboardVersion)
+        .where(StoryboardVersion.storyboard_project_id == project.id)
+        .order_by(StoryboardVersion.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if latest_version and latest_version.source_novel_version_id:
+        source_novel_version_id = int(latest_version.source_novel_version_id)
 
     lanes = normalize_lanes(project.output_lanes if isinstance(project.output_lanes, list) else None)
-    versions = create_generation_versions(db, project.id, lanes)
+    versions = create_generation_versions(
+        db,
+        project.id,
+        lanes,
+        source_novel_version_id=source_novel_version_id,
+    )
     task = create_task_record(
         db,
         project_id=project.id,
@@ -465,6 +526,7 @@ def retry_storyboard_task(
         payload={
             "project_id": int(project.id),
             "version_ids": [int(v.id) for v in versions],
+            "novel_version_id": int(source_novel_version_id),
             "task_db_id": int(task.id),
         },
     )
@@ -504,7 +566,7 @@ def activate_storyboard_version(
         )
     ).scalar_one_or_none()
     if not version:
-        raise HTTPException(404, "Version not found")
+        raise http_error(404, "storyboard_version_not_found", "Version not found")
     versions = db.execute(
         select(StoryboardVersion).where(StoryboardVersion.storyboard_project_id == project_id)
     ).scalars().all()
@@ -531,20 +593,20 @@ def finalize_storyboard_version(
         )
     ).scalar_one_or_none()
     if not version:
-        raise HTTPException(404, "Version not found")
+        raise http_error(404, "storyboard_version_not_found", "Version not found")
     if version.status != "completed":
-        raise HTTPException(409, "仅 completed 版本可定稿")
+        raise http_error(409, "storyboard_finalize_requires_completed", "仅 completed 版本可定稿")
     prompts_count = db.execute(
         select(StoryboardCharacterPrompt.id)
         .where(StoryboardCharacterPrompt.storyboard_version_id == version_id)
         .limit(1)
     ).scalar_one_or_none()
     if prompts_count is None:
-        raise HTTPException(409, "角色主形象提示词尚未生成，暂不可定稿")
+        raise http_error(409, "storyboard_finalize_character_prompt_missing", "角色主形象提示词尚未生成，暂不可定稿")
     report = version.quality_report_json if isinstance(version.quality_report_json, dict) else {}
     missing_identity_fields_count = int(report.get("missing_identity_fields_count") or 0)
     if missing_identity_fields_count > 0:
-        raise HTTPException(409, "角色身份字段门禁未通过，暂不可定稿")
+        raise http_error(409, "storyboard_finalize_identity_gate_failed", "角色身份字段门禁未通过，暂不可定稿")
 
     versions = db.execute(
         select(StoryboardVersion).where(StoryboardVersion.storyboard_project_id == project_id)
@@ -594,14 +656,14 @@ def list_storyboard_shots(
             .order_by(StoryboardVersion.id.desc())
         ).scalar_one_or_none()
         if not version:
-            raise HTTPException(404, "No default storyboard version")
+            raise http_error(404, "storyboard_default_version_not_found", "No default storyboard version")
     else:
         version = db.execute(
             select(StoryboardVersion)
             .where(StoryboardVersion.id == version_id, StoryboardVersion.storyboard_project_id == project_id)
         ).scalar_one_or_none()
         if not version:
-            raise HTTPException(404, "Version not found")
+            raise http_error(404, "storyboard_version_not_found", "Version not found")
 
     stmt = select(StoryboardShot).where(StoryboardShot.storyboard_version_id == version.id)
     if episode_no is not None:
@@ -622,7 +684,7 @@ def list_storyboard_character_prompts(
 ):
     project = get_project_or_404(db, project_id)
     if not project:
-        raise HTTPException(404, "Storyboard project not found")
+        raise http_error(404, "storyboard_project_not_found", "Storyboard project not found")
     version: StoryboardVersion | None = None
     if version_id is None:
         version = db.execute(
@@ -631,7 +693,7 @@ def list_storyboard_character_prompts(
             .limit(1)
         ).scalar_one_or_none()
         if not version:
-            raise HTTPException(404, "No default storyboard version")
+            raise http_error(404, "storyboard_default_version_not_found", "No default storyboard version")
         version_id = version.id
     rows = list_character_prompts(db, project_id=project_id, version_id=version_id, lane=lane)
     return [_to_character_prompt_response(r) for r in rows]
@@ -647,7 +709,7 @@ def regenerate_storyboard_character_prompts(
 ):
     project = get_project_or_404(db, project_id)
     if not project:
-        raise HTTPException(404, "Storyboard project not found")
+        raise http_error(404, "storyboard_project_not_found", "Storyboard project not found")
     if version_id is None:
         version = db.execute(
             select(StoryboardVersion)
@@ -655,7 +717,7 @@ def regenerate_storyboard_character_prompts(
             .limit(1)
         ).scalar_one_or_none()
         if not version:
-            raise HTTPException(404, "No default storyboard version")
+            raise http_error(404, "storyboard_default_version_not_found", "No default storyboard version")
     else:
         version = db.execute(
             select(StoryboardVersion).where(
@@ -664,12 +726,12 @@ def regenerate_storyboard_character_prompts(
             )
         ).scalar_one_or_none()
         if not version:
-            raise HTTPException(404, "Version not found")
+            raise http_error(404, "storyboard_version_not_found", "Version not found")
     if lane and version.lane != lane:
-        raise HTTPException(400, "lane 与 version 不匹配")
+        raise http_error(400, "storyboard_lane_version_mismatch", "lane 与 version 不匹配")
     novel = db.execute(select(Novel).where(Novel.id == project.novel_id)).scalar_one_or_none()
     if not novel:
-        raise HTTPException(404, "Novel not found")
+        raise http_error(404, "novel_not_found", "Novel not found")
     report = compose_character_prompts_for_version(
         db=db,
         project=project,
@@ -714,11 +776,11 @@ def update_storyboard_shot(
         .where(StoryboardShot.id == shot_id, StoryboardVersion.storyboard_project_id == project_id)
     ).scalar_one_or_none()
     if not shot:
-        raise HTTPException(404, "Shot not found")
+        raise http_error(404, "storyboard_shot_not_found", "Shot not found")
 
     version = db.execute(select(StoryboardVersion).where(StoryboardVersion.id == shot.storyboard_version_id)).scalar_one_or_none()
     if version and bool(version.is_final):
-        raise HTTPException(409, "定稿版本不可编辑")
+        raise http_error(409, "storyboard_final_version_readonly", "定稿版本不可编辑")
 
     for key, value in req.model_dump(exclude_unset=True).items():
         setattr(shot, key, value)
@@ -741,9 +803,9 @@ def optimize_storyboard_version(
         )
     ).scalar_one_or_none()
     if not version:
-        raise HTTPException(404, "Version not found")
+        raise http_error(404, "storyboard_version_not_found", "Version not found")
     if bool(version.is_final):
-        raise HTTPException(409, "定稿版本不可优化")
+        raise http_error(409, "storyboard_final_version_not_optimizable", "定稿版本不可优化")
 
     shots = db.execute(
         select(StoryboardShot)
@@ -751,7 +813,7 @@ def optimize_storyboard_version(
         .order_by(StoryboardShot.episode_no.asc(), StoryboardShot.scene_no.asc(), StoryboardShot.shot_no.asc())
     ).scalars().all()
     if not shots:
-        raise HTTPException(404, "No shots found")
+        raise http_error(404, "storyboard_shots_not_found", "No shots found")
 
     report = version.quality_report_json if isinstance(version.quality_report_json, dict) else {}
     suggestions = report.get("rewrite_suggestions") or [
@@ -780,6 +842,12 @@ def storyboard_diff(
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.STORYBOARD_READ, resource_loader=load_storyboard_resource)),
 ):
+    for vid in (version_id, compare_to):
+        owner = db.execute(
+            select(StoryboardVersion.storyboard_project_id).where(StoryboardVersion.id == vid)
+        ).scalar_one_or_none()
+        if owner != project_id:
+            raise http_error(404, "storyboard_version_not_found", f"Version {vid} not found for this project")
     left = db.execute(
         select(StoryboardShot)
         .where(StoryboardShot.storyboard_version_id == compare_to)
@@ -791,7 +859,7 @@ def storyboard_diff(
         .order_by(StoryboardShot.episode_no.asc(), StoryboardShot.scene_no.asc(), StoryboardShot.shot_no.asc())
     ).scalars().all()
     if not left or not right:
-        raise HTTPException(404, "version not found or empty")
+        raise http_error(404, "storyboard_diff_version_not_found_or_empty", "version not found or empty")
 
     left_map = {(s.episode_no, s.scene_no, s.shot_no): s for s in left}
     right_map = {(s.episode_no, s.scene_no, s.shot_no): s for s in right}
@@ -846,12 +914,12 @@ def export_storyboard_csv(
         )
     ).scalar_one_or_none()
     if not version:
-        raise HTTPException(404, "Version not found")
+        raise http_error(404, "storyboard_version_not_found", "Version not found")
     if not bool(version.is_final):
-        raise HTTPException(409, "仅定稿版本允许导出")
+        raise http_error(409, "storyboard_export_requires_final", "仅定稿版本允许导出")
     report = version.quality_report_json if isinstance(version.quality_report_json, dict) else {}
     if int(report.get("missing_identity_fields_count") or 0) > 0:
-        raise HTTPException(409, "角色身份字段门禁未通过，暂不可导出")
+        raise http_error(409, "storyboard_export_identity_gate_failed", "角色身份字段门禁未通过，暂不可导出")
 
     shots = db.execute(
         select(StoryboardShot)
@@ -859,7 +927,7 @@ def export_storyboard_csv(
         .order_by(StoryboardShot.episode_no.asc(), StoryboardShot.scene_no.asc(), StoryboardShot.shot_no.asc())
     ).scalars().all()
     if not shots:
-        raise HTTPException(404, "No shots found")
+        raise http_error(404, "storyboard_shots_not_found", "No shots found")
 
     content = export_shots_to_csv(shots)
     filename = f"storyboard-p{project_id}-v{version.version_no}-{version.lane}.csv"
@@ -891,22 +959,22 @@ def export_storyboard_characters(
         )
     ).scalar_one_or_none()
     if not version:
-        raise HTTPException(404, "Version not found")
+        raise http_error(404, "storyboard_version_not_found", "Version not found")
     if not bool(version.is_final):
-        raise HTTPException(409, "仅定稿版本允许导出")
+        raise http_error(409, "storyboard_export_requires_final", "仅定稿版本允许导出")
     if int((version.quality_report_json or {}).get("missing_identity_fields_count") or 0) > 0:
-        raise HTTPException(409, "角色身份字段门禁未通过，暂不可导出")
+        raise http_error(409, "storyboard_export_identity_gate_failed", "角色身份字段门禁未通过，暂不可导出")
     lane_filter = lane or version.lane
     rows = list_character_prompts(db, project_id=project_id, version_id=version_id, lane=lane_filter)
     if not rows:
-        raise HTTPException(404, "No character prompts found")
+        raise http_error(404, "storyboard_character_prompts_not_found", "No character prompts found")
 
     fmt = str(format or "csv").strip().lower()
     if fmt == "json":
         payload = [_to_character_prompt_response(r).model_dump() for r in rows]
         return payload
     if fmt != "csv":
-        raise HTTPException(400, "format must be csv or json")
+        raise http_error(400, "storyboard_export_format_invalid", "format must be csv or json")
 
     content = export_character_prompts_csv(rows)
     filename = f"character-prompts-p{project_id}-v{version.version_no}-{lane_filter}.csv"

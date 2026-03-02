@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { Film, PlayCircle, Sparkles } from "lucide-react";
 import { api, StoryboardProject } from "@/lib/api";
+import { formatStoryboardLane } from "@/lib/display";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 
@@ -18,11 +19,14 @@ const STATUS_TEXT: Record<string, string> = {
 export default function StoryboardsPage() {
   const [items, setItems] = useState<StoryboardProject[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     void (async () => {
       try {
         setItems(await api.listStoryboardProjects());
+      } catch {
+        setError("加载失败，请稍后重试");
       } finally {
         setLoading(false);
       }
@@ -40,7 +44,14 @@ export default function StoryboardsPage() {
 
       {loading ? <p className="text-sm text-[#7E756D]">加载中...</p> : null}
 
-      {!loading && items.length === 0 ? (
+      {!loading && error ? (
+        <Card className="p-8 text-center">
+          <p className="text-[#C4372D] mb-3">{error}</p>
+          <Button variant="secondary" onClick={() => window.location.reload()}>重试</Button>
+        </Card>
+      ) : null}
+
+      {!loading && !error && items.length === 0 ? (
         <Card className="p-8 text-center">
           <Film className="w-10 h-10 text-[#C8211B] mx-auto mb-3" />
           <p className="text-[#3A3A3C]">暂无分镜项目</p>
@@ -54,10 +65,10 @@ export default function StoryboardsPage() {
             <div className="flex items-center justify-between gap-3">
               <div>
                 <p className="text-sm text-[#8E8379]">项目 #{p.id}</p>
-                <h2 className="text-lg font-semibold text-[#1F1B18]">小说 {p.novel_id}</h2>
+                <h2 className="text-lg font-semibold text-[#1F1B18]">{p.novel_title || `小说 ${p.novel_id}`}</h2>
               </div>
               <span className="text-xs rounded-full border border-[#E5DED7] px-2.5 py-1 bg-[#FFFDFB] text-[#6F665F]">
-                {STATUS_TEXT[p.status] || p.status}
+                {STATUS_TEXT[p.status] || "未知状态"}
               </span>
             </div>
 
@@ -65,7 +76,7 @@ export default function StoryboardsPage() {
               <span>目标集数：{p.target_episodes}</span>
               <span>单集时长：{p.target_episode_seconds}s</span>
               <span>风格：{p.style_profile || "跟随小说"}</span>
-              <span>模板：{p.output_lanes.join(" + ")}</span>
+              <span>模板：{p.output_lanes.map((lane) => formatStoryboardLane(lane)).join(" + ")}</span>
             </div>
 
             <div className="flex items-center gap-2">

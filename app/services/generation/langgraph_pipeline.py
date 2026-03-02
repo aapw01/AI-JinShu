@@ -18,7 +18,7 @@ from app.core.strategy import get_model_for_stage
 from app.core.tokens import estimate_tokens
 from app.core.llm_usage import snapshot_usage
 from app.prompts import render_prompt
-from app.models.novel import Chapter, GenerationTask, Novel, GenerationCheckpoint, NovelFeedback, StoryForeshadow
+from app.models.novel import ChapterVersion, GenerationTask, Novel, GenerationCheckpoint, NovelFeedback, StoryForeshadow
 from app.services.generation.agents import (
     FactExtractorAgent,
     FinalizerAgent,
@@ -56,6 +56,7 @@ from app.services.memory.story_bible import StoryBibleStore, CheckpointStore, Qu
 
 class GenerationState(TypedDict, total=False):
     novel_id: int
+    novel_version_id: int
     num_chapters: int
     target_chapters: int
     min_total_chapters: int
@@ -151,6 +152,8 @@ def _progress(state: GenerationState, step: str, chapter: int, pct: float, msg: 
         msg,
         payload,
     )
+    pct = max(pct, float(state.get("_last_reported_progress") or 0.0))
+    state["_last_reported_progress"] = pct
     if cb:
         if chapter > 0:
             payload.setdefault("volume_no", _volume_no_for_chapter(state, chapter))
@@ -163,7 +166,9 @@ def _chapter_progress(state: GenerationState, phase_ratio: float) -> float:
     idx = max(0, state["current_chapter"] - state["start_chapter"])
     base_pct = 20 + (idx / total) * 70
     span = 70 / total
-    return base_pct + span * phase_ratio
+    raw = base_pct + span * phase_ratio
+    prev = float(state.get("_last_reported_progress") or 0.0)
+    return max(raw, prev)
 
 
 def _is_volume_start(state: GenerationState, chapter: int) -> bool:
@@ -194,7 +199,11 @@ def _build_closure_state(state: GenerationState) -> dict[str, Any]:
     remaining_ratio = remaining / max(target_chapters, 1)
     phase_mode = _closure_phase_mode(remaining_ratio)
 
-    constraints = state["bible_store"].get_chapter_constraints(state["novel_id"], chapter_num)
+    constraints = state["bible_store"].get_chapter_constraints(
+        state["novel_id"],
+        chapter_num,
+        novel_version_id=state.get("novel_version_id"),
+    )
     unresolved_foreshadows = constraints.get("unresolved_foreshadows") or []
     resolved_foreshadows = 0
     total_foreshadows = 0
@@ -560,6 +569,7 @@ def _write_longform_artifacts(
                 if isinstance(c, dict) and c.get("name"):
                     bible.upsert_entity(
                         novel_id=state["novel_id"],
+                        novel_version_id=state.get("novel_version_id"),
                         entity_type="character",
                         name=str(c["name"]),
                         status="alive",
@@ -570,6 +580,7 @@ def _write_longform_artifacts(
     event_id = f"EV-{chapter_num:04d}"
     bible.add_event(
         novel_id=state["novel_id"],
+        novel_version_id=state.get("novel_version_id"),
         event_id=event_id,
         chapter_num=chapter_num,
         title=outline.get("title") or f"第{chapter_num}章",
@@ -590,6 +601,7 @@ def _write_longform_artifacts(
             fs_id = matched[0] if matched else f"FS-{chapter_num:04d}-{idx}"
             bible.upsert_foreshadow(
                 novel_id=state["novel_id"],
+                novel_version_id=state.get("novel_version_id"),
                 foreshadow_id=fs_id,
                 title=text[:200],
                 planted_chapter=chapter_num,
@@ -603,6 +615,7 @@ def _write_longform_artifacts(
         for fs_id in matched[:5]:
             bible.upsert_foreshadow(
                 novel_id=state["novel_id"],
+                novel_version_id=state.get("novel_version_id"),
                 foreshadow_id=fs_id,
                 title=payoff[:200],
                 planted_chapter=max(1, chapter_num - 1),
@@ -618,6 +631,7 @@ def _write_longform_artifacts(
         eid = str(ev.get("id") or f"EVX-{chapter_num:04d}-{abs(hash(str(ev))) % 100000:05d}")[:64]
         bible.add_event(
             novel_id=state["novel_id"],
+            novel_version_id=state.get("novel_version_id"),
             event_id=eid,
             chapter_num=chapter_num,
             title=str(ev.get("title") or "")[:255] or f"第{chapter_num}章事件",
@@ -635,6 +649,7 @@ def _write_longform_artifacts(
             continue
         entity = bible.upsert_entity(
             novel_id=state["novel_id"],
+            novel_version_id=state.get("novel_version_id"),
             entity_type=str(ent.get("entity_type") or "unknown")[:50],
             name=str(ent.get("name"))[:255],
             status=str(ent.get("status") or "active")[:50],
@@ -653,6 +668,7 @@ def _write_longform_artifacts(
         if entity is None:
             entity = bible.upsert_entity(
                 novel_id=state["novel_id"],
+                novel_version_id=state.get("novel_version_id"),
                 entity_type="unknown",
                 name=entity_name[:255],
                 status="active",
@@ -661,6 +677,7 @@ def _write_longform_artifacts(
             )
         bible.add_fact(
             novel_id=state["novel_id"],
+            novel_version_id=state.get("novel_version_id"),
             entity_id=entity.id,
             fact_type=str(fact.get("fact_type") or "attribute")[:100],
             value_json={"value": fact.get("value"), "chapter_num": chapter_num},
@@ -671,6 +688,7 @@ def _write_longform_artifacts(
     for marker in _extract_timeline_markers(final_content):
         bible.add_event(
             novel_id=state["novel_id"],
+            novel_version_id=state.get("novel_version_id"),
             event_id=f"TL-{chapter_num:04d}-{abs(hash(marker)) % 10000:04d}",
             chapter_num=chapter_num,
             title=f"时间标记:{marker}",
@@ -681,6 +699,7 @@ def _write_longform_artifacts(
     for item_name in _extract_item_mentions(final_content):
         item_entity = bible.upsert_entity(
             novel_id=state["novel_id"],
+            novel_version_id=state.get("novel_version_id"),
             entity_type="item",
             name=item_name,
             status="active",
@@ -689,6 +708,7 @@ def _write_longform_artifacts(
         )
         bible.add_fact(
             novel_id=state["novel_id"],
+            novel_version_id=state.get("novel_version_id"),
             entity_id=item_entity.id,
             fact_type="mentioned_in_chapter",
             value_json={"chapter_num": chapter_num, "context": final_content[:300]},
@@ -696,7 +716,11 @@ def _write_longform_artifacts(
         )
 
     # Relationship signal writeback by character co-occurrence.
-    chars = bible.list_entities(state["novel_id"], entity_type="character")
+    chars = bible.list_entities(
+        state["novel_id"],
+        novel_version_id=state.get("novel_version_id"),
+        entity_type="character",
+    )
     appeared = [c for c in chars if c.name and c.name in final_content]
     for i in range(len(appeared)):
         for j in range(i + 1, len(appeared)):
@@ -704,6 +728,7 @@ def _write_longform_artifacts(
             b = appeared[j]
             bible.add_event(
                 novel_id=state["novel_id"],
+                novel_version_id=state.get("novel_version_id"),
                 event_id=f"REL-{chapter_num:04d}-{a.id}-{b.id}",
                 chapter_num=chapter_num,
                 title=f"{a.name}/{b.name} 关系信号",
@@ -722,6 +747,7 @@ def _write_longform_artifacts(
     ) else "warning"
     quality.add_report(
         novel_id=state["novel_id"],
+        novel_version_id=state.get("novel_version_id"),
         scope="chapter",
         scope_id=str(chapter_num),
         metrics_json={
@@ -760,7 +786,11 @@ def _write_longform_artifacts(
     volume_size = max(int(state.get("volume_size") or 30), 1)
     is_volume_end = (chapter_num - state.get("start_chapter", 1) + 1) % volume_size == 0 or chapter_num == state["end_chapter"]
     if is_volume_end:
-        chapter_reports = quality.list_reports(novel_id=state["novel_id"], scope="chapter")
+        chapter_reports = quality.list_reports(
+            novel_id=state["novel_id"],
+            novel_version_id=state.get("novel_version_id"),
+            scope="chapter",
+        )
         current_volume_reports = [r for r in chapter_reports if int((r.metrics_json or {}).get("volume_no") or 0) == volume_no]
         review_scores = [
             float((r.metrics_json or {}).get("review_score") or 0.0)
@@ -820,6 +850,7 @@ def _write_longform_artifacts(
 
         bible.save_snapshot(
             novel_id=state["novel_id"],
+            novel_version_id=state.get("novel_version_id"),
             volume_no=volume_no,
             chapter_end=chapter_num,
             snapshot_json={
@@ -836,6 +867,7 @@ def _write_longform_artifacts(
         )
         quality.add_report(
             novel_id=state["novel_id"],
+            novel_version_id=state.get("novel_version_id"),
             scope="volume",
             scope_id=str(volume_no),
             metrics_json={
@@ -963,7 +995,7 @@ def _node_outline(state: GenerationState) -> GenerationState:
         out_provider,
         out_model,
     )
-    save_full_outlines(state["novel_id"], full_outlines)
+    save_full_outlines(state["novel_id"], full_outlines, novel_version_id=state.get("novel_version_id"))
     _progress(state, "full_outline_ready", 0, 20, "全书章节大纲已确定", {"current_phase": "outline_ready", "total_chapters": state["num_chapters"]})
     return {"full_outlines": full_outlines}
 
@@ -988,6 +1020,7 @@ def _node_volume_replan(state: GenerationState) -> GenerationState:
     if previous_volume > 0:
         prev_reports = state["quality_store"].list_reports(
             novel_id=state["novel_id"],
+            novel_version_id=state.get("novel_version_id"),
             scope="volume",
             scope_id=str(previous_volume),
         )
@@ -1038,7 +1071,11 @@ def _node_volume_replan(state: GenerationState) -> GenerationState:
         finally:
             db.close()
 
-    constraints = state["bible_store"].get_chapter_constraints(state["novel_id"], chapter_num)
+    constraints = state["bible_store"].get_chapter_constraints(
+        state["novel_id"],
+        chapter_num,
+        novel_version_id=state.get("novel_version_id"),
+    )
     carry_over = [
         {
             "foreshadow_id": str(item.get("foreshadow_id") or ""),
@@ -1206,7 +1243,14 @@ def _node_load_context(state: GenerationState) -> GenerationState:
     db = SessionLocal()
     try:
         _progress(state, "context", chapter_num, _chapter_progress(state, 0.10), "加载分层上下文...", {"current_phase": "chapter_writing", "total_chapters": state["num_chapters"]})
-        ctx = build_chapter_context(state["novel_id"], chapter_num, state["prewrite"], outline, db=db)
+        ctx = build_chapter_context(
+            state["novel_id"],
+            state.get("novel_version_id"),
+            chapter_num,
+            state["prewrite"],
+            outline,
+            db=db,
+        )
         ctx["prewrite"] = state["prewrite"]
         ctx["chapter_outline"] = outline
         ctx["volume_plan"] = state.get("volume_plan") or {}
@@ -1229,12 +1273,27 @@ def _node_load_context(state: GenerationState) -> GenerationState:
                 "streak": int(state.get("low_progress_streak") or 0),
             },
             "HardConstraints": {
-                "consistency": state["bible_store"].get_chapter_constraints(state["novel_id"], chapter_num, db=db),
+                "consistency": state["bible_store"].get_chapter_constraints(
+                    state["novel_id"],
+                    chapter_num,
+                    novel_version_id=state.get("novel_version_id"),
+                    db=db,
+                ),
             },
         }
         ctx["hard_constraints"] = ctx["prompt_contract"]["HardConstraints"]["consistency"]
-        ctx["character_states"] = state["char_mgr"].get_states(state["novel_id"], chapter_num, db=db)
-        ctx["summaries"] = state["summary_mgr"].get_summaries_before(state["novel_id"], chapter_num, db=db)
+        ctx["character_states"] = state["char_mgr"].get_states(
+            state["novel_id"],
+            chapter_num,
+            db=db,
+            novel_version_id=state.get("novel_version_id"),
+        )
+        ctx["summaries"] = state["summary_mgr"].get_summaries_before(
+            state["novel_id"],
+            state.get("novel_version_id"),
+            chapter_num,
+            db=db,
+        )
     finally:
         db.close()
     return {
@@ -1352,7 +1411,10 @@ def _node_save_blocked(state: GenerationState) -> GenerationState:
     )
     db = SessionLocal()
     try:
-        existing_stmt = select(Chapter).where(Chapter.novel_id == state["novel_id"], Chapter.chapter_num == chapter_num)
+        existing_stmt = select(ChapterVersion).where(
+            ChapterVersion.novel_version_id == state.get("novel_version_id"),
+            ChapterVersion.chapter_num == chapter_num,
+        )
         existing = db.execute(existing_stmt).scalar_one_or_none()
         payload = {
             "title": chapter_title,
@@ -1365,13 +1427,20 @@ def _node_save_blocked(state: GenerationState) -> GenerationState:
             for k, v in payload.items():
                 setattr(existing, k, v)
         else:
-            db.add(Chapter(novel_id=state["novel_id"], chapter_num=chapter_num, **payload))
+            db.add(
+                ChapterVersion(
+                    novel_version_id=state.get("novel_version_id"),
+                    chapter_num=chapter_num,
+                    **payload,
+                )
+            )
         db.commit()
     finally:
         db.close()
     volume_no = _volume_no_for_chapter(state, chapter_num)
     state["quality_store"].add_report(
         novel_id=state["novel_id"],
+        novel_version_id=state.get("novel_version_id"),
         scope="chapter",
         scope_id=str(chapter_num),
         metrics_json={
@@ -1399,6 +1468,33 @@ def _node_save_blocked(state: GenerationState) -> GenerationState:
 
 
 def _node_writer(state: GenerationState) -> GenerationState:
+    def _is_invalid_draft(text: str) -> bool:
+        t = str(text or "").strip().lower()
+        if not t:
+            return True
+        return ("content generation failed" in t) or t.startswith("[chapter ")
+
+    def _safe_write(
+        chapter_num_: int,
+        outline_: dict[str, Any],
+        ctx_: dict[str, Any],
+        provider_: str | None,
+        model_: str | None,
+    ) -> str:
+        draft = state["writer"].run(
+            state["novel_id"],
+            chapter_num_,
+            outline_,
+            ctx_,
+            state["target_language"],
+            state["native_style_profile"],
+            provider_,
+            model_,
+        )
+        if _is_invalid_draft(draft):
+            raise RuntimeError("writer returned invalid placeholder draft")
+        return draft
+
     chapter_num = state["current_chapter"]
     attempt = state.get("review_attempt", 0) + 1
     _progress(state, "writer", chapter_num, _chapter_progress(state, 0.35), f"写作第{chapter_num}章（尝试{attempt}）...", {"current_phase": "chapter_writing", "total_chapters": state["num_chapters"]})
@@ -1409,39 +1505,62 @@ def _node_writer(state: GenerationState) -> GenerationState:
     ctx_a["ab_goal"] = "稳健推进主线，保持事实一致。"
     if pacing_mode in {"accelerated", "closing_accelerated"}:
         ctx_a["ab_goal"] = "加速推进主线，减少铺垫，必须输出明确冲突升级与阶段兑现。"
-    draft_a = state["writer"].run(
-        state["novel_id"],
-        chapter_num,
-        state["outline"],
-        ctx_a,
-        state["target_language"],
-        state["native_style_profile"],
-        w_provider,
-        w_model,
-    )
-    ctx_b = dict(state["context"])
-    ctx_b["ab_variant"] = "B"
-    ctx_b["ab_goal"] = "增强情绪张力和节奏反转，保持硬约束不变。"
-    if pacing_mode in {"accelerated", "closing_accelerated"}:
-        ctx_b["ab_goal"] = "强化反转与高压冲突，提升推进效率并压缩无效叙述。"
-    draft_b = state["writer"].run(
-        state["novel_id"],
-        chapter_num,
-        state["outline"],
-        ctx_b,
-        state["target_language"],
-        state["native_style_profile"],
-        w_provider,
-        w_model,
-    )
+    def _attempt_ab_write():
+        _draft_a = ""
+        _err_a: Exception | None = None
+        try:
+            _draft_a = _safe_write(chapter_num, state["outline"], ctx_a, w_provider, w_model)
+        except Exception as exc:
+            _err_a = exc
+
+        if _draft_a:
+            return _draft_a, "", _err_a, None
+
+        ctx_b = dict(state["context"])
+        ctx_b["ab_variant"] = "B"
+        ctx_b["ab_goal"] = "增强情绪张力和节奏反转，保持硬约束不变。"
+        if pacing_mode in {"accelerated", "closing_accelerated"}:
+            ctx_b["ab_goal"] = "强化反转与高压冲突，提升推进效率并压缩无效叙述。"
+        _draft_b = ""
+        _err_b: Exception | None = None
+        try:
+            _draft_b = _safe_write(chapter_num, state["outline"], ctx_b, w_provider, w_model)
+        except Exception as exc:
+            _err_b = exc
+        return _draft_a, _draft_b, _err_a, _err_b
+
+    _NODE_WRITER_MAX_ROUNDS = 2
+    _NODE_WRITER_ROUND_DELAY = 15.0
+    draft_a = ""
+    draft_b = ""
+    err_a: Exception | None = None
+    err_b: Exception | None = None
+    for _round in range(_NODE_WRITER_MAX_ROUNDS):
+        draft_a, draft_b, err_a, err_b = _attempt_ab_write()
+        if draft_a or draft_b:
+            break
+        if _round < _NODE_WRITER_MAX_ROUNDS - 1:
+            import logging as _lg
+            _lg.getLogger(__name__).warning(
+                "writer AB both failed round=%s, retrying in %.0fs: A=%s B=%s",
+                _round + 1, _NODE_WRITER_ROUND_DELAY, err_a, err_b,
+            )
+            import time as _time
+            _time.sleep(_NODE_WRITER_ROUND_DELAY)
+
+    if not draft_a and not draft_b:
+        raise RuntimeError(f"writer failed for both variants: A={err_a}, B={err_b}")
+
     candidates = [
-        {"variant": "A", "draft": draft_a},
-        {"variant": "B", "draft": draft_b},
+        {"variant": "A", "draft": draft_a} if draft_a else None,
+        {"variant": "B", "draft": draft_b} if draft_b else None,
     ]
+    candidates = [c for c in candidates if c]
     usage = snapshot_usage()
     input_tokens = int(usage.get("input_tokens") or state["total_input_tokens"] or 0)
     output_tokens = int(usage.get("output_tokens") or state["total_output_tokens"] or 0)
-    return {"candidate_drafts": candidates, "draft": draft_a, "total_input_tokens": input_tokens, "total_output_tokens": output_tokens}
+    primary = draft_a or draft_b
+    return {"candidate_drafts": candidates, "draft": primary, "total_input_tokens": input_tokens, "total_output_tokens": output_tokens}
 
 
 def _node_review(state: GenerationState) -> GenerationState:
@@ -1672,7 +1791,13 @@ def _node_finalize(state: GenerationState) -> GenerationState:
             and reviewer_aesthetic >= 0.6
             and aesthetic_score >= 0.6
         )
-        state["summary_mgr"].add_summary(state["novel_id"], chapter_num, summary_text, db=db)
+        state["summary_mgr"].add_summary(
+            state["novel_id"],
+            state.get("novel_version_id"),
+            chapter_num,
+            summary_text,
+            db=db,
+        )
         update_character_states_from_content(
             state["novel_id"],
             chapter_num,
@@ -1682,10 +1807,12 @@ def _node_finalize(state: GenerationState) -> GenerationState:
             state["target_language"],
             state["strategy"],
             db=db,
+            novel_version_id=state.get("novel_version_id"),
         )
         update_character_profiles_incremental(
             db=db,
             novel_id=state["novel_id"],
+            novel_version_id=state.get("novel_version_id"),
             chapter_num=chapter_num,
             content=final_content,
             prewrite=state["prewrite"],
@@ -1693,7 +1820,10 @@ def _node_finalize(state: GenerationState) -> GenerationState:
             target_language=state["target_language"],
             strategy=state["strategy"],
         )
-        existing_stmt = select(Chapter).where(Chapter.novel_id == state["novel_id"], Chapter.chapter_num == chapter_num)
+        existing_stmt = select(ChapterVersion).where(
+            ChapterVersion.novel_version_id == state.get("novel_version_id"),
+            ChapterVersion.chapter_num == chapter_num,
+        )
         existing = db.execute(existing_stmt).scalar_one_or_none()
         revision_count = state.get("review_attempt", 0) + 1 + (state.get("rerun_count", 0) * (MAX_RETRIES + 1))
         payload = {
@@ -1718,7 +1848,13 @@ def _node_finalize(state: GenerationState) -> GenerationState:
             for k, v in payload.items():
                 setattr(existing, k, v)
         else:
-            db.add(Chapter(novel_id=state["novel_id"], chapter_num=chapter_num, **payload))
+            db.add(
+                ChapterVersion(
+                    novel_version_id=state.get("novel_version_id"),
+                    chapter_num=chapter_num,
+                    **payload,
+                )
+            )
         db.commit()
         _write_longform_artifacts(
             state={**state, "outline": {**(state.get("outline") or {}), "title": chapter_title}},
@@ -2008,11 +2144,20 @@ def _node_final_book_review(state: GenerationState) -> GenerationState:
     db = SessionLocal()
     try:
         last_chapter = state["start_chapter"] + state["num_chapters"] - 1
-        all_summaries = state["summary_mgr"].get_summaries_before(state["novel_id"], last_chapter + 1, db=db)
+        all_summaries = state["summary_mgr"].get_summaries_before(
+            state["novel_id"],
+            state.get("novel_version_id"),
+            last_chapter + 1,
+            db=db,
+        )
         if all_summaries:
             chapter_payload = [{"chapter_num": s["chapter_num"], "summary": s["summary"]} for s in all_summaries]
         else:
-            chapter_stmt = select(Chapter).where(Chapter.novel_id == state["novel_id"]).order_by(Chapter.chapter_num)
+            chapter_stmt = (
+                select(ChapterVersion)
+                .where(ChapterVersion.novel_version_id == state.get("novel_version_id"))
+                .order_by(ChapterVersion.chapter_num)
+            )
             chapter_rows = db.execute(chapter_stmt).scalars().all()
             chapter_payload = [{"chapter_num": c.chapter_num, "title": c.title, "content": (c.content or "")[:2000]} for c in chapter_rows]
     finally:
@@ -2024,6 +2169,7 @@ def _node_final_book_review(state: GenerationState) -> GenerationState:
     save_prewrite_artifacts(state["novel_id"], {"final_book_review": final_report})
     state["quality_store"].add_report(
         novel_id=state["novel_id"],
+        novel_version_id=state.get("novel_version_id"),
         scope="book",
         scope_id="final",
         metrics_json=final_report if isinstance(final_report, dict) else {"raw": str(final_report)},
@@ -2177,6 +2323,7 @@ _compiled_graph = _build_generation_graph()
 
 def run_generation_pipeline_langgraph(
     novel_id: int,
+    novel_version_id: int,
     num_chapters: int,
     start_chapter: int,
     progress_callback=None,
@@ -2213,6 +2360,7 @@ def run_generation_pipeline_langgraph(
     _compiled_graph.invoke(
         {
             "novel_id": novel_id,
+            "novel_version_id": novel_version_id,
             "num_chapters": num_chapters,
             "start_chapter": start_chapter,
             "task_id": task_id,

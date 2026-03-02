@@ -1,10 +1,14 @@
 from datetime import datetime, timedelta, timezone
+import sys
+import types
 
 from sqlalchemy import select
 
 from app.core.database import SessionLocal
 from app.models.creation_task import CreationTask
-from app.services.scheduler.scheduler_service import reclaim_stale_running_tasks
+from app.models.novel import Novel, NovelVersion
+from app.models.storyboard import StoryboardProject, StoryboardTask, StoryboardVersion
+from app.services.scheduler.scheduler_service import dispatch_user_queue, reclaim_stale_running_tasks
 from app.services.task_runtime.checkpoint_repo import get_last_completed_unit, mark_unit_completed
 from app.services.task_runtime.cursor_service import resume_from_last_completed
 
@@ -92,3 +96,95 @@ def test_reclaim_stale_running_task():
     assert row.status == "queued"
     assert row.worker_task_id is None
     assert int(row.recovery_count or 0) >= 1
+
+
+def test_dispatch_storyboard_novel_version_mismatch_fails_before_worker_enqueue(monkeypatch):
+    called = {"count": 0}
+
+    class _DummyAsyncResult:
+        id = "storyboard-worker-task-id"
+
+    class _DummyStoryboardTask:
+        @staticmethod
+        def delay(**kwargs):  # pragma: no cover - should not be called in this test
+            called["count"] += 1
+            return _DummyAsyncResult()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "app.tasks.storyboard",
+        types.SimpleNamespace(run_storyboard_pipeline=_DummyStoryboardTask),
+    )
+
+    db = SessionLocal()
+    try:
+        novel_a = Novel(title="dispatch-source-a", target_language="zh", user_id="u-storyboard-version-mismatch", status="completed")
+        novel_b = Novel(title="dispatch-source-b", target_language="zh", user_id="u-storyboard-version-mismatch", status="completed")
+        db.add_all([novel_a, novel_b])
+        db.flush()
+
+        version_b = NovelVersion(novel_id=int(novel_b.id), version_no=1, status="completed", is_default=1)
+        db.add(version_b)
+        db.flush()
+
+        project = StoryboardProject(
+            novel_id=int(novel_a.id),
+            owner_user_uuid="u-storyboard-version-mismatch",
+            status="draft",
+            target_episodes=2,
+            target_episode_seconds=90,
+            output_lanes=["vertical_feed"],
+            active_lane="vertical_feed",
+        )
+        db.add(project)
+        db.flush()
+
+        version = StoryboardVersion(
+            storyboard_project_id=int(project.id),
+            source_novel_version_id=int(version_b.id),
+            version_no=1,
+            lane="vertical_feed",
+            status="draft",
+            is_default=1,
+            is_final=0,
+        )
+        db.add(version)
+        db.flush()
+
+        task_db = StoryboardTask(
+            storyboard_project_id=int(project.id),
+            task_id="pending-dispatch-mismatch",
+            status="submitted",
+            run_state="submitted",
+        )
+        db.add(task_db)
+        db.flush()
+
+        row = CreationTask(
+            user_uuid="u-storyboard-version-mismatch",
+            task_type="storyboard",
+            resource_type="storyboard_project",
+            resource_id=int(project.id),
+            status="queued",
+            payload_json={
+                "project_id": int(project.id),
+                "task_db_id": int(task_db.id),
+                "novel_version_id": int(version_b.id),
+                "version_ids": [int(version.id)],
+            },
+        )
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+
+        dispatched = dispatch_user_queue(db, user_uuid=row.user_uuid)
+        db.commit()
+        db.refresh(row)
+    finally:
+        db.close()
+
+    assert dispatched == []
+    assert row.status == "failed"
+    assert row.error_code == "DISPATCH_PAYLOAD_INVALID"
+    assert "storyboard novel_version context invalid" in str(row.error_detail or "")
+    assert called["count"] == 0

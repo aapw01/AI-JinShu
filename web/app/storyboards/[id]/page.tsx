@@ -4,7 +4,8 @@ import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useSearchParams } from "next/navigation";
 import { ArrowLeft, Gauge, Play, Pause, RotateCcw, Ban, Download, CheckCircle2, Copy } from "lucide-react";
-import { api, StoryboardCharacterPrompt, StoryboardShot, StoryboardTaskStatus, StoryboardVersion } from "@/lib/api";
+import { api, StoryboardCharacterPrompt, StoryboardShot, StoryboardTaskStatus, StoryboardVersion, getErrorMessage } from "@/lib/api";
+import { formatRunState, formatStoryboardLane, formatStoryboardPhase } from "@/lib/display";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { TopBar } from "@/components/ui/TopBar";
@@ -134,12 +135,16 @@ export default function StoryboardWorkbenchPage() {
     try {
       await api.updateStoryboardShot(projectId, shotId, patch);
       await loadShots(activeVersionId, episodeNo);
+    } catch (e) {
+      const msg = getErrorMessage(e, "保存失败");
+      setActionMessageType("error");
+      setActionMessage(msg);
     } finally {
       setSavingShotId(null);
     }
   };
 
-  const statusText = status?.message || (status?.run_state ? `状态：${status.run_state}` : "暂无任务状态");
+  const statusText = status?.message || (status?.run_state ? `状态：${formatRunState(status.run_state)}` : "暂无任务状态");
 
   const copyText = async (value: string, key: string) => {
     try {
@@ -161,7 +166,7 @@ export default function StoryboardWorkbenchPage() {
       setActionMessageType("success");
       setActionMessage(success);
     } catch (e) {
-      const msg = e instanceof Error ? e.message : "操作失败";
+      const msg = getErrorMessage(e, "操作失败");
       setActionMessageType("error");
       setActionMessage(msg);
     } finally {
@@ -201,7 +206,7 @@ export default function StoryboardWorkbenchPage() {
               <Button variant="secondary" size="sm" className={toolbarBtnClass} disabled={!canRetry} loading={actionBusy === "retry"} onClick={() => void runAction("retry", async () => { await api.retryStoryboard(projectId); }, "已提交重试任务")}>
                 <RotateCcw className="w-4 h-4 mr-1.5" />重试
               </Button>
-              <Button variant="secondary" size="sm" className={toolbarBtnClass} disabled={!canCancel} loading={actionBusy === "cancel"} onClick={() => void runAction("cancel", async () => { await api.cancelStoryboard(projectId, status?.task_id); }, "任务已取消")}>
+              <Button variant="secondary" size="sm" className={toolbarBtnClass} disabled={!canCancel} loading={actionBusy === "cancel"} onClick={() => { if (!window.confirm("确定要取消当前分镜任务吗？")) return; void runAction("cancel", async () => { await api.cancelStoryboard(projectId, status?.task_id); }, "任务已取消"); }}>
                 <Ban className="w-4 h-4 mr-1.5" />取消
               </Button>
             </div>
@@ -246,7 +251,7 @@ export default function StoryboardWorkbenchPage() {
                 </Button>
               ) : null}
               {activeVersion ? (
-                <Button size="sm" className={toolbarBtnClass} disabled={!canFinalize} loading={actionBusy === "finalize"} onClick={() => void runAction("finalize", async () => { await api.finalizeStoryboardVersion(projectId, activeVersion.id); }, "版本已定稿")}>
+                <Button size="sm" className={toolbarBtnClass} disabled={!canFinalize} loading={actionBusy === "finalize"} onClick={() => { if (!window.confirm("确认定稿后将无法继续编辑，是否继续？")) return; void runAction("finalize", async () => { await api.finalizeStoryboardVersion(projectId, activeVersion.id); }, "版本已定稿"); }}>
                   <CheckCircle2 className="w-4 h-4 mr-1.5" />确认定稿
                 </Button>
               ) : null}
@@ -273,18 +278,18 @@ export default function StoryboardWorkbenchPage() {
         ) : null}
         <aside className="col-span-12 lg:col-span-2 space-y-4 lg:sticky lg:top-[88px] h-fit">
           <Card className="p-3 bg-[#FEFCFA]">
-            <p className="text-sm font-medium text-[#4A433D] mb-2">Lane 切换</p>
+            <p className="text-sm font-medium text-[#4A433D] mb-2">分镜 Lane 切换</p>
             <div className="space-y-2">
               <p className="text-xs text-[#8E8379]">竖屏版</p>
               {laneGroups.vertical.map((v) => (
                 <button key={v.id} onClick={() => { setEpisodeNo(undefined); setActiveVersionId(v.id); }} className={`w-full text-left text-xs rounded-lg border px-2 py-1.5 ${activeVersionId === v.id ? "border-[#C8211B] bg-[#F8ECEA] text-[#A52A25]" : "border-[#E5DED7] bg-white text-[#6F665F]"}`}>
-                  v{v.version_no} {v.is_final ? "(定稿)" : ""}
+                  v{v.version_no} {v.is_final ? "(定稿)" : ""} · 源{v.source_novel_version_id ? `v${v.source_novel_version_id}` : "-"}
                 </button>
               ))}
               <p className="text-xs text-[#8E8379] pt-1">横屏版</p>
               {laneGroups.horizontal.map((v) => (
                 <button key={v.id} onClick={() => { setEpisodeNo(undefined); setActiveVersionId(v.id); }} className={`w-full text-left text-xs rounded-lg border px-2 py-1.5 ${activeVersionId === v.id ? "border-[#C8211B] bg-[#F8ECEA] text-[#A52A25]" : "border-[#E5DED7] bg-white text-[#6F665F]"}`}>
-                  v{v.version_no} {v.is_final ? "(定稿)" : ""}
+                  v{v.version_no} {v.is_final ? "(定稿)" : ""} · 源{v.source_novel_version_id ? `v${v.source_novel_version_id}` : "-"}
                 </button>
               ))}
             </div>
@@ -304,7 +309,7 @@ export default function StoryboardWorkbenchPage() {
         <section className="col-span-12 lg:col-span-7">
           <Card className="p-0 overflow-hidden bg-white">
             <div className="px-4 py-3 border-b border-[#E5DED7] bg-[#FAF7F4] flex flex-wrap items-center justify-between gap-2">
-              <p className="text-xs text-[#8E8379]">当前版本：{activeVersion ? `v${activeVersion.version_no} · ${activeVersion.lane === "vertical_feed" ? "竖屏版" : "横屏版"}` : "-"}</p>
+              <p className="text-xs text-[#8E8379]">当前版本：{activeVersion ? `v${activeVersion.version_no} · ${formatStoryboardLane(activeVersion.lane)} · 源小说${activeVersion.source_novel_version_id ? `v${activeVersion.source_novel_version_id}` : "-"}` : "-"}</p>
               <p className="text-xs text-[#8E8379]">镜头数：{shots.length}</p>
             </div>
             <div className="px-4 py-3 border-b border-[#E5DED7] bg-[#FAF7F4] flex items-center gap-2">
@@ -342,17 +347,25 @@ export default function StoryboardWorkbenchPage() {
                         <td className="px-3 py-2 text-xs text-[#5F5650]">{shot.shot_size} · {shot.camera_move}</td>
                         <td className="px-3 py-2">
                           <textarea
-                            className="w-full min-h-[70px] border border-[#E5DED7] rounded-md p-2 bg-white text-xs"
-                            defaultValue={shot.action || ""}
+                            className="w-full min-h-[70px] border border-[#E5DED7] rounded-md p-2 bg-white text-xs focus:border-[#C8211B] outline-none"
+                            value={shot.action || ""}
                             disabled={isFinal}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setShots((prev) => prev.map((s) => s.id === shot.id ? { ...s, action: val } : s));
+                            }}
                             onBlur={(e) => void onUpdateShot(shot.id, { action: e.target.value })}
                           />
                         </td>
                         <td className="px-3 py-2">
                           <textarea
-                            className="w-full min-h-[70px] border border-[#E5DED7] rounded-md p-2 bg-white text-xs"
-                            defaultValue={shot.dialogue || ""}
+                            className="w-full min-h-[70px] border border-[#E5DED7] rounded-md p-2 bg-white text-xs focus:border-[#C8211B] outline-none"
+                            value={shot.dialogue || ""}
                             disabled={isFinal}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setShots((prev) => prev.map((s) => s.id === shot.id ? { ...s, dialogue: val } : s));
+                            }}
                             onBlur={(e) => void onUpdateShot(shot.id, { dialogue: e.target.value })}
                           />
                         </td>
@@ -434,10 +447,10 @@ export default function StoryboardWorkbenchPage() {
           </Card>
 
           <Card className="p-4 text-xs text-[#7E756D] bg-[#FEFCFA]">
-            <p>任务状态：{status?.run_state || "-"}</p>
-            <p>阶段：{status?.current_phase || "-"}</p>
+            <p>任务状态：{formatRunState(status?.run_state)}</p>
+            <p>阶段：{formatStoryboardPhase(status?.current_phase)}</p>
             <p>进度：{status ? `${status.progress.toFixed(1)}%` : "-"}</p>
-            <p>当前 Lane：{status?.current_lane || activeVersion?.lane || "-"}</p>
+            <p>当前 Lane：{formatStoryboardLane(status?.current_lane || activeVersion?.lane)}</p>
             <p>ETA：{status?.eta_label || "-"}</p>
             <p className="mt-2">完成后请点击“确认定稿”再导出 CSV。</p>
           </Card>

@@ -3,12 +3,13 @@ import json
 import asyncio
 import logging
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 import redis
 
+from app.core.api_errors import http_error
 from app.core.authz.deps import require_permission
 from app.core.authz.resources import load_novel_resource
 from app.core.authz.types import Permission, Principal
@@ -21,6 +22,7 @@ from app.models.novel import GenerationTask, GenerationCheckpoint, User
 from app.schemas.novel import GenerateRequest, GenerateResponse, GenerationStatusResponse, RetryGenerationRequest
 from app.services.quota import check_generation_quota
 from app.services.scheduler.scheduler_service import cancel_task, get_task_by_public_id, pause_task, resume_task, submit_task
+from app.services.rewrite.service import get_default_version_id
 from app.tasks.generation import submit_generation_task  # legacy patch target for tests
 
 router = APIRouter()
@@ -270,7 +272,18 @@ def submit_generation(
     from app.core.database import resolve_novel
     novel = resolve_novel(db, novel_id)
     if not novel:
-        raise HTTPException(404, "Novel not found")
+        raise http_error(404, "novel_not_found", "Novel not found")
+    active_count = db.execute(
+        select(CreationTask.id)
+        .where(
+            CreationTask.task_type == "generation",
+            CreationTask.resource_type == "novel",
+            CreationTask.resource_id == novel.id,
+            CreationTask.status.in_(("queued", "dispatching", "running")),
+        )
+    ).scalars().all()
+    if active_count:
+        raise http_error(409, "generation_already_active", "该小说已有正在进行的生成任务，请等待完成或取消后再试")
     user = db.execute(select(User).where(User.uuid == principal.user_uuid)).scalar_one_or_none()
     if user:
         quota = check_generation_quota(db, user=user, requested_chapters=req.num_chapters)
@@ -284,7 +297,7 @@ def submit_generation(
                 reason=quota.reason,
                 total_chapters=req.num_chapters,
             )
-            raise HTTPException(429, f"Quota exceeded: {quota.reason}")
+            raise http_error(429, str(quota.reason.value if quota.reason else "quota_exceeded"), str(quota.user_message or "当前请求超出配额限制，请稍后再试"))
     trace_id = getattr(request.state, "trace_id", None)
     creation_task = submit_task(
         db,
@@ -294,6 +307,7 @@ def submit_generation(
         resource_id=int(novel.id),
         payload={
             "novel_id": int(novel.id),
+            "novel_version_id": int(get_default_version_id(db, novel.id)),
             "num_chapters": int(req.num_chapters),
             "start_chapter": int(req.start_chapter),
             "trace_id": trace_id,
@@ -328,7 +342,7 @@ def retry_generation(
 
     novel = resolve_novel(db, novel_id)
     if not novel:
-        raise HTTPException(404, "Novel not found")
+        raise http_error(404, "novel_not_found", "Novel not found")
     user = db.execute(select(User).where(User.uuid == principal.user_uuid)).scalar_one_or_none()
 
     source_task = None
@@ -339,7 +353,7 @@ def retry_generation(
         )
         source_task = db.execute(source_stmt).scalar_one_or_none()
         if not source_task:
-            raise HTTPException(404, "指定的任务不存在")
+            raise http_error(404, "task_not_found", "指定的任务不存在")
     else:
         source_stmt = (
             select(GenerationTask)
@@ -352,10 +366,10 @@ def retry_generation(
         )
         source_task = db.execute(source_stmt).scalar_one_or_none()
         if not source_task:
-            raise HTTPException(409, "当前没有可重试的失败任务")
+            raise http_error(409, "no_retryable_failed_task", "当前没有可重试的失败任务")
 
     if source_task.status not in {"failed", "cancelled"}:
-        raise HTTPException(409, f"任务状态为 {source_task.status}，不可重试")
+        raise http_error(409, "task_not_retryable", f"任务状态为 {source_task.status}，不可重试")
 
     source_start = int(source_task.start_chapter or 1)
     source_total = int(source_task.total_chapters or source_task.num_chapters or 1)
@@ -376,7 +390,24 @@ def retry_generation(
                 reason=quota.reason,
                 total_chapters=retry_num,
             )
-            raise HTTPException(429, f"Quota exceeded: {quota.reason}")
+            raise http_error(429, str(quota.reason.value if quota.reason else "quota_exceeded"), str(quota.user_message or "当前请求超出配额限制，请稍后再试"))
+
+    retry_version_id: int | None = None
+    if source_task.task_id:
+        source_creation = db.execute(
+            select(CreationTask).where(
+                CreationTask.public_id == source_task.task_id,
+                CreationTask.task_type == "generation",
+                CreationTask.resource_type == "novel",
+                CreationTask.resource_id == int(novel.id),
+            )
+        ).scalar_one_or_none()
+        if source_creation and isinstance(source_creation.payload_json, dict):
+            payload_version = source_creation.payload_json.get("novel_version_id")
+            if payload_version is not None:
+                retry_version_id = int(payload_version)
+    if retry_version_id is None:
+        retry_version_id = int(get_default_version_id(db, novel.id))
 
     trace_id = getattr(request.state, "trace_id", None)
     creation_task = submit_task(
@@ -387,6 +418,7 @@ def retry_generation(
         resource_id=int(novel.id),
         payload={
             "novel_id": int(novel.id),
+            "novel_version_id": int(retry_version_id),
             "num_chapters": int(retry_num),
             "start_chapter": int(retry_start),
             "trace_id": trace_id,
@@ -439,19 +471,22 @@ def cancel_generation(
 
     novel = resolve_novel(db, novel_id)
     if not novel:
-        raise HTTPException(404, "Novel not found")
+        raise http_error(404, "novel_not_found", "Novel not found")
 
     ctask = get_task_by_public_id(db, public_id=task_id, user_uuid=_.user_uuid or "")
     if not ctask:
-        raise HTTPException(404, "Task not found")
+        raise http_error(404, "task_not_found", "Task not found")
     if ctask.worker_task_id:
-        celery_app.control.revoke(ctask.worker_task_id, terminate=True)
+        try:
+            celery_app.control.revoke(ctask.worker_task_id, terminate=True)
+        except Exception:
+            logger.warning("Failed to revoke worker task %s, proceeding with cancel", ctask.worker_task_id)
     cancel_task(db, public_id=task_id, user_uuid=_.user_uuid or "")
     if ctask.resource_id == novel.id:
         novel.status = "draft"
     db.commit()
 
-    # Update Redis
+    # Update Redis (both task key and novel key)
     data = {
         "status": "cancelled",
         "run_state": "cancelled",
@@ -465,6 +500,9 @@ def cancel_generation(
         "message": "任务已取消",
     }
     _redis_set_json(_redis_key(task_id), data)
+    if ctask.worker_task_id and ctask.worker_task_id != task_id:
+        _redis_set_json(_redis_key(ctask.worker_task_id), data)
+    _redis_set_json(_novel_key(str(novel.id)), data)
     log_event(logger, "generation.cancel", novel_id=novel.id, task_id=task_id, run_state="cancelled")
     return {"ok": True, "message": "Task cancelled"}
 
@@ -480,7 +518,7 @@ def pause_generation(
 
     novel = resolve_novel(db, novel_id)
     if not novel:
-        raise HTTPException(404, "Novel not found")
+        raise http_error(404, "novel_not_found", "Novel not found")
     row = None
     if task_id:
         row = get_task_by_public_id(db, public_id=task_id, user_uuid=principal.user_uuid or "")
@@ -497,21 +535,34 @@ def pause_generation(
             .order_by(CreationTask.updated_at.desc(), CreationTask.id.desc())
         ).scalar_one_or_none()
     if not row:
-        raise HTTPException(404, "No running task")
-    pause_task(db, public_id=row.public_id, user_uuid=principal.user_uuid or "")
+        raise http_error(404, "no_running_task", "No running task")
+    try:
+        pause_task(db, public_id=row.public_id, user_uuid=principal.user_uuid or "")
+    except ValueError as exc:
+        code = str(exc)
+        if code == "task_not_found":
+            raise http_error(404, "task_not_found", "Task not found")
+        if code == "task_not_active":
+            raise http_error(409, "task_not_active", "Task is not active")
+        if code == "task_not_pausable":
+            raise http_error(409, "task_not_pausable", "当前任务不可暂停")
+        raise http_error(409, "task_not_pausable", "当前任务不可暂停")
     db.commit()
+    existing = _redis_get_json(_redis_key(row.worker_task_id or row.public_id)) or {}
     payload = {
         "status": "paused",
         "run_state": "paused",
         "step": "paused",
         "current_phase": "paused",
-        "current_chapter": 0,
-        "total_chapters": 0,
-        "progress": row.progress or 0,
+        "current_chapter": existing.get("current_chapter") or 0,
+        "total_chapters": existing.get("total_chapters") or 0,
+        "progress": row.progress or existing.get("progress") or 0,
         "message": "任务已暂停",
         "task_id": row.public_id,
     }
     _redis_set_json(_redis_key(row.public_id), payload)
+    if row.worker_task_id:
+        _redis_set_json(_redis_key(row.worker_task_id), payload)
     _redis_set_json(_novel_key(str(novel.id)), payload)
     log_event(logger, "generation.pause", novel_id=novel.id, task_id=row.public_id, run_state="paused")
     return {"ok": True, "task_id": row.public_id, "run_state": "paused"}
@@ -528,7 +579,7 @@ def resume_generation(
 
     novel = resolve_novel(db, novel_id)
     if not novel:
-        raise HTTPException(404, "Novel not found")
+        raise http_error(404, "novel_not_found", "Novel not found")
     row = None
     if task_id:
         row = get_task_by_public_id(db, public_id=task_id, user_uuid=principal.user_uuid or "")
@@ -545,21 +596,32 @@ def resume_generation(
             .order_by(CreationTask.updated_at.desc(), CreationTask.id.desc())
         ).scalar_one_or_none()
     if not row:
-        raise HTTPException(404, "No paused task")
-    resume_task(db, public_id=row.public_id, user_uuid=principal.user_uuid or "")
+        raise http_error(404, "no_paused_task", "No paused task")
+    try:
+        resume_task(db, public_id=row.public_id, user_uuid=principal.user_uuid or "")
+    except ValueError as exc:
+        code = str(exc)
+        if code == "task_not_found":
+            raise http_error(404, "task_not_found", "Task not found")
+        if code == "task_not_resumable":
+            raise http_error(409, "task_not_resumable", "当前任务不可恢复")
+        raise http_error(409, "task_not_resumable", "当前任务不可恢复")
     db.commit()
+    existing = _redis_get_json(_redis_key(row.worker_task_id or row.public_id)) or {}
     payload = {
         "status": "queued",
         "run_state": "queued",
         "step": "queued",
         "current_phase": "queued",
-        "current_chapter": 0,
-        "total_chapters": 0,
-        "progress": row.progress or 0,
+        "current_chapter": existing.get("current_chapter") or 0,
+        "total_chapters": existing.get("total_chapters") or 0,
+        "progress": row.progress or existing.get("progress") or 0,
         "message": "任务已恢复并重新入队",
         "task_id": row.public_id,
     }
     _redis_set_json(_redis_key(row.public_id), payload)
+    if row.worker_task_id:
+        _redis_set_json(_redis_key(row.worker_task_id), payload)
     _redis_set_json(_novel_key(str(novel.id)), payload)
     log_event(logger, "generation.resume", novel_id=novel.id, task_id=row.public_id, run_state="queued")
     return {"ok": True, "task_id": row.public_id, "run_state": "queued"}
@@ -577,7 +639,7 @@ def cancel_generation_by_novel(
 
     novel = resolve_novel(db, novel_id)
     if not novel:
-        raise HTTPException(404, "Novel not found")
+        raise http_error(404, "novel_not_found", "Novel not found")
     row = None
     if task_id:
         row = get_task_by_public_id(db, public_id=task_id, user_uuid=principal.user_uuid or "")
@@ -594,10 +656,19 @@ def cancel_generation_by_novel(
             .order_by(CreationTask.updated_at.desc(), CreationTask.id.desc())
         ).scalar_one_or_none()
     if not row:
-        raise HTTPException(404, "No active task")
+        raise http_error(404, "no_active_task", "No active task")
+    try:
+        cancel_task(db, public_id=row.public_id, user_uuid=principal.user_uuid or "")
+    except ValueError as exc:
+        code = str(exc)
+        if code == "task_not_found":
+            raise http_error(404, "task_not_found", "Task not found")
+        raise http_error(409, "task_not_cancellable", "当前任务不可取消")
     if row.worker_task_id:
-        celery_app.control.revoke(row.worker_task_id, terminate=True)
-    cancel_task(db, public_id=row.public_id, user_uuid=principal.user_uuid or "")
+        try:
+            celery_app.control.revoke(row.worker_task_id, terminate=True)
+        except Exception:
+            logger.warning("Failed to revoke worker task %s, proceeding with cancel", row.worker_task_id)
     novel.status = "draft"
     db.commit()
     payload = {
@@ -628,7 +699,7 @@ def list_generation_tasks(
 
     novel = resolve_novel(db, novel_id)
     if not novel:
-        raise HTTPException(404, "Novel not found")
+        raise http_error(404, "novel_not_found", "Novel not found")
     rows = db.execute(
         select(CreationTask)
         .where(
@@ -640,13 +711,16 @@ def list_generation_tasks(
         .order_by(CreationTask.updated_at.desc(), CreationTask.id.desc())
         .limit(max(1, min(limit, 100)))
     ).scalars().all()
-    return [
-        {
+    results = []
+    for r in rows:
+        payload_data = r.payload_json if isinstance(r.payload_json, dict) else {}
+        redis_data = _redis_get_json(_redis_key(r.worker_task_id or r.public_id)) or {}
+        results.append({
             "task_id": r.public_id,
             "status": r.status,
             "run_state": r.status,
-            "current_chapter": 0,
-            "total_chapters": 0,
+            "current_chapter": redis_data.get("current_chapter") or 0,
+            "total_chapters": redis_data.get("total_chapters") or int(payload_data.get("num_chapters") or 0),
             "progress": r.progress or 0,
             "message": r.message,
             "error": r.error_detail,
@@ -655,9 +729,8 @@ def list_generation_tasks(
             "retryable": bool((r.retry_count or 0) < (r.max_retries or 0)),
             "trace_id": None,
             "updated_at": r.updated_at.isoformat() if r.updated_at else None,
-        }
-        for r in rows
-    ]
+        })
+    return results
 
 
 @router.post("/{novel_id}/generation/{task_id}/confirm-outline")
@@ -672,14 +745,14 @@ def confirm_outline_generation(
 
     novel = resolve_novel(db, novel_id)
     if not novel:
-        raise HTTPException(404, "Novel not found")
+        raise http_error(404, "novel_not_found", "Novel not found")
     gt_stmt = select(GenerationTask).where(
         GenerationTask.task_id == task_id,
         GenerationTask.novel_id == novel.id,
     )
     gt = db.execute(gt_stmt).scalar_one_or_none()
     if not gt:
-        raise HTTPException(404, "Task not found")
+        raise http_error(404, "task_not_found", "Task not found")
     if gt.status != "awaiting_outline_confirmation":
         return {"ok": True, "message": "无需确认或已确认"}
     gt.status = "running"
@@ -718,7 +791,7 @@ def get_generation_status(
     from app.core.database import resolve_novel
     novel = resolve_novel(db, novel_id)
     if not novel:
-        raise HTTPException(404, "Novel not found")
+        raise http_error(404, "novel_not_found", "Novel not found")
     row: CreationTask | None = None
     if task_id:
         row = get_task_by_public_id(db, public_id=task_id, user_uuid=_.user_uuid or "")
@@ -735,7 +808,9 @@ def get_generation_status(
             .limit(1)
         ).scalar_one_or_none()
     if row:
-        redis_payload = _redis_get_json(_redis_key(row.public_id))
+        redis_key_id = row.worker_task_id or row.public_id
+        redis_payload = _redis_get_json(_redis_key(redis_key_id))
+        result_data = row.result_json if isinstance(row.result_json, dict) else {}
         payload = {
             "status": row.status,
             "run_state": row.status,
@@ -744,13 +819,25 @@ def get_generation_status(
             "current_chapter": 0,
             "total_chapters": 0,
             "progress": float(row.progress or 0.0),
+            "token_usage_input": int(result_data.get("token_usage_input") or 0),
+            "token_usage_output": int(result_data.get("token_usage_output") or 0),
+            "estimated_cost": float(result_data.get("estimated_cost") or 0.0),
+            "volume_no": None,
+            "volume_size": None,
+            "pacing_mode": None,
+            "low_progress_streak": None,
+            "progress_signal": None,
+            "decision_state": None,
             "message": row.message,
             "error": row.error_detail,
             "task_id": row.public_id,
             "trace_id": None,
         }
         if isinstance(redis_payload, dict):
-            payload.update({k: v for k, v in redis_payload.items() if k in payload or k in {"current_chapter", "total_chapters"}})
+            for k, v in redis_payload.items():
+                if k in payload:
+                    payload[k] = v
+        payload = _estimate_eta_payload(db, novel.id, redis_key_id, payload)
         return _to_status_response(payload)
     return GenerationStatusResponse(status="unknown", progress=0, current_chapter=0)
 
@@ -769,11 +856,11 @@ def llm_debug(
 
     novel = resolve_novel(db, novel_id)
     if not novel:
-        raise HTTPException(404, "Novel not found")
+        raise http_error(404, "novel_not_found", "Novel not found")
     gt_stmt = select(GenerationTask).where(GenerationTask.task_id == task_id, GenerationTask.novel_id == novel.id)
     gt = db.execute(gt_stmt).scalar_one_or_none()
     if not gt:
-        raise HTTPException(404, "Task not found")
+        raise http_error(404, "task_not_found", "Task not found")
     strategy = novel.strategy or "web-novel"
     stages = ["architect", "outliner", "writer", "reviewer", "finalizer"]
     routing = {s: {"provider": get_model_for_stage(strategy, s)[0], "model": get_model_for_stage(strategy, s)[1]} for s in stages}

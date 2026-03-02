@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { FormEvent, Suspense, useState } from "react";
 
-import { api, ApiError } from "@/lib/api";
+import { api, ApiError, getErrorMessage } from "@/lib/api";
 import { Button } from "@/components/ui/Button";
 import { ErrorDialog } from "@/components/ui/ErrorDialog";
 
@@ -33,15 +33,10 @@ function LoginPageContent() {
       api.setAuthToken(res.access_token);
       router.push(next);
     } catch (err) {
-      if (err instanceof ApiError) {
-        setErrorMessage(err.message);
-        setPendingVerification(
-          err.status === 403 &&
-            (err.message.includes("未激活") || err.message.toLowerCase().includes("not verified"))
-        );
-      } else {
-        setErrorMessage("登录失败");
-      }
+      setErrorMessage(getErrorMessage(err, "登录失败"));
+      setPendingVerification(
+        err instanceof ApiError && err.status === 403 && err.errorCode === "email_not_verified"
+      );
       setErrorDialogOpen(true);
     } finally {
       setLoading(false);
@@ -56,11 +51,7 @@ function LoginPageContent() {
       await api.requestVerifyEmail(email);
       setNotice("激活邮件已发送，请前往邮箱完成激活后再登录");
     } catch (err) {
-      if (err instanceof ApiError) {
-        setErrorMessage(err.message);
-      } else {
-        setErrorMessage("发送激活邮件失败");
-      }
+      setErrorMessage(getErrorMessage(err, "发送激活邮件失败"));
       setErrorDialogOpen(true);
     } finally {
       setResendLoading(false);
@@ -70,14 +61,14 @@ function LoginPageContent() {
   return (
     <main className="min-h-screen bg-[radial-gradient(circle_at_10%_0%,#F9EEE8_0%,#F5F2EE_35%,#F3F1ED_100%)]">
       <div className="max-w-md mx-auto px-4 py-24">
-        <div className="rounded-2xl border border-[#E5DED7] bg-white/90 backdrop-blur p-6 shadow-[0_18px_40px_rgba(31,27,24,0.08)]">
+          <div className="rounded-[14px] border border-[#DDD8D3] bg-white/90 backdrop-blur p-6 shadow-[0_18px_40px_rgba(31,27,24,0.08)]">
           <h1 className="text-2xl font-semibold text-[#1F1B18]">登录 AI 锦书</h1>
           <p className="mt-1 text-sm text-[#7E756D]">继续你的智能小说创作</p>
           <form className="mt-6 space-y-4" onSubmit={onSubmit}>
             <div>
               <label className="block text-sm text-[#5E5650] mb-1">邮箱</label>
               <input
-                className="w-full h-10 rounded-lg border border-[#E5DED7] px-3 text-sm outline-none focus:border-[#C8211B]"
+                className="w-full h-10 rounded-[8px] border border-[#DDD8D3] px-3 text-sm outline-none focus:border-[#C8211B] focus:ring-2 focus:ring-[#C8211B]/10 transition-colors"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 type="email"
@@ -92,7 +83,7 @@ function LoginPageContent() {
                 </Link>
               </div>
               <input
-                className="w-full h-10 rounded-lg border border-[#E5DED7] px-3 text-sm outline-none focus:border-[#C8211B]"
+                className="w-full h-10 rounded-[8px] border border-[#DDD8D3] px-3 text-sm outline-none focus:border-[#C8211B] focus:ring-2 focus:ring-[#C8211B]/10 transition-colors"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 type="password"

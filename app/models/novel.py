@@ -66,6 +66,7 @@ class ChapterOutline(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     novel_id = Column(Integer, ForeignKey("novels.id", ondelete="CASCADE"), nullable=False)
+    novel_version_id = Column(Integer, ForeignKey("novel_versions.id", ondelete="CASCADE"), nullable=True, index=True)
     chapter_num = Column(Integer, nullable=False)
     title = Column(String(255), nullable=True)
     outline = Column(Text, nullable=True)
@@ -112,6 +113,7 @@ class ChapterSummary(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     novel_id = Column(Integer, ForeignKey("novels.id", ondelete="CASCADE"), nullable=False)
+    novel_version_id = Column(Integer, ForeignKey("novel_versions.id", ondelete="CASCADE"), nullable=True, index=True)
     chapter_num = Column(Integer, nullable=False)
     summary = Column(Text, nullable=False)
     created_at = Column(DateTime, default=_utc_now)
@@ -124,6 +126,7 @@ class NovelMemory(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     novel_id = Column(Integer, ForeignKey("novels.id", ondelete="CASCADE"), nullable=False)
+    novel_version_id = Column(Integer, ForeignKey("novel_versions.id", ondelete="CASCADE"), nullable=True, index=True)
     memory_type = Column(String(50), nullable=False)  # character, world, plot
     key = Column(String(255), nullable=True)
     content = Column(JSON, default=dict)
@@ -138,6 +141,7 @@ class StoryCharacterProfile(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     novel_id = Column(Integer, ForeignKey("novels.id", ondelete="CASCADE"), nullable=False, index=True)
+    novel_version_id = Column(Integer, ForeignKey("novel_versions.id", ondelete="CASCADE"), nullable=True, index=True)
     character_key = Column(String(255), nullable=False)
     display_name = Column(String(255), nullable=False)
     gender_presentation = Column(String(64), nullable=True)
@@ -167,6 +171,7 @@ class ChapterEmbedding(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     novel_id = Column(Integer, ForeignKey("novels.id", ondelete="CASCADE"), nullable=False)
+    novel_version_id = Column(Integer, ForeignKey("novel_versions.id", ondelete="CASCADE"), nullable=True, index=True)
     chapter_num = Column(Integer, nullable=False)
     content_hash = Column(String(64), nullable=True)
     embedding = Column(EMBEDDING_COLUMN_TYPE, nullable=True)
@@ -180,6 +185,7 @@ class KnowledgeChunk(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     novel_id = Column(Integer, ForeignKey("novels.id", ondelete="CASCADE"), nullable=False)
+    novel_version_id = Column(Integer, ForeignKey("novel_versions.id", ondelete="CASCADE"), nullable=True, index=True)
     content = Column(Text, nullable=False)
     chunk_type = Column(String(50), nullable=True)
     embedding = Column(EMBEDDING_COLUMN_TYPE, nullable=True)
@@ -243,6 +249,7 @@ class StoryEntity(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     novel_id = Column(Integer, ForeignKey("novels.id", ondelete="CASCADE"), nullable=False)
+    novel_version_id = Column(Integer, ForeignKey("novel_versions.id", ondelete="CASCADE"), nullable=True, index=True)
     entity_type = Column(String(50), nullable=False)  # character, location, organization, item, rule
     name = Column(String(255), nullable=False)
     status = Column(String(50), nullable=True)
@@ -260,6 +267,7 @@ class StoryFact(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     novel_id = Column(Integer, ForeignKey("novels.id", ondelete="CASCADE"), nullable=False)
+    novel_version_id = Column(Integer, ForeignKey("novel_versions.id", ondelete="CASCADE"), nullable=True, index=True)
     entity_id = Column(Integer, ForeignKey("story_entities.id", ondelete="CASCADE"), nullable=False)
     fact_type = Column(String(100), nullable=False)
     value_json = Column(JSON, default=dict)
@@ -278,6 +286,7 @@ class StoryEvent(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     event_id = Column(String(64), nullable=False, index=True)
     novel_id = Column(Integer, ForeignKey("novels.id", ondelete="CASCADE"), nullable=False)
+    novel_version_id = Column(Integer, ForeignKey("novel_versions.id", ondelete="CASCADE"), nullable=True, index=True)
     chapter_num = Column(Integer, nullable=False)
     title = Column(String(255), nullable=True)
     event_type = Column(String(100), nullable=True)
@@ -297,6 +306,7 @@ class StoryForeshadow(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     foreshadow_id = Column(String(64), nullable=False, index=True)
     novel_id = Column(Integer, ForeignKey("novels.id", ondelete="CASCADE"), nullable=False)
+    novel_version_id = Column(Integer, ForeignKey("novel_versions.id", ondelete="CASCADE"), nullable=True, index=True)
     title = Column(String(255), nullable=True)
     planted_chapter = Column(Integer, nullable=False)
     resolved_chapter = Column(Integer, nullable=True)
@@ -313,6 +323,7 @@ class StorySnapshot(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     novel_id = Column(Integer, ForeignKey("novels.id", ondelete="CASCADE"), nullable=False)
+    novel_version_id = Column(Integer, ForeignKey("novel_versions.id", ondelete="CASCADE"), nullable=True, index=True)
     volume_no = Column(Integer, nullable=False)
     chapter_end = Column(Integer, nullable=False)
     snapshot_json = Column(JSON, default=dict)
@@ -342,6 +353,7 @@ class QualityReport(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     novel_id = Column(Integer, ForeignKey("novels.id", ondelete="CASCADE"), nullable=False)
+    novel_version_id = Column(Integer, ForeignKey("novel_versions.id", ondelete="CASCADE"), nullable=True, index=True)
     scope = Column(String(20), nullable=False)  # chapter, volume, book
     scope_id = Column(String(64), nullable=False)
     metrics_json = Column(JSON, default=dict)
@@ -487,6 +499,9 @@ class ChapterVersion(Base):
     content = Column(Text, nullable=True)
     summary = Column(Text, nullable=True)
     status = Column(String(32), nullable=False, default="pending")  # pending, generating, completed, failed
+    review_score = Column(Float, nullable=True)
+    language_quality_score = Column(Float, nullable=True)
+    language_quality_report = Column(Text, nullable=True)
     metadata_ = Column("metadata", JSON, default=dict)
     source_chapter_version_id = Column(Integer, ForeignKey("chapter_versions.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime, default=_utc_now)
@@ -534,22 +549,25 @@ class RewriteAnnotation(Base):
     created_at = Column(DateTime, default=_utc_now)
 
 
-Index("idx_chapter_summaries_novel_chapter", ChapterSummary.novel_id, ChapterSummary.chapter_num, unique=True)
-Index("idx_novel_memory_novel_type_key", NovelMemory.novel_id, NovelMemory.memory_type, NovelMemory.key, unique=True)
+Index("idx_chapter_summaries_novel_chapter", ChapterSummary.novel_version_id, ChapterSummary.chapter_num, unique=True)
+Index("idx_novel_memory_novel_type_key", NovelMemory.novel_version_id, NovelMemory.memory_type, NovelMemory.key, unique=True)
 Index("idx_novel_specifications_novel_type", NovelSpecification.novel_id, NovelSpecification.spec_type, unique=True)
-Index("idx_story_entities_novel_type_name", StoryEntity.novel_id, StoryEntity.entity_type, StoryEntity.name, unique=True)
-Index("idx_story_facts_novel_entity_type", StoryFact.novel_id, StoryFact.entity_id, StoryFact.fact_type)
-Index("idx_story_events_novel_chapter", StoryEvent.novel_id, StoryEvent.chapter_num)
-Index("idx_story_foreshadows_novel_state", StoryForeshadow.novel_id, StoryForeshadow.state)
-Index("idx_story_foreshadows_novel_foreshadow", StoryForeshadow.novel_id, StoryForeshadow.foreshadow_id, unique=True)
-Index("idx_story_snapshots_novel_volume", StorySnapshot.novel_id, StorySnapshot.volume_no)
+Index("idx_story_entities_novel_type_name", StoryEntity.novel_version_id, StoryEntity.entity_type, StoryEntity.name, unique=True)
+Index("idx_story_facts_novel_entity_type", StoryFact.novel_version_id, StoryFact.entity_id, StoryFact.fact_type)
+Index("idx_story_events_novel_chapter", StoryEvent.novel_version_id, StoryEvent.chapter_num)
+Index("idx_story_foreshadows_novel_state", StoryForeshadow.novel_version_id, StoryForeshadow.state)
+Index("idx_story_foreshadows_novel_foreshadow", StoryForeshadow.novel_version_id, StoryForeshadow.foreshadow_id, unique=True)
+Index("idx_story_snapshots_novel_volume", StorySnapshot.novel_version_id, StorySnapshot.volume_no)
 Index("idx_generation_checkpoints_task_node", GenerationCheckpoint.task_id, GenerationCheckpoint.node)
-Index("idx_quality_reports_novel_scope_scopeid", QualityReport.novel_id, QualityReport.scope, QualityReport.scope_id)
-Index("idx_story_character_profiles_novel_character", StoryCharacterProfile.novel_id, StoryCharacterProfile.character_key, unique=True)
+Index("idx_quality_reports_novel_scope_scopeid", QualityReport.novel_version_id, QualityReport.scope, QualityReport.scope_id)
+Index("idx_story_character_profiles_novel_character", StoryCharacterProfile.novel_version_id, StoryCharacterProfile.character_key, unique=True)
 Index("idx_novel_feedback_novel_chapter_volume", NovelFeedback.novel_id, NovelFeedback.chapter_num, NovelFeedback.volume_no)
 Index("idx_novel_versions_novel_version", NovelVersion.novel_id, NovelVersion.version_no, unique=True)
 Index("idx_novel_versions_novel_default", NovelVersion.novel_id, NovelVersion.is_default)
 Index("idx_chapter_versions_version_chapter", ChapterVersion.novel_version_id, ChapterVersion.chapter_num, unique=True)
+Index("idx_chapter_outlines_version_chapter", ChapterOutline.novel_version_id, ChapterOutline.chapter_num, unique=True)
+Index("idx_chapter_embeddings_version_chapter", ChapterEmbedding.novel_version_id, ChapterEmbedding.chapter_num, unique=True)
+Index("idx_knowledge_chunks_version_type", KnowledgeChunk.novel_version_id, KnowledgeChunk.chunk_type)
 Index("idx_rewrite_requests_novel_status", RewriteRequest.novel_id, RewriteRequest.status)
 Index("idx_rewrite_annotations_request_chapter", RewriteAnnotation.rewrite_request_id, RewriteAnnotation.chapter_num)
 Index("idx_users_email", User.email, unique=True)

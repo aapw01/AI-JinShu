@@ -3,6 +3,7 @@
 
 def run_generation_pipeline(
     novel_id: int,
+    novel_version_id: int,
     num_chapters: int,
     start_chapter: int,
     progress_callback=None,
@@ -13,6 +14,7 @@ def run_generation_pipeline(
 
     run_generation_pipeline_langgraph(
         novel_id=novel_id,
+        novel_version_id=novel_version_id,
         num_chapters=num_chapters,
         start_chapter=start_chapter,
         progress_callback=progress_callback,

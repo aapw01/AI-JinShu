@@ -5,12 +5,13 @@ import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { motion } from "framer-motion";
 import { ArrowLeft, BarChart3, Clapperboard, Copy, Download, Wand2 } from "lucide-react";
-import { api, Novel, NovelVersion, Chapter, ChapterProgress, RewriteAnnotationInput } from "@/lib/api";
+import { api, Novel, NovelVersion, Chapter, ChapterProgress, RewriteAnnotationInput, getErrorMessage } from "@/lib/api";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Card } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { TopBar } from "@/components/ui/TopBar";
+import { formatNovelStatus } from "@/lib/display";
 
 const STATUS_MAP: Record<string, { label: string; variant: "default" | "success" | "warning" | "error" }> = {
   draft: { label: "草稿", variant: "default" },
@@ -75,13 +76,20 @@ export default function NovelPage() {
     try {
       setLoading(true);
       setError(null);
-      const [novelData, progressData, versionsData] = await Promise.all([
-        api.getNovel(id),
+      const novelData = await api.getNovel(id);
+      let versionsData: NovelVersion[] = [];
+      let defaultVersion: NovelVersion | null = null;
+      try {
+        versionsData = await api.getVersions(id);
+        defaultVersion = versionsData.find((v) => v.is_default) || versionsData[0] || null;
+      } catch (versionErr) {
+        // Fallback for legacy/inconsistent environments where versions endpoint may fail.
+        console.error(versionErr);
+      }
+      const [progressData, chaptersData] = await Promise.all([
         api.getChapterProgress(id),
-        api.getVersions(id),
+        api.getChapters(id, defaultVersion?.id),
       ]);
-      const defaultVersion = versionsData.find((v) => v.is_default) || versionsData[0] || null;
-      const chaptersData = await api.getChapters(id, defaultVersion?.id);
       setNovel(novelData);
       setChapters(chaptersData);
       setChapterProgress(progressData);
@@ -91,7 +99,7 @@ export default function NovelPage() {
         setSelectedChapterNum(progressData[0].chapter_num);
       }
     } catch (err) {
-      setError("加载失败");
+      setError(getErrorMessage(err, "加载失败"));
       console.error(err);
     } finally {
       setLoading(false);
@@ -287,7 +295,7 @@ export default function NovelPage() {
                     : "bg-[#8E8379]"
                 }`}
               />
-              {STATUS_MAP[novel.status]?.label || novel.status}
+              {STATUS_MAP[novel.status]?.label || formatNovelStatus(novel.status)}
             </div>
             <div className="relative">
               <Button
@@ -438,9 +446,9 @@ export default function NovelPage() {
                     >
                       {selectedChapter.content || "暂无内容"}
                     </div>
-                    {(selectedChapter.language_quality_score !== undefined || selectedChapter.language_quality_report) && (
+                    {(typeof selectedChapter.language_quality_score === "number" || selectedChapter.language_quality_report) && (
                       <div className="mt-6 border-t border-[rgba(60,60,67,0.12)] pt-4 text-xs text-[#7E756D]">
-                        语言质量：{selectedChapter.language_quality_score !== undefined
+                        语言质量：{typeof selectedChapter.language_quality_score === "number"
                           ? (selectedChapter.language_quality_score * 10).toFixed(1)
                           : "-"} / 10
                         {selectedChapter.language_quality_report && (

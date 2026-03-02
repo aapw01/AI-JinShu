@@ -1,5 +1,5 @@
 """Novels CRUD routes."""
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -63,15 +63,21 @@ def _to_character_profile_response(row: StoryCharacterProfile, novel_public_id: 
 
 @router.get("", response_model=list[NovelResponse])
 def list_novels(
-    skip: int = 0,
-    limit: int = 50,
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=200),
+    user_uuid: str | None = None,
+    only_mine: bool = False,
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission(Permission.NOVEL_READ)),
 ):
-    """List all novels, ordered by creation date (newest first)."""
+    """List novels, ordered by creation date (newest first)."""
     stmt = select(Novel)
     if principal.role != "admin":
         stmt = stmt.where(Novel.user_id == principal.user_uuid)
+    elif only_mine:
+        stmt = stmt.where(Novel.user_id == principal.user_uuid)
+    elif user_uuid:
+        stmt = stmt.where(Novel.user_id == user_uuid)
     stmt = stmt.order_by(Novel.created_at.desc()).offset(skip).limit(limit)
     novels = db.execute(stmt).scalars().all()
     return [_to_response(n) for n in novels]
@@ -107,7 +113,10 @@ def create_novel(
 
 
 @router.post("/idea-framework", response_model=IdeaFrameworkResponse)
-def generate_idea(data: IdeaFrameworkRequest):
+def generate_idea(
+    data: IdeaFrameworkRequest,
+    _: Principal = Depends(require_permission(Permission.NOVEL_CREATE)),
+):
     """Generate editable idea framework from title."""
     framework = generate_idea_framework(
         title=data.title,

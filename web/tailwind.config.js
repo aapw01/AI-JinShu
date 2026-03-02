@@ -1,6 +1,5 @@
 /** @type {import('tailwindcss').Config} */
 module.exports = {
-  darkMode: 'class',
   content: [
     './app/**/*.{js,ts,jsx,tsx,mdx}',
     './components/**/*.{js,ts,jsx,tsx,mdx}',
@@ -8,39 +7,56 @@ module.exports = {
   theme: {
     extend: {
       colors: {
-        background: '#0a0a0a',
-        foreground: '#fafafa',
+        background: '#F4F3F1',
+        foreground: '#1F1B18',
         card: {
-          DEFAULT: 'rgba(23, 23, 23, 0.8)',
-          foreground: '#fafafa',
+          DEFAULT: '#FBFAF8',
+          foreground: '#1F1B18',
         },
         primary: {
-          DEFAULT: '#8b5cf6',
-          foreground: '#fafafa',
+          DEFAULT: '#C8211B',
+          hover: '#AD1B16',
+          foreground: '#FFFFFF',
         },
         secondary: {
-          DEFAULT: '#6366f1',
-          foreground: '#fafafa',
+          DEFAULT: '#F4F3F1',
+          foreground: '#5E5650',
         },
         muted: {
-          DEFAULT: '#262626',
-          foreground: '#a3a3a3',
+          DEFAULT: '#F6F3EF',
+          foreground: '#8E8379',
         },
         accent: {
-          DEFAULT: '#7c3aed',
-          foreground: '#fafafa',
+          DEFAULT: '#F8ECEA',
+          foreground: '#A52A25',
         },
         destructive: {
-          DEFAULT: '#ef4444',
-          foreground: '#fafafa',
+          DEFAULT: '#C4372D',
+          foreground: '#FFFFFF',
         },
-        border: '#262626',
-        input: '#262626',
-        ring: '#8b5cf6',
+        success: {
+          DEFAULT: '#18864B',
+          bg: '#E9F9EF',
+          border: '#CDEFD8',
+        },
+        warning: {
+          DEFAULT: '#B8860B',
+          bg: '#FFF8E1',
+        },
+        border: '#DDD8D3',
+        input: '#DDD8D3',
+        ring: '#C8211B',
       },
-      backgroundImage: {
-        'gradient-primary': 'linear-gradient(135deg, #8b5cf6 0%, #6366f1 100%)',
-        'gradient-radial': 'radial-gradient(ellipse at center, var(--tw-gradient-stops))',
+      borderRadius: {
+        sm: '8px',
+        DEFAULT: '12px',
+        lg: '14px',
+        xl: '16px',
+      },
+      maxWidth: {
+        content: '1280px',
+        'content-wide': '1500px',
+        'content-narrow': '980px',
       },
       backdropBlur: {
         xs: '2px',

@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
 from app.core.tokens import estimate_tokens
-from app.models.novel import Chapter, NovelSpecification
+from app.models.novel import ChapterVersion, NovelSpecification
 from app.services.memory.summary_manager import SummaryManager
 from app.services.memory.story_bible import StoryBibleStore
 from app.services.memory.thread_ledger import get_thread_ledger
@@ -30,10 +30,10 @@ VOLUME_BRIEF_MAX_CHARS = 1600
 STORY_BIBLE_MAX_CHARS = 2200
 
 
-def _build_story_bible_context(novel_id: int, chapter_num: int, db: Session) -> str:
+def _build_story_bible_context(novel_id: int, novel_version_id: int, chapter_num: int, db: Session) -> str:
     bible = StoryBibleStore()
-    entities = bible.list_entities(novel_id, db=db)
-    events = bible.list_recent_events(novel_id, chapter_num - 1, limit=20, db=db)
+    entities = bible.list_entities(novel_id, novel_version_id=novel_version_id, db=db)
+    events = bible.list_recent_events(novel_id, chapter_num - 1, limit=20, novel_version_id=novel_version_id, db=db)
     if not entities and not events:
         return ""
     char_entities = [e for e in entities if e.entity_type == "character"][:10]
@@ -94,11 +94,12 @@ def _load_prewrite_from_db(novel_id: int, db: Session) -> dict:
     return {r.spec_type: r.content for r in rows}
 
 
-def _load_outline_from_db(novel_id: int, chapter_num: int, db: Session) -> dict:
+def _load_outline_from_db(novel_id: int, novel_version_id: int, chapter_num: int, db: Session) -> dict:
     from app.models.novel import ChapterOutline
 
     stmt = select(ChapterOutline).where(
         ChapterOutline.novel_id == novel_id,
+        ChapterOutline.novel_version_id == novel_version_id,
         ChapterOutline.chapter_num == chapter_num,
     )
     row = db.execute(stmt).scalar_one_or_none()
@@ -113,12 +114,12 @@ def _load_outline_from_db(novel_id: int, chapter_num: int, db: Session) -> dict:
     }
 
 
-def _get_last_chapter_ending(novel_id: int, chapter_num: int, db: Session) -> str:
+def _get_last_chapter_ending(novel_version_id: int, chapter_num: int, db: Session) -> str:
     if chapter_num <= 1:
         return ""
-    stmt = select(Chapter).where(
-        Chapter.novel_id == novel_id,
-        Chapter.chapter_num == chapter_num - 1,
+    stmt = select(ChapterVersion).where(
+        ChapterVersion.novel_version_id == novel_version_id,
+        ChapterVersion.chapter_num == chapter_num - 1,
     )
     row = db.execute(stmt).scalar_one_or_none()
     if not row or not row.content:
@@ -141,6 +142,7 @@ def _format_thread_ledger(ledger: dict) -> str:
 
 def build_chapter_context(
     novel_id: int,
+    novel_version_id: int,
     chapter_num: int,
     prewrite: dict,
     outline: dict,
@@ -157,11 +159,11 @@ def build_chapter_context(
         global_bible = _compress_global_bible(prewrite)
         thread_ledger = get_thread_ledger(novel_id, chapter_num, prewrite, db=db)
         thread_ledger_str = _format_thread_ledger(thread_ledger)
-        story_bible_context = _build_story_bible_context(novel_id, chapter_num, db)
+        story_bible_context = _build_story_bible_context(novel_id, novel_version_id, chapter_num, db)
 
-        all_before = summary_mgr.get_summaries_before(novel_id, chapter_num, db=db)
+        all_before = summary_mgr.get_summaries_before(novel_id, novel_version_id, chapter_num, db=db)
         recent_summaries = all_before[-RECENT_WINDOW_SIZE:]
-        last_ending = _get_last_chapter_ending(novel_id, chapter_num, db)
+        last_ending = _get_last_chapter_ending(novel_version_id, chapter_num, db)
         recent_parts = [f"第{s['chapter_num']}章: {s['summary']}" for s in recent_summaries]
         if last_ending:
             recent_parts.append(f"上章结尾: {last_ending}")
@@ -170,7 +172,7 @@ def build_chapter_context(
         volume_brief = ""
         if chapter_num > RECENT_WINDOW_SIZE + 1:
             volume_brief = summary_mgr.get_volume_brief(
-                novel_id, chapter_num, volume_size=30, db=db
+                novel_id, novel_version_id, chapter_num, volume_size=30, db=db
             )[:VOLUME_BRIEF_MAX_CHARS]
 
         used = (
@@ -185,7 +187,7 @@ def build_chapter_context(
         if used < token_budget:
             outline_text = f"{outline.get('title', '')}\n{outline.get('outline', '')}".strip()
             query_text = "\n".join(x for x in [outline_text, thread_ledger_str, recent_window] if x).strip()
-            chunks = vector_store.search(novel_id, query_text=query_text, limit=5, db=db)
+            chunks = vector_store.search(novel_id, novel_version_id, query_text=query_text, limit=5, db=db)
             for c in chunks:
                 content = c.get("content", "") or str(c)
                 if used + estimate_tokens(content) <= token_budget:
@@ -216,6 +218,7 @@ def get_context_for_chapter(
     db: Optional[Session] = None,
     prewrite: Optional[dict] = None,
     outline: Optional[dict] = None,
+    novel_version_id: int | None = None,
 ) -> dict:
     """Load relevant context for chapter generation. Backward compatible."""
     novel_id = int(novel_id)
@@ -224,14 +227,14 @@ def get_context_for_chapter(
     summary_mgr = SummaryManager()
     try:
         prewrite = prewrite if prewrite is not None else _load_prewrite_from_db(novel_id, db)
-        outline = outline if outline is not None else _load_outline_from_db(novel_id, chapter_num, db)
-        ctx = build_chapter_context(novel_id, chapter_num, prewrite, outline, db=db)
-        all_before = summary_mgr.get_summaries_before(novel_id, chapter_num, db=db)
+        outline = outline if outline is not None else _load_outline_from_db(novel_id, novel_version_id, chapter_num, db)
+        ctx = build_chapter_context(novel_id, novel_version_id, chapter_num, prewrite, outline, db=db)
+        all_before = summary_mgr.get_summaries_before(novel_id, novel_version_id, chapter_num, db=db)
         ctx["summaries"] = all_before[-RECENT_WINDOW_SIZE:]
         from app.services.memory.character_state import CharacterStateManager
 
         char_mgr = CharacterStateManager()
-        ctx["character_states"] = char_mgr.get_states(novel_id, chapter_num, db=db)
+        ctx["character_states"] = char_mgr.get_states(novel_id, chapter_num, db=db, novel_version_id=novel_version_id)
         return ctx
     finally:
         if should_close:

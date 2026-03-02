@@ -1,7 +1,7 @@
 """Admin user management routes."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from collections import defaultdict
 from sqlalchemy import select
@@ -38,6 +38,8 @@ def _percentile(samples: list[float], p: float) -> float:
 def list_users(
     query: str | None = None,
     status: str | None = None,
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=50, ge=1, le=200),
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission(Permission.USER_READ)),
 ):
@@ -47,6 +49,7 @@ def list_users(
         stmt = stmt.where(User.email.ilike(q))
     if status:
         stmt = stmt.where(User.status == status)
+    stmt = stmt.offset(skip).limit(limit)
     rows = db.execute(stmt).scalars().all()
     return [
         UserAdminItem(

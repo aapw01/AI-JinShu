@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: help install web-install infra migrate dev-api dev-worker dev-web dev stop test lint dev-reset logs
+.PHONY: help install web-install infra migrate migrate-safe dev-api dev-worker dev-beat dev-web dev stop test lint dev-reset logs
 
 help:
 	@echo "Available targets:"
@@ -25,11 +25,17 @@ infra:
 migrate:
 	@uv run alembic upgrade head
 
+migrate-safe:
+	@PGOPTIONS='-c lock_timeout=5s -c statement_timeout=120s' uv run alembic upgrade head
+
 dev-api:
 	@uv run uvicorn app.main:app --reload
 
 dev-worker:
 	@uv run celery -A app.workers.celery_app worker -l info
+
+dev-beat:
+	@uv run celery -A app.workers.celery_app beat -l info
 
 dev-web:
 	@cd web && npm run dev
@@ -43,30 +49,33 @@ dev:
 	cd web && npm install; \
 	cd ..; \
 	uv run alembic upgrade head; \
-	kill_tree() { \
-		pid="$$1"; \
-		children="$$(pgrep -P "$$pid" || true)"; \
-		for c in $$children; do kill_tree "$$c"; done; \
-		kill "$$pid" 2>/dev/null || true; \
+	start_pgroup() { \
+		if command -v setsid >/dev/null 2>&1; then \
+			setsid "$$@" & \
+		else \
+			python3 -c 'import os,sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' "$$@" & \
+		fi; \
+		last_bg_pid=$$!; \
 	}; \
 	cleanup() { \
 		code=$$?; \
 		trap - INT TERM EXIT; \
-		for p in "$${api_pid:-}" "$${worker_pid:-}" "$${web_pid:-}"; do \
+		for p in "$${api_pid:-}" "$${worker_pid:-}" "$${beat_pid:-}" "$${web_pid:-}"; do \
 			[ -n "$$p" ] || continue; \
-			kill_tree "$$p"; \
+			kill -TERM -- "-$$p" 2>/dev/null || true; \
 		done; \
 		sleep 0.5; \
-		for p in "$${api_pid:-}" "$${worker_pid:-}" "$${web_pid:-}"; do \
+		for p in "$${api_pid:-}" "$${worker_pid:-}" "$${beat_pid:-}" "$${web_pid:-}"; do \
 			[ -n "$$p" ] || continue; \
-			kill -9 "$$p" 2>/dev/null || true; \
+			kill -KILL -- "-$$p" 2>/dev/null || true; \
 		done; \
 		exit $$code; \
 	}; \
 	trap cleanup INT TERM EXIT; \
-	uv run uvicorn app.main:app --reload & api_pid=$$!; \
-	uv run celery -A app.workers.celery_app worker -l info & worker_pid=$$!; \
-	(cd web && npm run dev) & web_pid=$$!; \
+	start_pgroup uv run uvicorn app.main:app --reload; api_pid=$$last_bg_pid; \
+	start_pgroup uv run celery -A app.workers.celery_app worker -l info; worker_pid=$$last_bg_pid; \
+	start_pgroup uv run celery -A app.workers.celery_app beat -l info; beat_pid=$$last_bg_pid; \
+	start_pgroup bash -lc 'cd web && npm run dev'; web_pid=$$last_bg_pid; \
 	wait
 
 stop:

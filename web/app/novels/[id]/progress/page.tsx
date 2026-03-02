@@ -5,12 +5,14 @@ import { useParams, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { motion } from "framer-motion";
 import { ArrowLeft, CheckCircle2, LoaderCircle, Pause, Play, Square, XCircle } from "lucide-react";
-import { api, Novel, GenerationStatus, ObservabilityPayload, VolumeGateReport, ClosureReport, RewriteRequest } from "@/lib/api";
+import { api, Novel, GenerationStatus, ObservabilityPayload, VolumeGateReport, ClosureReport, RewriteRequest, getErrorMessage } from "@/lib/api";
+import { formatRunState } from "@/lib/display";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { SectionTitle } from "@/components/ui/SectionTitle";
 import { StatsCard } from "@/components/ui/StatsCard";
 import { TopBar } from "@/components/ui/TopBar";
+import { PageSpinner } from "@/components/ui/Spinner";
 
 const PIPELINE_STEPS = [
   { id: "book_orchestrator", label: "总控编排", desc: "拆分卷任务并调度执行" },
@@ -80,6 +82,9 @@ const CLOSURE_ACTION_LABELS: Record<string, string> = {
   force_finalize: "强制终审",
 };
 
+const ACTIVE_GENERATION_STATUSES = new Set(["queued", "dispatching", "running"]);
+const TERMINAL_GENERATION_STATUSES = new Set(["completed", "failed", "cancelled"]);
+
 export default function ProgressPage() {
   const params = useParams();
   const router = useRouter();
@@ -105,13 +110,24 @@ export default function ProgressPage() {
     api.getNovel(id).then(setNovel).catch(() => router.push("/novels"));
   }, [id, router]);
 
-  // Polling fallback for status
+  // Polling fallback for status — merge with existing state to avoid overwriting SSE data
   useEffect(() => {
     if (rewriteRequestId) return;
     const pollStatus = async () => {
       try {
         const s = await api.getGenerationStatus(id, taskId || undefined);
-        setStatus(s);
+        setStatus((prev) => {
+          if (!prev) return s;
+          const merged = { ...prev };
+          for (const [k, v] of Object.entries(s)) {
+            if (v !== undefined && v !== null && v !== 0 && v !== "") {
+              (merged as Record<string, unknown>)[k] = v;
+            }
+          }
+          if (s.status) merged.status = s.status;
+          if (s.progress !== undefined) merged.progress = s.progress;
+          return merged as typeof s;
+        });
         setLoading(false);
       } catch (err) {
         console.error(err);
@@ -122,6 +138,27 @@ export default function ProgressPage() {
     const interval = setInterval(pollStatus, 3000);
     return () => clearInterval(interval);
   }, [id, taskId]);
+
+  useEffect(() => {
+    if (rewriteRequestId || !taskId || status?.status !== "failed") return;
+    let disposed = false;
+    const syncToLatestActiveTask = async () => {
+      try {
+        const tasks = await api.listGenerationTasks(id, 20);
+        const current = tasks.find((t) => t.task_id === taskId);
+        const latestActive = tasks.find((t) => ACTIVE_GENERATION_STATUSES.has(t.status));
+        const currentTerminal = current ? TERMINAL_GENERATION_STATUSES.has(current.status) : true;
+        if (!latestActive || !currentTerminal || latestActive.task_id === taskId || disposed) return;
+        router.replace(`/novels/${id}/progress?task_id=${latestActive.task_id}`);
+      } catch {
+        // keep current task view when task list is temporarily unavailable
+      }
+    };
+    void syncToLatestActiveTask();
+    return () => {
+      disposed = true;
+    };
+  }, [id, rewriteRequestId, router, status?.status, taskId]);
 
   useEffect(() => {
     if (!rewriteRequestId) return;
@@ -167,8 +204,11 @@ export default function ProgressPage() {
   // SSE connection for real-time updates
   useEffect(() => {
     if (rewriteRequestId || !taskId) return;
+    let disposed = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
     const connectSSE = () => {
+      if (disposed) return;
       const es = api.streamProgress(id, taskId);
       eventSourceRef.current = es;
 
@@ -176,7 +216,6 @@ export default function ProgressPage() {
         try {
           const data = JSON.parse(event.data);
           if (data && typeof data === "object" && "status" in data) {
-            // Backward compatibility: older backend sent raw status payload.
             setStatus((prev) => ({ ...(prev || {}), ...(data as GenerationStatus) }));
           } else if (data.type === "status") {
             setStatus((prev) => ({ ...(prev || {}), ...(data.payload as GenerationStatus) }));
@@ -184,21 +223,23 @@ export default function ProgressPage() {
             setLogs((prev) => [...prev, data.payload]);
           }
         } catch {
-          // Plain text log
           setLogs((prev) => [...prev, event.data]);
         }
       };
 
       es.onerror = () => {
         es.close();
-        // Reconnect after delay
-        setTimeout(connectSSE, 5000);
+        if (!disposed) {
+          reconnectTimer = setTimeout(connectSSE, 5000);
+        }
       };
     };
 
     connectSSE();
 
     return () => {
+      disposed = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
       eventSourceRef.current?.close();
     };
   }, [id, taskId, rewriteRequestId]);
@@ -228,11 +269,7 @@ export default function ProgressPage() {
   );
 
   if (!novel) {
-    return (
-      <div className="min-h-screen flex items-center justify-center">
-        <div className="animate-spin w-8 h-8 border-2 border-[#C8211B] border-t-transparent rounded-full" />
-      </div>
-    );
+    return <PageSpinner />;
   }
 
   const isRewriteMode = Boolean(rewriteRequestId);
@@ -292,7 +329,7 @@ export default function ProgressPage() {
             </div>
             <div className="flex-1">
               <p className="font-medium text-[#C4372D]">{isRewriteMode ? "重写失败" : "生成失败"}</p>
-              <p className="text-sm text-[#C4372D]">{isRewriteMode ? (rewriteStatus?.error || "发生未知错误") : (status?.error || "发生未知错误")}</p>
+              <p className="text-sm text-[#C4372D]">{isRewriteMode ? (rewriteStatus?.error || "发生未知错误") : (status?.error || status?.message || "发生未知错误")}</p>
             </div>
             {isRewriteMode ? (
               <Button
@@ -305,7 +342,7 @@ export default function ProgressPage() {
                     const next = await api.getRewriteStatus(id, Number(rewriteRequestId));
                     setRewriteStatus(next);
                   } catch (e) {
-                    setLogs((prev) => [...prev, "重试提交失败，请稍后重试"]);
+                    setLogs((prev) => [...prev, getErrorMessage(e, "重试提交失败，请稍后重试")]);
                   } finally {
                     setRetrying(false);
                   }
@@ -322,7 +359,7 @@ export default function ProgressPage() {
                     const res = await api.retryGeneration(id, taskId || undefined);
                     router.replace(`/novels/${id}/progress?task_id=${res.task_id}`);
                   } catch (e) {
-                    setLogs((prev) => [...prev, "重试提交失败，请稍后重试"]);
+                    setLogs((prev) => [...prev, getErrorMessage(e, "重试提交失败，请稍后重试")]);
                   } finally {
                     setRetrying(false);
                   }
@@ -422,6 +459,7 @@ export default function ProgressPage() {
                 disabled={mutatingRunState || !taskId || isComplete || isFailed}
                 onClick={async () => {
                   if (!taskId) return;
+                  if (!window.confirm("确定要取消当前生成任务吗？此操作不可撤销。")) return;
                   try {
                     setMutatingRunState(true);
                     await api.cancelGenerationByNovel(id, taskId);
@@ -435,7 +473,7 @@ export default function ProgressPage() {
                 <Square className="w-4 h-4 mr-1.5" />
                 取消
               </Button>
-              <span className="text-xs text-[#8E8379]">运行状态：{runState || "-"}</span>
+              <span className="text-xs text-[#8E8379]">运行状态：{formatRunState(runState)}</span>
             </div>
           ) : null}
           {status?.pacing_mode === "accelerated" || status?.pacing_mode === "closing_accelerated" ? (
@@ -453,7 +491,7 @@ export default function ProgressPage() {
                     setStatus(s);
                     setLogs((prev) => [...prev, "已确认大纲，继续写作"]);
                   } catch (e) {
-                    setLogs((prev) => [...prev, "确认失败，请重试"]);
+                    setLogs((prev) => [...prev, getErrorMessage(e, "确认失败，请重试")]);
                   }
                 }}
               >
@@ -651,7 +689,7 @@ export default function ProgressPage() {
               />
               <StatsCard
                 label="任务状态"
-                value={rewriteStatus?.status || "running"}
+                value={formatRunState(rewriteStatus?.status || "running")}
                 hint={rewriteStatus?.error || rewriteStatus?.message || ""}
               />
             </div>

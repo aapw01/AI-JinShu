@@ -9,6 +9,8 @@ from sqlalchemy import select, func, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.api_errors import error_response
+
 from app.core.authn import create_access_token, require_auth
 from app.core.config import get_settings
 from app.core.database import get_db
@@ -17,6 +19,7 @@ from app.core.authz.types import Principal
 from app.models.novel import EmailVerificationToken, PasswordResetToken, User
 from app.schemas.auth import (
     AuthTokenResponse,
+    ChangePasswordRequest,
     ForgotPasswordRequest,
     LoginRequest,
     RegisterRequest,
@@ -101,23 +104,23 @@ def register(data: RegisterRequest, response: Response, db: Session = Depends(ge
             reason="mail_service_not_configured",
             email=data.email,
         )
-        return Response(
-            status_code=503,
-            content='{"detail":"Email verification is enabled but mail service is not configured"}',
-            media_type="application/json",
+        return error_response(
+            503,
+            "mail_service_not_configured",
+            "Email verification is enabled but mail service is not configured",
         )
     if not _is_email_like(data.email):
         log_event(logger, "auth.register.failed", level=logging.WARNING, reason="invalid_email", email=data.email)
-        return Response(status_code=400, content='{"detail":"Invalid email"}', media_type="application/json")
+        return error_response(400, "invalid_email", "Invalid email")
     ok, message = validate_password_complexity(data.password)
     if not ok:
         log_event(logger, "auth.register.failed", level=logging.WARNING, reason="weak_password", email=data.email)
-        return Response(status_code=400, content=f'{{"detail":"{message}"}}', media_type="application/json")
+        return error_response(400, "weak_password", message)
 
     existed = db.execute(select(User).where(User.email == data.email.lower())).scalar_one_or_none()
     if existed:
         log_event(logger, "auth.register.failed", level=logging.WARNING, reason="email_exists", email=data.email.lower())
-        return Response(status_code=409, content='{"detail":"Email already registered"}', media_type="application/json")
+        return error_response(409, "email_already_registered", "Email already registered")
 
     count = db.execute(select(func.count()).select_from(User)).scalar_one()
     first_user = int(count or 0) == 0
@@ -138,7 +141,7 @@ def register(data: RegisterRequest, response: Response, db: Session = Depends(ge
     except IntegrityError:
         db.rollback()
         log_event(logger, "auth.register.failed", level=logging.WARNING, reason="email_exists_race", email=data.email.lower())
-        return Response(status_code=409, content='{"detail":"Email already registered"}', media_type="application/json")
+        return error_response(409, "email_already_registered", "Email already registered")
     ensure_user_quota(db, user)
 
     if settings.auth_require_email_verification:
@@ -167,12 +170,12 @@ def login(data: LoginRequest, response: Response, db: Session = Depends(get_db))
     settings = get_settings()
     if not _is_email_like(data.email):
         log_event(logger, "auth.login.failed", level=logging.WARNING, reason="invalid_email", email=data.email)
-        return Response(status_code=400, content='{"detail":"Invalid email"}', media_type="application/json")
+        return error_response(400, "invalid_email", "Invalid email")
     now = utc_now()
     user = db.execute(select(User).where(User.email == data.email.lower())).scalar_one_or_none()
     if not user:
         log_event(logger, "auth.login.failed", level=logging.WARNING, reason="invalid_credentials", email=data.email.lower())
-        return Response(status_code=401, content='{"detail":"Invalid email or password"}', media_type="application/json")
+        return error_response(401, "invalid_credentials", "Invalid email or password")
 
     if user.locked_until:
         lock_dt = user.locked_until
@@ -180,13 +183,13 @@ def login(data: LoginRequest, response: Response, db: Session = Depends(get_db))
             lock_dt = lock_dt.replace(tzinfo=timezone.utc)
         if lock_dt > now:
             log_event(logger, "auth.login.failed", level=logging.WARNING, reason="locked", email=user.email, user_id=user.uuid)
-            return Response(status_code=423, content='{"detail":"Account temporarily locked"}', media_type="application/json")
+            return error_response(423, "account_temporarily_locked", "Account temporarily locked")
         user.locked_until = None
         user.failed_login_count = 0
 
     if user.status == "disabled":
         log_event(logger, "auth.login.failed", level=logging.WARNING, reason="disabled", email=user.email, user_id=user.uuid)
-        return Response(status_code=403, content='{"detail":"User disabled"}', media_type="application/json")
+        return error_response(403, "user_disabled", "User disabled")
 
     if not verify_password(data.password, user.password_hash):
         user.failed_login_count = int(user.failed_login_count or 0) + 1
@@ -195,11 +198,11 @@ def login(data: LoginRequest, response: Response, db: Session = Depends(get_db))
             user.failed_login_count = 0
         db.commit()
         log_event(logger, "auth.login.failed", level=logging.WARNING, reason="invalid_password", email=user.email, user_id=user.uuid)
-        return Response(status_code=401, content='{"detail":"Invalid email or password"}', media_type="application/json")
+        return error_response(401, "invalid_credentials", "Invalid email or password")
 
     if user.status == "pending_activation":
         log_event(logger, "auth.login.failed", level=logging.WARNING, reason="email_unverified", email=user.email, user_id=user.uuid)
-        return Response(status_code=403, content='{"detail":"Email not verified"}', media_type="application/json")
+        return error_response(403, "email_not_verified", "Email not verified")
 
     user.failed_login_count = 0
     user.locked_until = None
@@ -225,7 +228,7 @@ def logout(response: Response):
 def me(principal: Principal = Depends(require_auth()), db: Session = Depends(get_db)):
     user = db.execute(select(User).where(User.uuid == principal.user_uuid)).scalar_one_or_none()
     if not user:
-        return Response(status_code=404, content='{"detail":"User not found"}', media_type="application/json")
+        return error_response(404, "user_not_found", "User not found")
     return {"user": _user_payload(user)}
 
 
@@ -262,10 +265,10 @@ def confirm_verify_email(data: VerifyEmailRequest, db: Session = Depends(get_db)
         )
     ).scalar_one_or_none()
     if not row or row.expires_at < now:
-        return Response(status_code=400, content='{"detail":"Invalid or expired token"}', media_type="application/json")
+        return error_response(400, "invalid_or_expired_token", "Invalid or expired token")
     user = db.execute(select(User).where(User.id == row.user_id)).scalar_one_or_none()
     if not user:
-        return Response(status_code=404, content='{"detail":"User not found"}', media_type="application/json")
+        return error_response(404, "user_not_found", "User not found")
     row.used_at = now
     user.email_verified_at = now
     if user.status == "pending_activation":
@@ -299,7 +302,7 @@ def forgot_password(data: ForgotPasswordRequest, db: Session = Depends(get_db)):
 def reset_password(data: ResetPasswordRequest, db: Session = Depends(get_db)):
     ok, message = validate_password_complexity(data.new_password)
     if not ok:
-        return Response(status_code=400, content=f'{{"detail":"{message}"}}', media_type="application/json")
+        return error_response(400, "weak_password", message)
     now = utc_now()
     row = db.execute(
         select(PasswordResetToken).where(
@@ -308,13 +311,35 @@ def reset_password(data: ResetPasswordRequest, db: Session = Depends(get_db)):
         )
     ).scalar_one_or_none()
     if not row or row.expires_at < now:
-        return Response(status_code=400, content='{"detail":"Invalid or expired token"}', media_type="application/json")
+        return error_response(400, "invalid_or_expired_token", "Invalid or expired token")
     user = db.execute(select(User).where(User.id == row.user_id)).scalar_one_or_none()
     if not user:
-        return Response(status_code=404, content='{"detail":"User not found"}', media_type="application/json")
+        return error_response(404, "user_not_found", "User not found")
     row.used_at = now
     user.password_hash = hash_password(data.new_password)
     user.password_updated_at = now
+    user.failed_login_count = 0
+    user.locked_until = None
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/password/change")
+def change_password(
+    data: ChangePasswordRequest,
+    principal: Principal = Depends(require_auth()),
+    db: Session = Depends(get_db),
+):
+    user = db.execute(select(User).where(User.uuid == principal.user_uuid)).scalar_one_or_none()
+    if not user:
+        return error_response(404, "user_not_found", "User not found")
+    if not verify_password(data.current_password, user.password_hash):
+        return error_response(400, "current_password_incorrect", "Current password is incorrect")
+    ok, message = validate_password_complexity(data.new_password)
+    if not ok:
+        return error_response(400, "weak_password", message)
+    user.password_hash = hash_password(data.new_password)
+    user.password_updated_at = utc_now()
     user.failed_login_count = 0
     user.locked_until = None
     db.commit()

@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from app.core.llm import get_llm_with_fallback
+from app.core.llm import get_llm_with_fallback, response_to_text
 from app.core.strategy import get_model_for_stage
 from app.prompts import render_prompt
 
@@ -90,7 +90,7 @@ def generate_idea_framework(
     )
     try:
         resp = llm.invoke(prompt)
-        payload = _extract_json(str(resp.content))
+        payload = _extract_json(response_to_text(resp))
         parsed = IdeaFrameworkSchema.model_validate(payload)
         return parsed.model_dump()
     except Exception as exc:

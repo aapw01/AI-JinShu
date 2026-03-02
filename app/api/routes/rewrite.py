@@ -5,11 +5,12 @@ from datetime import datetime, timezone
 from difflib import SequenceMatcher
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.api_errors import http_error
 from app.core.authz.deps import require_permission
 from app.core.authz.resources import load_novel_resource
 from app.core.authz.types import Permission, Principal
@@ -118,7 +119,13 @@ def get_version_diff(
 ):
     novel = resolve_novel(db, novel_id)
     if not novel:
-        raise HTTPException(404, "Novel not found")
+        raise http_error(404, "novel_not_found", "Novel not found")
+    for vid in (version_id, compare_to):
+        owner = db.execute(
+            select(NovelVersion.novel_id).where(NovelVersion.id == vid)
+        ).scalar_one_or_none()
+        if owner != novel.id:
+            raise http_error(404, "version_not_found", f"Version {vid} not found for this novel")
     left = db.execute(
         select(ChapterVersion).where(ChapterVersion.novel_version_id == compare_to).order_by(ChapterVersion.chapter_num.asc())
     ).scalars().all()
@@ -126,7 +133,7 @@ def get_version_diff(
         select(ChapterVersion).where(ChapterVersion.novel_version_id == version_id).order_by(ChapterVersion.chapter_num.asc())
     ).scalars().all()
     if not left or not right:
-        raise HTTPException(404, "Version not found or has no chapters")
+        raise http_error(404, "version_not_found_or_empty", "Version not found or has no chapters")
     left_map = {int(c.chapter_num): c for c in left}
     right_map = {int(c.chapter_num): c for c in right}
     chapter_nums = sorted(set(left_map.keys()) | set(right_map.keys()))
@@ -177,7 +184,7 @@ def get_versions(
 ):
     novel = resolve_novel(db, novel_id)
     if not novel:
-        raise HTTPException(404, "Novel not found")
+        raise http_error(404, "novel_not_found", "Novel not found")
     rows = list_versions(db, novel.id)
     db.commit()
     return [_to_version_response(v, novel.uuid or str(novel.id)) for v in rows]
@@ -192,11 +199,11 @@ def activate_novel_version(
 ):
     novel = resolve_novel(db, novel_id)
     if not novel:
-        raise HTTPException(404, "Novel not found")
+        raise http_error(404, "novel_not_found", "Novel not found")
     try:
         activate_version(db, novel.id, version_id)
     except ValueError:
-        raise HTTPException(404, "Version not found")
+        raise http_error(404, "version_not_found", "Version not found")
     db.commit()
     return ActivateVersionResponse(ok=True, active_version_id=version_id)
 
@@ -210,37 +217,37 @@ def create_rewrite_request(
 ):
     novel = resolve_novel(db, novel_id)
     if not novel:
-        raise HTTPException(404, "Novel not found")
+        raise http_error(404, "novel_not_found", "Novel not found")
 
     if not req.annotations:
-        raise HTTPException(400, "annotations 不能为空")
+        raise http_error(400, "annotations_required", "annotations 不能为空")
 
     ensure_default_version(db, novel.id)
     try:
         base_version = get_version_or_default(db, novel.id, req.base_version_id)
     except ValueError:
-        raise HTTPException(404, "Base version not found")
+        raise http_error(404, "base_version_not_found", "Base version not found")
 
     chapter_nums: list[int] = []
     for ann in req.annotations:
         if ann.chapter_num <= 0:
-            raise HTTPException(400, "chapter_num 必须大于0")
+            raise http_error(400, "invalid_chapter_num", "chapter_num 必须大于0")
         _chapter_row, chapter = get_chapter_version(db, novel.id, ann.chapter_num, base_version.id)
         if not chapter:
-            raise HTTPException(400, f"第{ann.chapter_num}章在基础版本中不存在")
+            raise http_error(400, "base_version_chapter_not_found", f"第{ann.chapter_num}章在基础版本中不存在")
         if not ann.instruction.strip():
-            raise HTTPException(400, "instruction 不能为空")
+            raise http_error(400, "instruction_required", "instruction 不能为空")
         try:
             validate_annotation_payload(chapter.content or "", ann.start_offset, ann.end_offset, ann.selected_text)
         except ValueError as e:
-            raise HTTPException(400, str(e))
+            raise http_error(400, "invalid_annotation", str(e))
         chapter_nums.append(ann.chapter_num)
 
     rewrite_from = min(chapter_nums)
     max_chapter_stmt = select(ChapterVersion.chapter_num).where(ChapterVersion.novel_version_id == base_version.id)
     chapter_candidates = [x[0] for x in db.execute(max_chapter_stmt).all()]
     if not chapter_candidates:
-        raise HTTPException(400, "基础版本没有章节")
+        raise http_error(400, "base_version_empty", "基础版本没有章节")
     rewrite_to = max(chapter_candidates)
 
     target_version = create_target_version(db, novel.id, base_version, rewrite_from)
@@ -306,18 +313,18 @@ def get_rewrite_status(
     novel_id: str,
     request_id: int,
     db: Session = Depends(get_db),
-    _: Principal = Depends(require_permission(Permission.NOVEL_READ, resource_loader=load_novel_resource)),
+    principal: Principal = Depends(require_permission(Permission.NOVEL_READ, resource_loader=load_novel_resource)),
 ):
     novel = resolve_novel(db, novel_id)
     if not novel:
-        raise HTTPException(404, "Novel not found")
+        raise http_error(404, "novel_not_found", "Novel not found")
     row = db.execute(
         select(RewriteRequest).where(RewriteRequest.id == request_id, RewriteRequest.novel_id == novel.id)
     ).scalar_one_or_none()
     if not row:
-        raise HTTPException(404, "Rewrite request not found")
+        raise http_error(404, "rewrite_request_not_found", "Rewrite request not found")
     if row.task_id:
-        task = get_task_by_public_id(db, public_id=row.task_id)
+        task = get_task_by_public_id(db, public_id=row.task_id, user_uuid=principal.user_uuid)
         if task:
             row.status = task.status
             row.progress = float(task.progress or row.progress or 0.0)
@@ -335,15 +342,15 @@ def retry_rewrite_request(
 ):
     novel = resolve_novel(db, novel_id)
     if not novel:
-        raise HTTPException(404, "Novel not found")
+        raise http_error(404, "novel_not_found", "Novel not found")
 
     row = db.execute(
         select(RewriteRequest).where(RewriteRequest.id == request_id, RewriteRequest.novel_id == novel.id)
     ).scalar_one_or_none()
     if not row:
-        raise HTTPException(404, "Rewrite request not found")
+        raise http_error(404, "rewrite_request_not_found", "Rewrite request not found")
     if row.status not in {"failed", "cancelled"}:
-        raise HTTPException(409, f"当前状态 {row.status} 不支持重试")
+        raise http_error(409, "rewrite_not_retryable", f"当前状态 {row.status} 不支持重试")
 
     creation_task = submit_task(
         db,

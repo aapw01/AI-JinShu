@@ -27,6 +27,7 @@ from app.services.task_runtime.checkpoint_repo import (
     mark_unit_completed,
     update_resume_cursor,
 )
+from app.services.task_runtime.lease_service import background_heartbeat
 from app.services.storyboard.character_prompts import compose_character_prompts_for_version
 from app.services.storyboard.service import (
     build_quality_report,
@@ -85,6 +86,21 @@ def _get_creation_task_state(task_db_id: int) -> str | None:
     try:
         row = get_creation_task_by_id(db, task_id=task_db_id)
         return row.status if row else None
+    finally:
+        db.close()
+
+
+def _check_worker_superseded(task_db_id: int, current_celery_id: str) -> None:
+    db = SessionLocal()
+    try:
+        row = get_creation_task_by_id(db, task_id=task_db_id)
+        if not row:
+            return
+        if row.worker_task_id and row.worker_task_id != current_celery_id:
+            raise RuntimeError(
+                f"worker superseded: creation_task.worker_task_id={row.worker_task_id}, "
+                f"current={current_celery_id}"
+            )
     finally:
         db.close()
 
@@ -162,11 +178,15 @@ def run_storyboard_pipeline(
     self,
     *,
     project_id: int,
+    novel_version_id: int | None = None,
     task_db_id: int | None = None,
     version_ids: list[int],
     creation_task_id: int | None = None,
 ):
     begin_usage_session(f"storyboard:{self.request.id}")
+    hb_interval = max(5, int(get_settings().creation_worker_heartbeat_seconds or 30))
+    hb_ctx = background_heartbeat(creation_task_id, heartbeat_fn=_heartbeat_creation, interval_seconds=hb_interval)
+    hb_ctx.__enter__()
     db = SessionLocal()
     try:
         project = db.execute(select(StoryboardProject).where(StoryboardProject.id == project_id)).scalar_one_or_none()
@@ -174,6 +194,7 @@ def run_storyboard_pipeline(
         if not project:
             raise RuntimeError("storyboard task context not found")
         if creation_task_id is not None:
+            _check_worker_superseded(creation_task_id, self.request.id)
             c_status = _get_creation_task_state(creation_task_id)
             if c_status not in {"dispatching", "running"}:
                 logger.info("Skip storyboard execution because creation_task status=%s", c_status)
@@ -191,7 +212,11 @@ def run_storyboard_pipeline(
         if not versions:
             raise RuntimeError("storyboard versions not found")
 
-        chapters = load_novel_chapters(db, novel.id)
+        effective_novel_version_id = int(novel_version_id) if novel_version_id is not None else None
+        if effective_novel_version_id is None and versions:
+            candidate = versions[0].source_novel_version_id
+            effective_novel_version_id = int(candidate) if candidate is not None else None
+        chapters = load_novel_chapters(db, novel.id, effective_novel_version_id)
         if not chapters:
             raise RuntimeError("novel has no chapters to adapt")
 
@@ -225,10 +250,14 @@ def run_storyboard_pipeline(
                 task = _reload_task(db, task_db_id)
                 if not task:
                     raise RuntimeError("task missing while running")
+                if creation_task_id is not None:
+                    _heartbeat_creation(creation_task_id)
                 while task.run_state == "paused":
                     update_task_state(db, task, status="paused", run_state="paused", phase="paused", message="分镜生成已暂停")
                     db.commit()
                     _publish(task)
+                    if creation_task_id is not None:
+                        _heartbeat_creation(creation_task_id)
                     time.sleep(1.2)
                     task = _reload_task(db, task_db_id)
                     if not task:
@@ -240,6 +269,11 @@ def run_storyboard_pipeline(
                     project.status = "failed"
                     db.commit()
                     _publish(task)
+                    if creation_task_id is not None:
+                        try:
+                            _finalize_creation(creation_task_id, final_status="cancelled", phase="cancelled", message="任务已取消", progress=0.0)
+                        except Exception:
+                            logger.exception("Failed to finalize creation task %s on cancel", creation_task_id)
                     return
             elif creation_task_id is not None:
                 _heartbeat_creation(creation_task_id)
@@ -249,6 +283,10 @@ def run_storyboard_pipeline(
                         v.status = "failed"
                     project.status = "failed"
                     db.commit()
+                    try:
+                        _finalize_creation(creation_task_id, final_status="cancelled", phase="cancelled", message="任务已取消", progress=0.0)
+                    except Exception:
+                        logger.exception("Failed to finalize creation task %s on cancel", creation_task_id)
                     return
                 if c_state == "paused":
                     raise RuntimeError("storyboard_paused")
@@ -344,6 +382,8 @@ def run_storyboard_pipeline(
                         message=f"{lane} 已完成第{chapter_no}章分镜",
                     )
                 db.commit()
+            if creation_task_id is not None:
+                _heartbeat_creation(creation_task_id)
             _, contract, quality = generate_lane_shots(
                 lane=lane,
                 novel=novel,
@@ -391,8 +431,19 @@ def run_storyboard_pipeline(
                     error_code="FAILED_STYLE_GATE",
                     error_category="policy",
                 )
+                if creation_task_id is not None:
+                    try:
+                        _finalize_creation(
+                            creation_task_id, final_status="failed", phase="style_consistency_gate",
+                            message=f"{lane} 风格一致性未达标", error_code="FAILED_STYLE_GATE",
+                            error_category="policy", progress=round((idx * 100) / total_lanes, 2),
+                        )
+                    except Exception:
+                        logger.exception("Failed to finalize creation task %s on style gate", creation_task_id)
                 return
 
+            if creation_task_id is not None:
+                _heartbeat_creation(creation_task_id)
             if task:
                 update_task_state(
                     db,
@@ -457,6 +508,15 @@ def run_storyboard_pipeline(
                     error_code="FAILED_IDENTITY_REQUIRED",
                     error_category="policy",
                 )
+                if creation_task_id is not None:
+                    try:
+                        _finalize_creation(
+                            creation_task_id, final_status="failed", phase="character_identity_gate",
+                            message="角色身份字段缺失，门禁未通过", error_code="FAILED_IDENTITY_REQUIRED",
+                            error_category="policy", progress=round((idx * 100) / total_lanes, 2),
+                        )
+                    except Exception:
+                        logger.exception("Failed to finalize creation task %s on identity gate", creation_task_id)
                 return
 
             version.status = "completed"
@@ -530,21 +590,24 @@ def run_storyboard_pipeline(
         if task:
             _publish(task)
         if creation_task_id is not None:
-            usage = snapshot_usage()
-            _finalize_creation(
-                creation_task_id,
-                final_status="completed",
-                progress=100.0,
-                phase="completed",
-                message="导演分镜草案已生成",
-                result_json={
-                    "token_usage_input": int(usage.get("input_tokens") or 0),
-                    "token_usage_output": int(usage.get("output_tokens") or 0),
-                    "estimated_cost": float(usage.get("estimated_cost") or 0.0),
-                    "usage_calls": int(usage.get("calls") or 0),
-                    "usage_stages": usage.get("stages") or {},
-                },
-            )
+            try:
+                usage = snapshot_usage()
+                _finalize_creation(
+                    creation_task_id,
+                    final_status="completed",
+                    progress=100.0,
+                    phase="completed",
+                    message="导演分镜草案已生成",
+                    result_json={
+                        "token_usage_input": int(usage.get("input_tokens") or 0),
+                        "token_usage_output": int(usage.get("output_tokens") or 0),
+                        "estimated_cost": float(usage.get("estimated_cost") or 0.0),
+                        "usage_calls": int(usage.get("calls") or 0),
+                        "usage_stages": usage.get("stages") or {},
+                    },
+                )
+            except Exception:
+                logger.exception("Failed to finalize creation task %s", creation_task_id)
         log_event(
             logger,
             "storyboard.task.completed",
@@ -577,24 +640,27 @@ def run_storyboard_pipeline(
         if task:
             _publish(task)
         if creation_task_id is not None:
-            usage = snapshot_usage()
-            _finalize_creation(
-                creation_task_id,
-                final_status="paused" if is_paused else ("cancelled" if is_cancelled else "failed"),
-                progress=0.0,
-                phase="paused" if is_paused else ("cancelled" if is_cancelled else "failed"),
-                message="分镜生成已暂停" if is_paused else ("分镜生成已取消" if is_cancelled else "导演分镜生成失败"),
-                error_code=None if (is_paused or is_cancelled) else "STORYBOARD_PIPELINE_FAILED",
-                error_category=None if (is_paused or is_cancelled) else "transient",
-                error_detail=None if (is_paused or is_cancelled) else str(exc),
-                result_json={
-                    "token_usage_input": int(usage.get("input_tokens") or 0),
-                    "token_usage_output": int(usage.get("output_tokens") or 0),
-                    "estimated_cost": float(usage.get("estimated_cost") or 0.0),
-                    "usage_calls": int(usage.get("calls") or 0),
-                    "usage_stages": usage.get("stages") or {},
-                },
-            )
+            try:
+                usage = snapshot_usage()
+                _finalize_creation(
+                    creation_task_id,
+                    final_status="paused" if is_paused else ("cancelled" if is_cancelled else "failed"),
+                    progress=0.0,
+                    phase="paused" if is_paused else ("cancelled" if is_cancelled else "failed"),
+                    message="分镜生成已暂停" if is_paused else ("分镜生成已取消" if is_cancelled else "导演分镜生成失败"),
+                    error_code=None if (is_paused or is_cancelled) else "STORYBOARD_PIPELINE_FAILED",
+                    error_category=None if (is_paused or is_cancelled) else "transient",
+                    error_detail=None if (is_paused or is_cancelled) else str(exc),
+                    result_json={
+                        "token_usage_input": int(usage.get("input_tokens") or 0),
+                        "token_usage_output": int(usage.get("output_tokens") or 0),
+                        "estimated_cost": float(usage.get("estimated_cost") or 0.0),
+                        "usage_calls": int(usage.get("calls") or 0),
+                        "usage_stages": usage.get("stages") or {},
+                    },
+                )
+            except Exception:
+                logger.exception("Failed to finalize creation task %s", creation_task_id)
         log_event(
             logger,
             "storyboard.task.stopped" if (is_paused or is_cancelled) else "storyboard.task.failed",
@@ -608,5 +674,6 @@ def run_storyboard_pipeline(
         if not (is_paused or is_cancelled):
             raise
     finally:
+        hb_ctx.__exit__(None, None, None)
         db.close()
         end_usage_session()

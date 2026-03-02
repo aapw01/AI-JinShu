@@ -2,12 +2,23 @@ from sqlalchemy import select
 
 from app.core.authn import create_access_token
 from app.core.database import SessionLocal
-from app.models.novel import Novel, StoryCharacterProfile
+from app.models.novel import Novel, NovelVersion, StoryCharacterProfile, User
 from app.models.storyboard import StoryboardProject
 from app.models.storyboard import StoryboardShot, StoryboardVersion
 
 
+def _ensure_user(user_uuid: str, role: str = "user", status: str = "active") -> None:
+    db = SessionLocal()
+    try:
+        if not db.execute(select(User).where(User.uuid == user_uuid)).scalar_one_or_none():
+            db.add(User(uuid=user_uuid, email=f"{user_uuid}@test.local", password_hash="x", role=role, status=status))
+            db.commit()
+    finally:
+        db.close()
+
+
 def _auth_headers(user_uuid: str, role: str = "user", status: str = "active") -> dict[str, str]:
+    _ensure_user(user_uuid, role=role, status=status)
     token = create_access_token(user_uuid, role=role, status=status)
     return {"Authorization": f"Bearer {token}"}
 
@@ -26,6 +37,7 @@ def test_storyboard_create_and_generate_flow(anon_client):
     db = SessionLocal()
     try:
         novel = db.execute(select(Novel).where(Novel.uuid == novel_public_id)).scalar_one()
+        novel_id = int(novel.id)
         novel.status = "completed"
         db.commit()
     finally:
@@ -54,7 +66,20 @@ def test_storyboard_create_and_generate_flow(anon_client):
     assert created.json()["mode"] in {"quick", "professional"}
     assert isinstance(created.json()["style_recommendations"], list)
 
-    submit = anon_client.post(f"/api/storyboards/{project_id}/generate", headers=owner_headers)
+    db = SessionLocal()
+    try:
+        source_version = db.execute(
+            select(NovelVersion).where(NovelVersion.novel_id == novel_id, NovelVersion.is_default == 1)
+        ).scalar_one()
+        source_version_id = int(source_version.id)
+    finally:
+        db.close()
+
+    submit = anon_client.post(
+        f"/api/storyboards/{project_id}/generate",
+        json={"novel_version_id": source_version_id},
+        headers=owner_headers,
+    )
     assert submit.status_code == 200
     assert isinstance(submit.json()["task_id"], str) and len(submit.json()["task_id"]) >= 8
     assert len(submit.json()["created_version_ids"]) == 2

@@ -12,7 +12,7 @@ class SummaryManager:
     """Manage chapter summaries."""
 
     def get_summaries_before(
-        self, novel_id: int, before_chapter: int, db: Optional[Session] = None
+        self, novel_id: int, novel_version_id: int, before_chapter: int, db: Optional[Session] = None
     ) -> list[dict]:
         """Get summaries of chapters before given number."""
         should_close = db is None
@@ -20,7 +20,11 @@ class SummaryManager:
         try:
             stmt = (
                 select(ChapterSummary)
-                .where(ChapterSummary.novel_id == novel_id, ChapterSummary.chapter_num < before_chapter)
+                .where(
+                    ChapterSummary.novel_id == novel_id,
+                    ChapterSummary.novel_version_id == novel_version_id,
+                    ChapterSummary.chapter_num < before_chapter,
+                )
                 .order_by(ChapterSummary.chapter_num)
             )
             rows = db.execute(stmt).scalars().all()
@@ -32,6 +36,7 @@ class SummaryManager:
     def get_volume_brief(
         self,
         novel_id: int,
+        novel_version_id: int,
         chapter_num: int,
         volume_size: int = 30,
         chars_per_volume: int = 400,
@@ -50,6 +55,7 @@ class SummaryManager:
                 select(ChapterSummary)
                 .where(
                     ChapterSummary.novel_id == novel_id,
+                    ChapterSummary.novel_version_id == novel_version_id,
                     ChapterSummary.chapter_num < cutoff,
                 )
                 .order_by(ChapterSummary.chapter_num)
@@ -78,20 +84,31 @@ class SummaryManager:
                 db.close()
 
     def add_summary(
-        self, novel_id: int, chapter_num: int, summary: str, db: Optional[Session] = None
+        self, novel_id: int, novel_version_id: int, chapter_num: int, summary: str, db: Optional[Session] = None
     ):
         """Add or update chapter summary."""
         should_close = db is None
         db = db or SessionLocal()
         try:
-            stmt = select(ChapterSummary).where(ChapterSummary.novel_id == novel_id, ChapterSummary.chapter_num == chapter_num)
+            stmt = select(ChapterSummary).where(
+                ChapterSummary.novel_id == novel_id,
+                ChapterSummary.novel_version_id == novel_version_id,
+                ChapterSummary.chapter_num == chapter_num,
+            )
             existing = db.execute(stmt).scalar_one_or_none()
             if existing:
                 existing.summary = summary
             else:
                 try:
                     with db.begin_nested():
-                        db.add(ChapterSummary(novel_id=novel_id, chapter_num=chapter_num, summary=summary))
+                        db.add(
+                            ChapterSummary(
+                                novel_id=novel_id,
+                                novel_version_id=novel_version_id,
+                                chapter_num=chapter_num,
+                                summary=summary,
+                            )
+                        )
                         db.flush()
                 except IntegrityError:
                     existing = db.execute(stmt).scalar_one_or_none()
