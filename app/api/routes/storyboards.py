@@ -488,12 +488,41 @@ def retry_storyboard_task(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission(Permission.STORYBOARD_GENERATE, resource_loader=load_storyboard_resource)),
 ):
+    from app.models.creation_task import CreationTask
+
     project = get_project_or_404(db, project_id)
     if not project:
         raise http_error(404, "storyboard_project_not_found", "Storyboard project not found")
     latest = get_latest_task(db, project_id)
     if latest and latest.status in RUNNING_STATES:
         raise http_error(409, "storyboard_task_running", "已有进行中的分镜任务")
+
+    existing_creation = db.execute(
+        select(CreationTask)
+        .where(
+            CreationTask.task_type == "storyboard",
+            CreationTask.resource_type == "storyboard_project",
+            CreationTask.resource_id == int(project.id),
+            CreationTask.user_uuid == (principal.user_uuid or ""),
+            CreationTask.status.in_({"failed", "paused"}),
+        )
+        .order_by(CreationTask.updated_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if existing_creation:
+        try:
+            resumed = resume_creation_task(db, public_id=existing_creation.public_id, user_uuid=principal.user_uuid or "")
+        except ValueError:
+            resumed = None
+        if resumed:
+            if latest:
+                update_task_state(db, latest, status="submitted", run_state="submitted", phase="queued", message="重试任务已提交（断点续传）")
+            project.status = "generating"
+            db.commit()
+            return StoryboardActionResponse(
+                ok=True, storyboard_project_id=project.id,
+                task_id=resumed.public_id, run_state="queued",
+            )
 
     source_novel_version_id = get_default_version_id(db, project.novel_id)
     latest_version = db.execute(

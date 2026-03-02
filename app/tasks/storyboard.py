@@ -193,7 +193,18 @@ def run_storyboard_pipeline(
         project = db.execute(select(StoryboardProject).where(StoryboardProject.id == project_id)).scalar_one_or_none()
         task = _reload_task(db, task_db_id) if task_db_id is not None else None
         if not project:
-            raise RuntimeError("storyboard task context not found")
+            logger.warning("Storyboard project %s no longer exists (likely deleted), marking task as permanently failed", project_id)
+            if creation_task_id is not None:
+                _finalize_creation(
+                    creation_task_id,
+                    final_status="failed",
+                    progress=0.0,
+                    phase="failed",
+                    message="分镜项目已不存在（可能已被删除）",
+                    error_code="STORYBOARD_PROJECT_NOT_FOUND",
+                    error_category="permanent",
+                )
+            return
         if creation_task_id is not None:
             _check_worker_superseded(creation_task_id, self.request.id)
             c_status = _get_creation_task_state(creation_task_id)
@@ -278,6 +289,7 @@ def run_storyboard_pipeline(
                     return
             elif creation_task_id is not None:
                 _heartbeat_creation(creation_task_id)
+                _check_worker_superseded(creation_task_id, self.request.id)
                 c_state = _get_creation_task_state(creation_task_id)
                 if c_state == "cancelled":
                     for v in versions:
@@ -339,6 +351,7 @@ def run_storyboard_pipeline(
                     continue
                 if creation_task_id is not None:
                     _heartbeat_creation(creation_task_id)
+                    _check_worker_superseded(creation_task_id, self.request.id)
                     c_state = _get_creation_task_state(creation_task_id)
                     if c_state == "cancelled":
                         raise RuntimeError("storyboard_cancelled")

@@ -201,6 +201,12 @@ def finalize_task(
         return None
     if task.status in TERMINAL_STATUSES and final_status in TERMINAL_STATUSES:
         return task
+    if task.status == "queued" and final_status in {"paused", "failed"}:
+        logger.info(
+            "Ignoring stale finalize (status=%s→%s) for task %s — task was already re-queued",
+            task.status, final_status, task_id,
+        )
+        return task
     if task.status not in {"running", "dispatching", "queued"} and final_status not in {"queued"}:
         return task
     if final_status not in {"completed", "failed", "cancelled", "queued", "paused"}:
@@ -283,8 +289,15 @@ def cancel_task(db: Session, *, public_id: str, user_uuid: str) -> CreationTask:
         raise ValueError("task_not_found")
     if task.status in TERMINAL_STATUSES:
         return task
+    worker_id = task.worker_task_id
     transition_task_status(db, task=task, to_status="cancelled", phase="cancelled", message="任务已取消")
     task.worker_lease_expires_at = None
+    if worker_id:
+        try:
+            from app.workers.celery_app import app as celery_app
+            celery_app.control.revoke(worker_id, terminate=True)
+        except Exception:
+            logger.warning("Failed to revoke worker %s on cancel", worker_id, exc_info=True)
     dispatch_user_queue(db, user_uuid=user_uuid)
     return task
 
@@ -306,9 +319,9 @@ def _reclaim_update_redis(items: list[tuple[str | None, str | None, str | None]]
         }, ensure_ascii=False)
         for worker_id, public_id, novel_id in items:
             if worker_id:
-                r.setex(f"generation:task:{worker_id}", 86400, queued_payload)
+                r.setex(f"generation:{worker_id}", 86400, queued_payload)
             if public_id:
-                r.setex(f"generation:task:{public_id}", 86400, queued_payload)
+                r.setex(f"generation:{public_id}", 86400, queued_payload)
             if novel_id:
                 r.setex(f"generation:novel:{novel_id}", 86400, queued_payload)
     except Exception:

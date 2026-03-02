@@ -308,6 +308,7 @@ def submit_rewrite_task(
                     _heartbeat_creation(creation_task_id)
                 except Exception:
                     pass
+                _check_worker_superseded(creation_task_id, self.request.id)
                 c_state = _get_creation_task_state(creation_task_id)
                 if c_state == "cancelled":
                     raise RuntimeError("rewrite_cancelled")
@@ -496,6 +497,19 @@ def submit_rewrite_task(
                 target_version.status = "failed"
             db.commit()
             if creation_task_id is not None:
+                try:
+                    last = get_last_completed_unit(db, creation_task_id=creation_task_id, unit_type="chapter")
+                    if last is not None:
+                        update_resume_cursor(
+                            db,
+                            creation_task_id=creation_task_id,
+                            unit_type="chapter",
+                            last_completed_unit_no=last,
+                            next_unit_no=int(last) + 1,
+                        )
+                        db.commit()
+                except Exception:
+                    logger.warning("Failed to update rewrite resume_cursor on failure", exc_info=True)
                 try:
                     usage = snapshot_usage()
                     _finalize_creation(

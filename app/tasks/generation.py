@@ -365,6 +365,7 @@ def _run_volume_generation(
                 _heartbeat_creation(creation_task_id)
             except Exception:
                 pass
+            _check_worker_superseded(creation_task_id, parent_task_id)
             creation_state = _get_creation_task_state(creation_task_id)
             if creation_state == "cancelled":
                 raise RuntimeError("generation_cancelled")
@@ -770,6 +771,24 @@ def submit_book_generation_task(
         data["estimated_cost"] = float(usage.get("estimated_cost") or data.get("estimated_cost") or 0.0)
         db = SessionLocal()
         try:
+            if creation_task_id is not None and data.get("status") in {"failed", "paused"}:
+                try:
+                    last = get_last_completed_unit(
+                        db,
+                        creation_task_id=creation_task_id,
+                        unit_type="chapter",
+                    )
+                    if last is not None:
+                        data["current_chapter"] = int(last) + 1
+                        update_resume_cursor(
+                            db,
+                            creation_task_id=creation_task_id,
+                            unit_type="chapter",
+                            last_completed_unit_no=last,
+                            next_unit_no=int(last) + 1,
+                        )
+                except Exception:
+                    logger.warning("Failed to update resume_cursor on task failure", exc_info=True)
             _persist_generation_task(db, task_id, data)
             record_generation_usage(db, task_id=task_id, novel_id=int(novel_id), source="generation")
             db.commit()

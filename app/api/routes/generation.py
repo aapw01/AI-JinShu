@@ -337,7 +337,11 @@ def retry_generation(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission(Permission.NOVEL_GENERATE, resource_loader=load_novel_resource)),
 ):
-    """Retry generation from latest failed position (or specified failed task)."""
+    """Retry generation from latest failed position (or specified failed task).
+
+    Prefer resume_task on the existing CreationTask to preserve checkpoints.
+    Fall back to creating a new task only when no resumable CreationTask exists.
+    """
     from app.core.database import resolve_novel
 
     novel = resolve_novel(db, novel_id)
@@ -345,6 +349,127 @@ def retry_generation(
         raise http_error(404, "novel_not_found", "Novel not found")
     user = db.execute(select(User).where(User.uuid == principal.user_uuid)).scalar_one_or_none()
 
+    # 1) Resolve source CreationTask (unified flow uses CreationTask.public_id as task_id)
+    source_creation: CreationTask | None = None
+    if req.task_id:
+        source_creation = get_task_by_public_id(db, public_id=req.task_id, user_uuid=principal.user_uuid or "")
+        if source_creation and (source_creation.resource_id != int(novel.id) or source_creation.task_type != "generation"):
+            source_creation = None
+    if source_creation is None:
+        source_creation = db.execute(
+            select(CreationTask)
+            .where(
+                CreationTask.user_uuid == (principal.user_uuid or ""),
+                CreationTask.task_type == "generation",
+                CreationTask.resource_type == "novel",
+                CreationTask.resource_id == int(novel.id),
+                CreationTask.status == "failed",
+            )
+            .order_by(CreationTask.updated_at.desc(), CreationTask.id.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+
+    # 2) If we have a failed or paused CreationTask, resume it (preserves checkpoints)
+    if source_creation and source_creation.status in {"failed", "paused"}:
+        if (source_creation.retry_count or 0) >= (source_creation.max_retries or 0):
+            raise http_error(409, "max_retries_exceeded", "已达到最大重试次数")
+        try:
+            resumed = resume_task(db, public_id=source_creation.public_id, user_uuid=principal.user_uuid or "")
+        except ValueError as exc:
+            if str(exc) == "task_not_resumable":
+                raise http_error(409, "task_not_resumable", "当前任务不可恢复")
+            raise
+        novel.status = "generating"
+        db.commit()
+        cursor = resumed.resume_cursor_json if isinstance(resumed.resume_cursor_json, dict) else {}
+        next_ch = cursor.get("next")
+        payload_data = resumed.payload_json or {}
+        total_ch = int(payload_data.get("num_chapters") or 0)
+        msg = f"重试已提交：从第{int(next_ch)}章继续" if next_ch is not None else "重试已提交"
+        data = {
+            "status": "queued",
+            "run_state": "queued",
+            "step": "queued",
+            "current_phase": "queued",
+            "current_subtask": {"key": "queued", "label": "任务已入队", "progress": 0},
+            "subtask_key": "queued",
+            "subtask_label": "任务已入队",
+            "subtask_progress": 0,
+            "current_chapter": int(next_ch) if next_ch is not None else 0,
+            "total_chapters": total_ch,
+            "progress": 0,
+            "message": msg,
+            "task_id": resumed.public_id,
+            "trace_id": getattr(request.state, "trace_id", None),
+        }
+        _redis_set_json(_redis_key(resumed.public_id), data)
+        _redis_set_json(_novel_key(str(novel.id)), data)
+        log_event(
+            logger,
+            "generation.retry.submit",
+            novel_id=novel.id,
+            user_id=principal.user_uuid,
+            task_id=resumed.public_id,
+            run_state="queued",
+            chapter_num=int(next_ch) if next_ch is not None else 0,
+            total_chapters=total_ch,
+        )
+        return GenerateResponse(task_id=resumed.public_id, novel_id=novel.uuid or str(novel.id), status="queued")
+
+    # 3) If source_creation exists but is cancelled, create new task from its resume_cursor
+    if source_creation and source_creation.status == "cancelled":
+        payload_data = source_creation.payload_json or {}
+        start_ch = int(payload_data.get("start_chapter") or 1)
+        num_ch = int(payload_data.get("num_chapters") or 1)
+        cursor = source_creation.resume_cursor_json if isinstance(source_creation.resume_cursor_json, dict) else {}
+        retry_start = int(cursor.get("next") or start_ch)
+        source_end = start_ch + max(1, num_ch) - 1
+        retry_start = max(start_ch, min(retry_start, source_end))
+        retry_num = max(1, source_end - retry_start + 1)
+        retry_version_id = int(payload_data.get("novel_version_id") or get_default_version_id(db, novel.id))
+        if user:
+            quota = check_generation_quota(db, user=user, requested_chapters=retry_num)
+            if not quota.ok:
+                raise http_error(429, str(quota.reason.value if quota.reason else "quota_exceeded"), str(quota.user_message or "当前请求超出配额限制，请稍后再试"))
+        trace_id = getattr(request.state, "trace_id", None)
+        creation_task = submit_task(
+            db,
+            user_uuid=principal.user_uuid or "",
+            task_type="generation",
+            resource_type="novel",
+            resource_id=int(novel.id),
+            payload={
+                "novel_id": int(novel.id),
+                "novel_version_id": int(retry_version_id),
+                "num_chapters": int(retry_num),
+                "start_chapter": int(retry_start),
+                "trace_id": trace_id,
+            },
+        )
+        novel.status = "generating"
+        db.commit()
+        data = {
+            "status": "queued",
+            "run_state": "queued",
+            "step": "queued",
+            "current_phase": "queued",
+            "current_subtask": {"key": "queued", "label": "任务已入队", "progress": 0},
+            "subtask_key": "queued",
+            "subtask_label": "任务已入队",
+            "subtask_progress": 0,
+            "current_chapter": retry_start,
+            "total_chapters": retry_num,
+            "progress": 0,
+            "message": f"重试已提交：从第{retry_start}章继续",
+            "task_id": creation_task.public_id,
+            "trace_id": trace_id,
+        }
+        _redis_set_json(_redis_key(creation_task.public_id), data)
+        _redis_set_json(_novel_key(str(novel.id)), data)
+        log_event(logger, "generation.retry.submit", novel_id=novel.id, user_id=principal.user_uuid, task_id=creation_task.public_id, run_state="queued", chapter_num=retry_start, total_chapters=retry_num)
+        return GenerateResponse(task_id=creation_task.public_id, novel_id=novel.uuid or str(novel.id), status="queued")
+
+    # 4) Fallback: legacy path using GenerationTask (creates new CreationTask)
     source_task = None
     if req.task_id:
         source_stmt = select(GenerationTask).where(
@@ -374,8 +499,22 @@ def retry_generation(
     source_start = int(source_task.start_chapter or 1)
     source_total = int(source_task.total_chapters or source_task.num_chapters or 1)
     source_end = source_start + max(1, source_total) - 1
+    # Prefer resume_cursor from CreationTask (worker_task_id links to GenerationTask.task_id)
     retry_start = int(source_task.current_chapter or source_start)
-    retry_start = max(source_start, min(retry_start, source_end))
+    legacy_creation = db.execute(
+        select(CreationTask).where(
+            CreationTask.worker_task_id == source_task.task_id,
+            CreationTask.task_type == "generation",
+            CreationTask.resource_type == "novel",
+            CreationTask.resource_id == int(novel.id),
+        )
+    ).scalar_one_or_none()
+    if legacy_creation and isinstance(legacy_creation.resume_cursor_json, dict):
+        next_val = legacy_creation.resume_cursor_json.get("next")
+        if next_val is not None:
+            retry_start = max(source_start, min(int(next_val), source_end))
+    else:
+        retry_start = max(source_start, min(retry_start, source_end))
     retry_num = max(1, source_end - retry_start + 1)
 
     if user:
@@ -393,19 +532,10 @@ def retry_generation(
             raise http_error(429, str(quota.reason.value if quota.reason else "quota_exceeded"), str(quota.user_message or "当前请求超出配额限制，请稍后再试"))
 
     retry_version_id: int | None = None
-    if source_task.task_id:
-        source_creation = db.execute(
-            select(CreationTask).where(
-                CreationTask.public_id == source_task.task_id,
-                CreationTask.task_type == "generation",
-                CreationTask.resource_type == "novel",
-                CreationTask.resource_id == int(novel.id),
-            )
-        ).scalar_one_or_none()
-        if source_creation and isinstance(source_creation.payload_json, dict):
-            payload_version = source_creation.payload_json.get("novel_version_id")
-            if payload_version is not None:
-                retry_version_id = int(payload_version)
+    if legacy_creation and isinstance(legacy_creation.payload_json, dict):
+        v = legacy_creation.payload_json.get("novel_version_id")
+        if v is not None:
+            retry_version_id = int(v)
     if retry_version_id is None:
         retry_version_id = int(get_default_version_id(db, novel.id))
 
