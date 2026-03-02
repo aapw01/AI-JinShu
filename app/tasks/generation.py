@@ -535,6 +535,7 @@ def submit_book_generation_task(
     }
 
     hb_ctx = None
+    _worker_superseded = False
     try:
         if creation_task_id is not None:
             _check_worker_superseded(creation_task_id, task_id)
@@ -719,43 +720,50 @@ def submit_book_generation_task(
             db.close()
             db = None
     except Exception as e:
-        logger.error(f"Book generation failed for novel {novel_id}: {e}")
         err = str(e)
-        is_paused = err == "generation_paused"
-        is_cancelled = err == "generation_cancelled"
-        status = "paused" if is_paused else ("cancelled" if is_cancelled else "failed")
-        data = {
-            "status": status,
-            "run_state": status,
-            "step": status,
-            "current_phase": status,
-            "current_subtask": {
-                "key": status,
-                "label": "任务已暂停" if is_paused else ("任务已取消" if is_cancelled else SUBTASK_LABELS.get("failed")),
+        _worker_superseded = "worker superseded" in err
+        if _worker_superseded:
+            logger.warning("Worker superseded, exiting gracefully: %s", err)
+        else:
+            logger.error(f"Book generation failed for novel {novel_id}: {e}")
+            is_paused = err == "generation_paused"
+            is_cancelled = err == "generation_cancelled"
+            status = "paused" if is_paused else ("cancelled" if is_cancelled else "failed")
+            data = {
+                "status": status,
+                "run_state": status,
+                "step": status,
+                "current_phase": status,
+                "current_subtask": {
+                    "key": status,
+                    "label": "任务已暂停" if is_paused else ("任务已取消" if is_cancelled else SUBTASK_LABELS.get("failed")),
+                    "progress": 0,
+                },
                 "progress": 0,
-            },
-            "progress": 0,
-            "total_chapters": num_chapters,
-            "novel_version_id": int(novel_version_id),
-            "error": None if (is_paused or is_cancelled) else str(e),
-            "error_code": None if (is_paused or is_cancelled) else "GENERATION_FAILED",
-            "error_category": None if (is_paused or is_cancelled) else "transient",
-            "retryable": False if (is_paused or is_cancelled) else True,
-            "message": "任务暂停并等待恢复" if is_paused else ("任务已取消" if is_cancelled else "总控任务失败"),
-            "trace_id": trace_id,
-        }
-        db = SessionLocal()
-        try:
-            novel = db.execute(select(Novel).where(Novel.id == novel_id)).scalar_one_or_none()
-            if novel and not is_paused:
-                novel.status = "failed"
-                db.commit()
-        finally:
-            db.close()
-            db = None
+                "total_chapters": num_chapters,
+                "novel_version_id": int(novel_version_id),
+                "error": None if (is_paused or is_cancelled) else str(e),
+                "error_code": None if (is_paused or is_cancelled) else "GENERATION_FAILED",
+                "error_category": None if (is_paused or is_cancelled) else "transient",
+                "retryable": False if (is_paused or is_cancelled) else True,
+                "message": "任务暂停并等待恢复" if is_paused else ("任务已取消" if is_cancelled else "总控任务失败"),
+                "trace_id": trace_id,
+            }
+            db = SessionLocal()
+            try:
+                novel = db.execute(select(Novel).where(Novel.id == novel_id)).scalar_one_or_none()
+                if novel and not is_paused:
+                    novel.status = "failed"
+                    db.commit()
+            finally:
+                db.close()
+                db = None
     finally:
         if hb_ctx is not None:
             hb_ctx.__exit__(None, None, None)
+        if _worker_superseded:
+            end_usage_session()
+            return task_id
         usage = snapshot_usage()
         data["token_usage_input"] = int(usage.get("input_tokens") or data.get("token_usage_input") or 0)
         data["token_usage_output"] = int(usage.get("output_tokens") or data.get("token_usage_output") or 0)
