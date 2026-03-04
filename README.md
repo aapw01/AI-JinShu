@@ -37,6 +37,7 @@ AI-JinShu/
 
 ## Quota Config Notes
 
+- 优先级规则：**系统设置页面（DB） > 环境变量（.env）**；未在页面配置的项自动回退到环境变量。
 - `QUOTA_ENFORCE_CONCURRENCY_LIMIT=false`（默认）：不限制并发创建任务。
 - `QUOTA_ENFORCE_CONCURRENCY_LIMIT=true`：按套餐的 `max_concurrent_tasks` 启用并发上限。
 - `CREATION_SCHEDULER_ENABLED=true`：启用统一创作任务调度（Generation + Rewrite + Storyboard）。
@@ -47,6 +48,7 @@ AI-JinShu/
 - `QUOTA_FREE_MONTHLY_TOKEN_LIMIT`：普通用户月度 token 限额（默认 `10000000000`）。
 - `QUOTA_ADMIN_MONTHLY_CHAPTER_LIMIT`：管理员月度章节限额（默认 `10000000`）。
 - `QUOTA_ADMIN_MONTHLY_TOKEN_LIMIT`：管理员月度 token 限额（默认 `100000000000`）。
+- `SYSTEM_SETTINGS_MASTER_KEY`：可选；配置后管理员在系统设置页保存的 API Key 将加密存储（未配置则明文存储并有风险提示）。
 
 ## API
 
@@ -65,6 +67,7 @@ AI-JinShu/
 - Notifications: `GET /api/account/notifications`
 - Rewrite diff: `GET /api/novels/{id}/versions/{version_id}/diff?compare_to={base_version_id}`
 - Admin observability: `GET /api/admin/observability/summary`
+- Admin system settings: `GET/PUT /api/admin/settings/models`, `GET/PUT /api/admin/settings/runtime`, `GET /api/admin/settings/effective`
 - Storyboard: `POST /api/storyboards`, `POST /api/storyboards/{id}/generate`, `GET /api/storyboards/{id}/status`
 - Storyboard styles: `GET /api/storyboards/style-presets`, `POST /api/storyboards/style-recommendations`
 - Character profiles: `GET /api/novels/{id}/character-profiles`

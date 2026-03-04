@@ -11,6 +11,7 @@ from app.core.config import get_settings
 from app.models.creation_task import CreationTask
 from app.services.scheduler.concurrency_service import count_user_running_slots, get_user_concurrency_limit
 from app.services.scheduler.lock_service import acquire_user_dispatch_lock
+from app.services.system_settings.runtime import get_effective_runtime_setting
 from app.services.task_runtime.lease_service import acquire_or_refresh_lease
 
 import json
@@ -26,6 +27,10 @@ RESUMABLE_STATUSES = {"paused", "failed"}
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _lease_ttl_seconds() -> int:
+    return max(5, int(get_effective_runtime_setting("creation_worker_lease_ttl_seconds", int, 20) or 20))
 
 
 def submit_task(
@@ -91,7 +96,7 @@ def mark_task_running(db: Session, *, task_id: int) -> CreationTask | None:
     task.status = "running"
     task.started_at = task.started_at or _utc_now()
     task.last_heartbeat_at = _utc_now()
-    ttl = max(5, int(get_settings().creation_worker_lease_ttl_seconds or 20))
+    ttl = _lease_ttl_seconds()
     acquire_or_refresh_lease(db, creation_task_id=task_id, ttl_seconds=ttl)
     task.error_code = None
     task.error_category = None
@@ -130,7 +135,7 @@ def update_task_progress(
             result["estimated_cost"] = max(float(result.get("estimated_cost") or 0.0), float(estimated_cost or 0.0))
         task.result_json = result
     if task.status == "running":
-        ttl = max(5, int(get_settings().creation_worker_lease_ttl_seconds or 20))
+        ttl = _lease_ttl_seconds()
         acquire_or_refresh_lease(db, creation_task_id=task_id, ttl_seconds=ttl)
     db.flush()
     return task
@@ -303,7 +308,7 @@ def cancel_task(db: Session, *, public_id: str, user_uuid: str) -> CreationTask:
 
 
 def heartbeat_task(db: Session, *, task_id: int) -> CreationTask | None:
-    ttl = max(5, int(get_settings().creation_worker_lease_ttl_seconds or 20))
+    ttl = _lease_ttl_seconds()
     return acquire_or_refresh_lease(db, creation_task_id=task_id, ttl_seconds=ttl)
 
 
@@ -394,7 +399,7 @@ def reclaim_stale_running_tasks(db: Session) -> int:
 
 
 def dispatch_user_queue(db: Session, *, user_uuid: str) -> list[CreationTask]:
-    if not bool(get_settings().creation_scheduler_enabled):
+    if not bool(get_effective_runtime_setting("creation_scheduler_enabled", bool, True)):
         return []
     acquire_user_dispatch_lock(db, user_uuid=user_uuid)
     limit = get_user_concurrency_limit(db, user_uuid=user_uuid)
@@ -402,7 +407,7 @@ def dispatch_user_queue(db: Session, *, user_uuid: str) -> list[CreationTask]:
     available = max(0, int(limit) - int(running_slots))
     if available <= 0:
         return []
-    batch_max = max(1, int(get_settings().creation_max_dispatch_batch or 5))
+    batch_max = max(1, int(get_effective_runtime_setting("creation_max_dispatch_batch", int, 5) or 5))
     to_dispatch_count = min(available, batch_max)
     queued = list(
         db.execute(

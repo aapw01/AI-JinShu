@@ -2,16 +2,21 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { BookCopy, ChevronDown, LogOut, Plus, Star, Type, UserCircle2 } from "lucide-react";
-import { api, AuthUser, Novel } from "@/lib/api";
+import { api, AuthUser, HeaderStats } from "@/lib/api";
 import { formatUserRole, formatUserStatus } from "@/lib/display";
 import { Button } from "@/components/ui/Button";
 
 export function AppHeader() {
   const pathname = usePathname();
   const router = useRouter();
-  const [novels, setNovels] = useState<Novel[]>([]);
+  const [stats, setStats] = useState<HeaderStats>({
+    works: 0,
+    week_chapters: 0,
+    quality_score: 0,
+    total_words: 0,
+  });
   const [user, setUser] = useState<AuthUser | null>(null);
   const [logoutLoading, setLogoutLoading] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -19,21 +24,32 @@ export function AppHeader() {
 
   useEffect(() => {
     let disposed = false;
-    const load = async () => {
+    const loadStats = async () => {
+      if (pathname.startsWith("/auth") || !api.getAuthToken()) {
+        if (!disposed) {
+          setStats({
+            works: 0,
+            week_chapters: 0,
+            quality_score: 0,
+            total_words: 0,
+          });
+        }
+        return;
+      }
       try {
-        const data = await api.listNovels();
-        if (!disposed) setNovels(data);
+        const data = await api.getHeaderStats();
+        if (!disposed) setStats(data);
       } catch {
         // keep stale data to avoid layout jump
       }
     };
-    load();
-    const timer = setInterval(load, 15000);
+    void loadStats();
+    const timer = setInterval(loadStats, 15000);
     return () => {
       disposed = true;
       clearInterval(timer);
     };
-  }, []);
+  }, [pathname]);
 
   useEffect(() => {
     let disposed = false;
@@ -64,24 +80,6 @@ export function AppHeader() {
     return () => document.removeEventListener("mousedown", onDocClick);
   }, []);
 
-  const stats = useMemo(() => {
-    const works = novels.length;
-    const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
-
-    const weekChapters = novels
-      .filter((n) => new Date(n.updated_at || n.created_at).getTime() >= weekAgo)
-      .reduce((sum, n) => sum + estimateCompletedChapters(n), 0);
-
-    const qualityValues = novels.map((n) => estimateQualityScore(n));
-    const qualityScore = qualityValues.length
-      ? Math.round((qualityValues.reduce((a, b) => a + b, 0) / qualityValues.length) * 10) / 10
-      : 0;
-
-    const totalWords = novels.reduce((sum, n) => sum + estimateWordCount(n), 0);
-
-    return { works, weekChapters, qualityScore, totalWords };
-  }, [novels]);
-
   return (
     <header className="sticky top-0 z-50 border-b border-[#DDD8D3] bg-[#F8F6F3]/95 backdrop-blur-xl">
       <div className="max-w-[1500px] mx-auto px-3 h-14 flex items-center gap-3">
@@ -90,26 +88,30 @@ export function AppHeader() {
             <div className="w-7 h-7 rounded-[8px] bg-[#C8211B] text-white flex items-center justify-center font-semibold text-sm">锦</div>
             <div className="flex items-center gap-2">
               <span className="font-semibold text-[#1F1B18] text-[18px] leading-none">锦书</span>
-              {pathname === "/" ? (
-                <span className="hidden lg:inline-flex h-5 items-center rounded-full border border-[#E6DED6] bg-[#F9F6F2] px-2 text-[11px] leading-none text-[#7A7068]">
-                  AI 智能写小说平台
-                </span>
-              ) : null}
+              <span className="hidden lg:inline-flex h-5 items-center rounded-full border border-[#E6DED6] bg-[#F9F6F2] px-2 text-[11px] leading-none text-[#7A7068]">
+                AI 智能写小说平台
+              </span>
             </div>
           </Link>
           <nav className="hidden md:flex items-center gap-6 text-[15px]">
             <NavItem href="/" active={pathname === "/"}>工作台</NavItem>
             <NavItem href="/novels" active={pathname.startsWith("/novels")}>我的作品</NavItem>
             <NavItem href="/storyboards" active={pathname.startsWith("/storyboards")}>导演分镜</NavItem>
+            {user?.role === "admin" ? (
+              <>
+                <NavItem href="/admin/users" active={pathname.startsWith("/admin/users")}>用户管理</NavItem>
+                <NavItem href="/admin/settings" active={pathname.startsWith("/admin/settings")}>系统设置</NavItem>
+              </>
+            ) : null}
           </nav>
         </div>
 
         <div className="ml-auto flex items-center gap-5 shrink-0">
           <div className="hidden xl:flex items-center gap-3 text-[13px] text-[#3E3833] whitespace-nowrap">
             <StatItem icon={<BookCopy className="w-3.5 h-3.5" />} text={`${stats.works} 作品`} />
-            <StatItem icon={<BookCopy className="w-3.5 h-3.5 rotate-45" />} text={`${stats.weekChapters} 本周章节`} />
-            <StatItem icon={<Star className="w-3.5 h-3.5" />} text={`${stats.qualityScore || 0} 质量分`} />
-            <StatItem icon={<Type className="w-3.5 h-3.5" />} text={`${formatWordCount(stats.totalWords)} 总字数`} />
+            <StatItem icon={<BookCopy className="w-3.5 h-3.5 rotate-45" />} text={`${stats.week_chapters} 本周章节`} />
+            <StatItem icon={<Star className="w-3.5 h-3.5" />} text={`${stats.quality_score.toFixed(1)} 质量分`} />
+            <StatItem icon={<Type className="w-3.5 h-3.5" />} text={`${formatWordCount(stats.total_words)} 总字数`} />
           </div>
           <Link href="/create">
             <Button size="sm" className="h-9 px-4 bg-[#C8211B] hover:bg-[#AD1B16] shadow-none text-sm rounded-[10px]">
@@ -197,11 +199,16 @@ function NavItem({
   return (
     <Link
       href={href}
-      className={`transition-colors ${
-        active ? "text-[#C8211B] font-semibold" : "text-[#6B635D] hover:text-[#1F1B18]"
+      className={`relative inline-flex items-center h-8 px-0.5 font-medium transition-colors ${
+        active ? "text-[#C8211B]" : "text-[#6B635D] hover:text-[#1F1B18]"
       }`}
     >
       {children}
+      <span
+        className={`absolute left-0 right-0 -bottom-0.5 h-[2px] rounded-full transition-opacity ${
+          active ? "bg-[#C8211B] opacity-100" : "opacity-0"
+        }`}
+      />
     </Link>
   );
 }
@@ -213,31 +220,6 @@ function StatItem({ icon, text }: { icon: React.ReactNode; text: string }) {
       {text}
     </span>
   );
-}
-
-function getChapterTarget(novel: Novel) {
-  const cfg = novel.config as { chapter_target?: number } | undefined;
-  return Math.max(1, Math.min(1000, Number(cfg?.chapter_target) || 50));
-}
-
-function estimateCompletedChapters(novel: Novel) {
-  const target = getChapterTarget(novel);
-  if (novel.status === "completed") return target;
-  if (novel.status === "generating") return Math.max(1, Math.floor(target * 0.6));
-  if (novel.status === "failed") return Math.max(1, Math.floor(target * 0.25));
-  return Math.max(1, Math.floor(target * 0.1));
-}
-
-function estimateQualityScore(novel: Novel) {
-  const base = Array.from(novel.id).reduce((sum, c) => sum + c.charCodeAt(0), 0) % 7;
-  if (novel.status === "completed") return 88 + base;
-  if (novel.status === "generating") return 82 + base;
-  if (novel.status === "failed") return 74 + base;
-  return 80 + base;
-}
-
-function estimateWordCount(novel: Novel) {
-  return estimateCompletedChapters(novel) * 1800;
 }
 
 function formatWordCount(words: number) {

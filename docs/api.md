@@ -171,6 +171,40 @@
   - `review_overfix_risk_rate`
   - `node_latency_seconds.{node}.p50/p95/max`
 
+### `GET /api/admin/settings/models`
+- 作用：读取系统模型配置（Provider 列表、默认模型、回退顺序）。
+- 说明：返回中会标记每个 Provider 的来源（`db|env`）和密钥来源；API Key 仅返回掩码。
+
+### `PUT /api/admin/settings/models`
+- 作用：全量保存模型配置（多 Provider、多模型、按类型默认模型）。
+- 请求体：`providers[]`，字段包含 `provider_key/display_name/adapter_type/base_url/api_key/is_enabled/priority/models[]`。
+- 规则：
+  - 默认模型按类型唯一（`chat|embedding|image|video`）。
+  - `api_key` 传 `null` 表示保留原值，传空字符串表示清空。
+  - 若配置 `SYSTEM_SETTINGS_MASTER_KEY`，密钥加密入库；否则按明文入库并在 UI 风险提示。
+
+### `GET /api/admin/settings/runtime`
+- 作用：读取运行时配置（调度与配额）并返回每项来源（`db|env`）。
+- 首期可配：
+  - `creation_scheduler_enabled`
+  - `creation_default_max_concurrent_tasks`
+  - `creation_max_dispatch_batch`
+  - `creation_worker_lease_ttl_seconds`
+  - `creation_worker_heartbeat_seconds`
+  - `quota_enforce_concurrency_limit`
+  - `quota_free_monthly_chapter_limit`
+  - `quota_free_monthly_token_limit`
+  - `quota_admin_monthly_chapter_limit`
+  - `quota_admin_monthly_token_limit`
+
+### `PUT /api/admin/settings/runtime`
+- 作用：保存运行时配置覆盖项。
+- 请求体：`updates: { key: value|null }`；`null` 表示删除该覆盖并回退环境变量。
+
+### `GET /api/admin/settings/effective`
+- 作用：查看当前进程生效配置快照（调试用途）。
+- 说明：返回聚合后的默认模型、回退顺序、运行时覆盖项；敏感字段均掩码。
+
 ## Novel 辅助端点
 
 ### `POST /api/novels/idea-framework`

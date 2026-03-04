@@ -41,6 +41,69 @@ ETHNICITIES = {
     "other_specified",
 }
 
+SKIN_TONE_ALIASES: dict[str, str] = {
+    "pale": "very_fair",
+    "porcelain": "very_fair",
+    "white": "fair",
+    "fair_skin": "fair",
+    "light_skin": "light",
+    "wheat": "tan",
+    "wheatish": "tan",
+    "dark": "deep",
+    "dark_skin": "deep",
+    "very_dark": "very_deep",
+    "白皙": "very_fair",
+    "冷白皮": "very_fair",
+    "偏白": "fair",
+    "白皮": "fair",
+    "浅肤色": "light",
+    "黄皮": "medium",
+    "自然肤色": "medium",
+    "小麦色": "tan",
+    "古铜": "tan",
+    "深肤色": "deep",
+    "黑皮": "deep",
+    "深棕": "very_deep",
+}
+
+ETHNICITY_ALIASES: dict[str, str] = {
+    "chinese": "east_asian",
+    "han": "east_asian",
+    "east_asian_chinese": "east_asian",
+    "asian": "east_asian",
+    "japanese": "east_asian",
+    "korean": "east_asian",
+    "thai": "southeast_asian",
+    "vietnamese": "southeast_asian",
+    "filipino": "southeast_asian",
+    "indian": "south_asian",
+    "pakistani": "south_asian",
+    "arab": "middle_eastern",
+    "middle_east": "middle_eastern",
+    "african": "black_african",
+    "black": "black_diaspora",
+    "european": "white_european",
+    "white": "white_european",
+    "latino": "latino_hispanic",
+    "hispanic": "latino_hispanic",
+    "indigenous_people": "indigenous",
+    "mixed_race": "mixed",
+    "other": "other_specified",
+    "中国人": "east_asian",
+    "汉族": "east_asian",
+    "东亚": "east_asian",
+    "东南亚": "southeast_asian",
+    "南亚": "south_asian",
+    "中东": "middle_eastern",
+    "非洲": "black_african",
+    "欧美": "white_european",
+    "拉丁裔": "latino_hispanic",
+    "混血": "mixed",
+    "其他": "other_specified",
+}
+
+_PAREN_HINT_RE = re.compile(r"[（(][^）)]*[）)]")
+
 
 def normalize_character_key(name: str) -> str:
     raw = (name or "").strip().lower()
@@ -65,9 +128,44 @@ def _safe_json_loads(text: str) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
-def _clean_enum(value: str | None, allowed: set[str]) -> str | None:
-    text = str(value or "").strip()
-    return text if text in allowed else None
+def _normalize_enum_token(value: str | None) -> str:
+    return re.sub(r"[\s\-]+", "_", str(value or "").strip().lower())
+
+
+def _clean_enum(value: str | None, allowed: set[str], aliases: dict[str, str] | None = None) -> str | None:
+    text = _normalize_enum_token(value)
+    if not text:
+        return None
+    if text in allowed:
+        return text
+    if aliases and text in aliases:
+        mapped = aliases[text]
+        return mapped if mapped in allowed else None
+    return None
+
+
+def normalize_skin_tone(value: str | None) -> str | None:
+    return _clean_enum(value, SKIN_TONES, SKIN_TONE_ALIASES)
+
+
+def normalize_ethnicity(value: str | None) -> str | None:
+    return _clean_enum(value, ETHNICITIES, ETHNICITY_ALIASES)
+
+
+def _name_candidates(name: str) -> list[str]:
+    raw = str(name or "").strip()
+    if not raw:
+        return []
+    out = [raw]
+    stripped = _PAREN_HINT_RE.sub("", raw).strip()
+    if stripped and stripped not in out:
+        out.append(stripped)
+    return out
+
+
+def _name_norm(name: str) -> str:
+    base = _PAREN_HINT_RE.sub("", str(name or "")).strip().lower()
+    return re.sub(r"\s+", "", base)
 
 
 def list_character_profiles(db: Session, novel_id: int, novel_version_id: int | None = None) -> list[StoryCharacterProfile]:
@@ -123,13 +221,22 @@ def _upsert_stub_profiles_from_prewrite(
 
 
 def _should_process_character(name: str, content: str, extracted_facts: dict[str, Any]) -> bool:
-    if not name:
+    names = _name_candidates(name)
+    if not names:
         return False
-    if name in (content or ""):
+    source_text = content or ""
+    if any(n in source_text for n in names):
         return True
+    name_norms = {_name_norm(n) for n in names if _name_norm(n)}
     entities = extracted_facts.get("entities") if isinstance(extracted_facts, dict) else []
     for ent in entities or []:
-        if isinstance(ent, dict) and str(ent.get("name") or "").strip() == name:
+        if not isinstance(ent, dict):
+            continue
+        entity_name = str(ent.get("name") or "").strip()
+        if not entity_name:
+            continue
+        entity_norm = _name_norm(entity_name)
+        if entity_norm and any(entity_norm == n or entity_norm in n or n in entity_norm for n in name_norms):
             return True
     return False
 
@@ -150,8 +257,8 @@ def _merge_profile(existing: StoryCharacterProfile, candidate: dict[str, Any], c
 
     assign("gender_presentation", candidate.get("gender_presentation"))
     assign("age_band", candidate.get("age_band"))
-    assign("skin_tone", _clean_enum(candidate.get("skin_tone"), SKIN_TONES))
-    assign("ethnicity", _clean_enum(candidate.get("ethnicity"), ETHNICITIES))
+    assign("skin_tone", normalize_skin_tone(candidate.get("skin_tone")))
+    assign("ethnicity", normalize_ethnicity(candidate.get("ethnicity")))
     assign("body_type", candidate.get("body_type"))
     assign("face_features", candidate.get("face_features"))
     assign("hair_style", candidate.get("hair_style"))

@@ -287,8 +287,65 @@ export interface AdminUserListItem {
   email: string;
   role: string;
   status: string;
+  email_verified: boolean;
   created_at: string;
   last_login_at?: string | null;
+  plan_key?: string | null;
+  max_concurrent_tasks?: number | null;
+  monthly_chapter_limit?: number | null;
+  monthly_token_limit?: number | null;
+}
+
+export interface UpdateQuotaData {
+  plan_key?: string;
+  max_concurrent_tasks?: number;
+  monthly_chapter_limit?: number;
+  monthly_token_limit?: number;
+}
+
+export type AdminModelType = "chat" | "embedding" | "image" | "video";
+export type AdminAdapterType = "openai_compatible" | "anthropic" | "gemini";
+
+export interface AdminModelDefinition {
+  model_name: string;
+  model_type: AdminModelType;
+  is_default: boolean;
+  is_enabled: boolean;
+  metadata?: Record<string, unknown>;
+  source?: string;
+}
+
+export interface AdminModelProvider {
+  provider_key: string;
+  display_name: string;
+  adapter_type: AdminAdapterType;
+  base_url?: string | null;
+  api_key?: string | null;
+  api_key_value?: string | null;
+  api_key_masked?: string;
+  api_key_source?: string;
+  api_key_is_encrypted?: boolean;
+  is_enabled: boolean;
+  priority: number;
+  models: AdminModelDefinition[];
+  source?: string;
+}
+
+export interface AdminModelSettingsResponse {
+  providers: AdminModelProvider[];
+  default_models: Record<string, { provider_key?: string | null; model_name?: string | null; source?: string }>;
+  fallback_order: string[];
+  security_mode: "encrypted" | "plaintext" | string;
+}
+
+export interface RuntimeSettingItem {
+  key: string;
+  value: unknown;
+  source: "db" | "env" | string;
+}
+
+export interface AdminRuntimeSettingsResponse {
+  items: RuntimeSettingItem[];
 }
 
 export interface AccountQuota {
@@ -301,6 +358,13 @@ export interface AccountQuota {
   remaining_chapters: number;
   remaining_tokens: number;
   month: string;
+}
+
+export interface HeaderStats {
+  works: number;
+  week_chapters: number;
+  quality_score: number;
+  total_words: number;
 }
 
 export interface UsageLedgerItem {
@@ -557,8 +621,8 @@ function parseApiError(status: number, rawText: string): ParsedApiError {
       typeof data.message === "string" && data.message.trim()
         ? humanizeApiErrorMessage(data.message.trim())
         : typeof data.error === "string" && data.error.trim()
-        ? humanizeApiErrorMessage(data.error.trim())
-        : undefined;
+          ? humanizeApiErrorMessage(data.error.trim())
+          : undefined;
     const errorCode = typeof data.error_code === "string" && data.error_code.trim() ? data.error_code.trim() : undefined;
     const retryable = typeof data.retryable === "boolean" ? data.retryable : undefined;
     if (message) return { message, errorCode, retryable };
@@ -672,6 +736,9 @@ export const api = {
   getQuota: () =>
     fetchApi<AccountQuota>("/api/account/quota"),
 
+  getHeaderStats: () =>
+    fetchApi<HeaderStats>("/api/account/header-stats"),
+
   getUsageLedger: (limit = 50) =>
     fetchApi<UsageLedgerItem[]>(`/api/account/ledger?limit=${encodeURIComponent(limit)}`),
 
@@ -711,8 +778,53 @@ export const api = {
       }),
     }),
 
-  getAdminUsers: () =>
-    fetchApi<AdminUserListItem[]>("/api/admin/users"),
+  getAdminUsers: (params?: { query?: string; status?: string; email_verified?: string; skip?: number; limit?: number }) => {
+    const qs = new URLSearchParams();
+    if (params?.query) qs.set("query", params.query);
+    if (params?.status) qs.set("status", params.status);
+    if (params?.email_verified) qs.set("email_verified", params.email_verified);
+    if (params?.skip !== undefined) qs.set("skip", String(params.skip));
+    if (params?.limit !== undefined) qs.set("limit", String(params.limit));
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return fetchApi<AdminUserListItem[]>(`/api/admin/users${suffix}`);
+  },
+
+  disableAdminUser: (uuid: string) =>
+    fetchApi<{ ok: boolean }>(`/api/admin/users/${encodeURIComponent(uuid)}/disable`, { method: "POST" }),
+
+  enableAdminUser: (uuid: string) =>
+    fetchApi<{ ok: boolean }>(`/api/admin/users/${encodeURIComponent(uuid)}/enable`, { method: "POST" }),
+
+  updateAdminUserQuota: (uuid: string, data: UpdateQuotaData) =>
+    fetchApi<{ ok: boolean; quota: Record<string, unknown> }>(`/api/admin/users/${encodeURIComponent(uuid)}/quota`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+
+  getAdminModelSettings: (options?: { includeSecrets?: boolean }) => {
+    const qs = new URLSearchParams();
+    if (options?.includeSecrets) qs.set("include_secrets", "true");
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return fetchApi<AdminModelSettingsResponse>(`/api/admin/settings/models${suffix}`);
+  },
+
+  updateAdminModelSettings: (providers: AdminModelProvider[]) =>
+    fetchApi<AdminModelSettingsResponse>("/api/admin/settings/models", {
+      method: "PUT",
+      body: JSON.stringify({ providers }),
+    }),
+
+  getAdminRuntimeSettings: () =>
+    fetchApi<AdminRuntimeSettingsResponse>("/api/admin/settings/runtime"),
+
+  updateAdminRuntimeSettings: (updates: Record<string, unknown>) =>
+    fetchApi<AdminRuntimeSettingsResponse>("/api/admin/settings/runtime", {
+      method: "PUT",
+      body: JSON.stringify({ updates }),
+    }),
+
+  getAdminEffectiveSettings: () =>
+    fetchApi<Record<string, unknown>>("/api/admin/settings/effective"),
 
   listNovels: (params?: { skip?: number; limit?: number; user_uuid?: string; only_mine?: boolean }) => {
     const qs = new URLSearchParams();

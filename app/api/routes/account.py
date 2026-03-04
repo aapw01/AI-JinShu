@@ -1,7 +1,7 @@
 """Account usage and quota endpoints."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -11,7 +11,16 @@ from sqlalchemy.orm import Session
 from app.core.authn import require_auth
 from app.core.authz.types import Principal
 from app.core.database import get_db
-from app.models.novel import GenerationTask, Novel, RewriteRequest, UsageLedger, User
+from app.models.novel import (
+    Chapter,
+    ChapterVersion,
+    GenerationTask,
+    Novel,
+    NovelVersion,
+    RewriteRequest,
+    UsageLedger,
+    User,
+)
 from app.services.quota import ensure_user_quota
 
 router = APIRouter()
@@ -47,6 +56,13 @@ class NotificationItem(BaseModel):
     created_at: str
 
 
+class HeaderStatsResponse(BaseModel):
+    works: int
+    week_chapters: int
+    quality_score: float
+    total_words: int
+
+
 def _month_range_utc(now: datetime) -> tuple[datetime, datetime]:
     start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
     if now.month == 12:
@@ -54,6 +70,26 @@ def _month_range_utc(now: datetime) -> tuple[datetime, datetime]:
     else:
         end = datetime(now.year, now.month + 1, 1, tzinfo=timezone.utc)
     return start, end
+
+
+def _normalize_quality_score(raw: float | int | None) -> float:
+    if raw is None:
+        return 0.0
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+    if value <= 1.0:
+        value = value * 100.0
+    elif value <= 10.0:
+        value = value * 10.0
+    return max(0.0, min(100.0, value))
+
+
+def _scoped_novel_filters(principal: Principal) -> list[object]:
+    if principal.role == "admin":
+        return []
+    return [Novel.user_id == principal.user_uuid]
 
 
 @router.get("/quota", response_model=QuotaStatusResponse)
@@ -184,3 +220,122 @@ def list_notifications(
         )
     out.sort(key=lambda x: x.created_at, reverse=True)
     return out[: max(1, min(limit, 100))]
+
+
+@router.get("/header-stats", response_model=HeaderStatsResponse)
+def get_header_stats(
+    principal: Principal = Depends(require_auth()),
+    db: Session = Depends(get_db),
+):
+    scope_filters = _scoped_novel_filters(principal)
+    now = datetime.now(timezone.utc)
+    week_ago = now - timedelta(days=7)
+
+    works = (
+        db.execute(select(func.count(Novel.id)).where(*scope_filters)).scalar_one()
+        or 0
+    )
+
+    chapter_version_base = (
+        select(ChapterVersion.id)
+        .join(NovelVersion, NovelVersion.id == ChapterVersion.novel_version_id)
+        .join(Novel, Novel.id == NovelVersion.novel_id)
+        .where(
+            NovelVersion.is_default == 1,
+            ChapterVersion.status == "completed",
+            *scope_filters,
+        )
+    )
+    has_version_rows = (
+        db.execute(
+            select(func.count())
+            .select_from(chapter_version_base.subquery())
+        ).scalar_one()
+        or 0
+    ) > 0
+
+    if has_version_rows:
+        week_chapters = (
+            db.execute(
+                select(func.count(ChapterVersion.id))
+                .join(NovelVersion, NovelVersion.id == ChapterVersion.novel_version_id)
+                .join(Novel, Novel.id == NovelVersion.novel_id)
+                .where(
+                    NovelVersion.is_default == 1,
+                    ChapterVersion.status == "completed",
+                    ChapterVersion.updated_at >= week_ago,
+                    *scope_filters,
+                )
+            ).scalar_one()
+            or 0
+        )
+        total_words = (
+            db.execute(
+                select(func.coalesce(func.sum(func.length(func.coalesce(ChapterVersion.content, ""))), 0))
+                .join(NovelVersion, NovelVersion.id == ChapterVersion.novel_version_id)
+                .join(Novel, Novel.id == NovelVersion.novel_id)
+                .where(
+                    NovelVersion.is_default == 1,
+                    ChapterVersion.status == "completed",
+                    *scope_filters,
+                )
+            ).scalar_one()
+            or 0
+        )
+        quality_rows = db.execute(
+            select(ChapterVersion.language_quality_score)
+            .join(NovelVersion, NovelVersion.id == ChapterVersion.novel_version_id)
+            .join(Novel, Novel.id == NovelVersion.novel_id)
+            .where(
+                NovelVersion.is_default == 1,
+                ChapterVersion.status == "completed",
+                ChapterVersion.language_quality_score.isnot(None),
+                *scope_filters,
+            )
+        ).all()
+    else:
+        # Backward compatibility: legacy novels before version tables were introduced.
+        week_chapters = (
+            db.execute(
+                select(func.count(Chapter.id))
+                .join(Novel, Novel.id == Chapter.novel_id)
+                .where(
+                    Chapter.status == "completed",
+                    Chapter.updated_at >= week_ago,
+                    *scope_filters,
+                )
+            ).scalar_one()
+            or 0
+        )
+        total_words = (
+            db.execute(
+                select(func.coalesce(func.sum(func.length(func.coalesce(Chapter.content, ""))), 0))
+                .join(Novel, Novel.id == Chapter.novel_id)
+                .where(
+                    Chapter.status == "completed",
+                    *scope_filters,
+                )
+            ).scalar_one()
+            or 0
+        )
+        quality_rows = db.execute(
+            select(Chapter.language_quality_score)
+            .join(Novel, Novel.id == Chapter.novel_id)
+            .where(
+                Chapter.status == "completed",
+                Chapter.language_quality_score.isnot(None),
+                *scope_filters,
+            )
+        ).all()
+
+    normalized_scores = [_normalize_quality_score(row[0]) for row in quality_rows]
+    quality_score = round(
+        sum(normalized_scores) / len(normalized_scores), 1
+    ) if normalized_scores else 0.0
+
+    return HeaderStatsResponse(
+        works=int(works),
+        week_chapters=int(week_chapters),
+        quality_score=float(quality_score),
+        total_words=int(total_words),
+    )

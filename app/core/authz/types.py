@@ -1,4 +1,5 @@
 """Authorization core types."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -21,6 +22,9 @@ class Permission(str, Enum):
     STORYBOARD_EXPORT = "storyboard:export"
     USER_READ = "user:read"
     USER_DISABLE = "user:disable"
+    USER_QUOTA_UPDATE = "user:quota_update"
+    SYSTEM_SETTINGS_READ = "system_settings:read"
+    SYSTEM_SETTINGS_WRITE = "system_settings:write"
 
 
 @dataclass(slots=True)

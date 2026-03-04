@@ -4,10 +4,10 @@ from __future__ import annotations
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
 from app.models.creation_task import CreationTask
 from app.models.novel import User, UserQuota
 from app.services.quota import ensure_user_quota
+from app.services.system_settings.runtime import get_effective_runtime_setting
 
 
 RUNNING_SLOT_STATUSES = {"dispatching", "running"}
@@ -15,7 +15,7 @@ RUNNING_SLOT_STATUSES = {"dispatching", "running"}
 
 def get_user_concurrency_limit(db: Session, *, user_uuid: str) -> int:
     user = db.execute(select(User).where(User.uuid == user_uuid)).scalar_one_or_none()
-    default_limit = max(1, int(get_settings().creation_default_max_concurrent_tasks or 1))
+    default_limit = max(1, int(get_effective_runtime_setting("creation_default_max_concurrent_tasks", int, 1) or 1))
     if not user:
         return default_limit
     quota = ensure_user_quota(db, user)
@@ -49,4 +49,3 @@ def lock_user_quota_row(db: Session, *, user_uuid: str) -> UserQuota | None:
         .where(UserQuota.user_id == user.id)
         .with_for_update()
     ).scalar_one_or_none()
-
