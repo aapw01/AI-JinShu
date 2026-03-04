@@ -588,9 +588,9 @@ def submit_book_generation_task(
                 return task_id
 
         from app.models.novel import GenerationTask
-        from app.core.config import get_settings as _get_settings
+        from app.services.system_settings.runtime import get_effective_runtime_setting
 
-        hb_interval = max(5, int(_get_settings().creation_worker_heartbeat_seconds or 30))
+        hb_interval = max(5, int(get_effective_runtime_setting("creation_worker_heartbeat_seconds", int, 30) or 30))
         hb_ctx = background_heartbeat(creation_task_id, heartbeat_fn=_heartbeat_creation, interval_seconds=hb_interval)
         hb_ctx.__enter__()
 

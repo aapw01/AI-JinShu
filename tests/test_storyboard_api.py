@@ -302,7 +302,7 @@ def test_character_profiles_and_prompt_gate(anon_client):
     assert "character_key" in exported.text
 
 
-def test_character_prompt_gate_blocks_when_identity_missing(anon_client):
+def test_character_prompt_gate_autofills_identity_when_missing(anon_client):
     owner_headers = _auth_headers("story-char-missing-owner", role="user")
     db = SessionLocal()
     try:
@@ -367,10 +367,10 @@ def test_character_prompt_gate_blocks_when_identity_missing(anon_client):
         headers=owner_headers,
     )
     assert regen.status_code == 200
-    assert regen.json()["missing_identity_fields_count"] >= 1
+    assert regen.json()["missing_identity_fields_count"] == 0
 
-    blocked = anon_client.post(
+    finalize = anon_client.post(
         f"/api/storyboards/{project_id}/versions/{version_id}/finalize",
         headers=owner_headers,
     )
-    assert blocked.status_code == 409
+    assert finalize.status_code == 200

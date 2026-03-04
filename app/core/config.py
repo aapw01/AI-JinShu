@@ -50,6 +50,8 @@ class Settings(BaseSettings):
     log_slow_threshold_ms: int = 1500
     log_node_slow_threshold_ms: int = 2500
     log_redaction_level: str = "minimal"
+    # Optional master key for encrypting system settings secrets (API keys).
+    system_settings_master_key: str | None = None
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

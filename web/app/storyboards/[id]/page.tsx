@@ -8,6 +8,7 @@ import { api, StoryboardCharacterPrompt, StoryboardShot, StoryboardTaskStatus, S
 import { formatRunState, formatStoryboardLane, formatStoryboardPhase } from "@/lib/display";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
+import { Select } from "@/components/ui/Select";
 import { TopBar } from "@/components/ui/TopBar";
 
 export default function StoryboardWorkbenchPage() {
@@ -121,6 +122,13 @@ export default function StoryboardWorkbenchPage() {
   const canRetry = ["failed", "cancelled"].includes(runState);
   const canRegenerateCharacters = Boolean(activeVersion && !isFinal);
   const canOptimize = Boolean(activeVersion && !isFinal);
+  const qualityGateReasons = (scoreCard.quality_gate_reasons || status?.quality_gate_reasons || []) as string[];
+  const hasScoreData = Boolean(
+    typeof scoreCard.style_consistency_score === "number" ||
+    typeof scoreCard.shot_density_risk === "number" ||
+    typeof scoreCard.completeness_rate === "number" ||
+    Object.keys(scoreCard.hook_score_episode || {}).length > 0
+  );
   const laneGroups = useMemo(() => {
     return {
       vertical: versions.filter((v) => v.lane === "vertical_feed"),
@@ -297,12 +305,15 @@ export default function StoryboardWorkbenchPage() {
 
           <Card className="p-3 bg-[#FEFCFA]">
             <p className="text-sm font-medium text-[#4A433D] mb-2">集数过滤</p>
-            <select className="w-full border border-[#E5DED7] rounded-lg h-9 px-2 text-sm" value={episodeNo ?? ""} onChange={(e) => setEpisodeNo(e.target.value ? Number(e.target.value) : undefined)}>
-              <option value="">全部</option>
-              {episodeOptions.map((ep) => (
-                <option key={ep} value={ep}>第{ep}集</option>
-              ))}
-            </select>
+            <Select
+              value={String(episodeNo ?? "")}
+              onValueChange={(v) => setEpisodeNo(v ? Number(v) : undefined)}
+              className="h-9 px-2 py-2 text-sm"
+              options={[
+                { value: "", label: "全部" },
+                ...episodeOptions.map((ep) => ({ value: String(ep), label: `第${ep}集` })),
+              ]}
+            />
           </Card>
         </aside>
 
@@ -416,35 +427,40 @@ export default function StoryboardWorkbenchPage() {
         </section>
 
         <aside className="col-span-12 lg:col-span-3 space-y-4 lg:sticky lg:top-[88px] h-fit">
-          <Card className="p-4 bg-[#FEFCFA]">
-            <div className="flex items-center gap-2 mb-2">
-              <Gauge className="w-4 h-4 text-[#C8211B]" />
-              <p className="text-sm font-medium text-[#4A433D]">专业评分卡</p>
-            </div>
-            <div className="text-sm text-[#5E5650] space-y-2">
-              <p>风格一致性：{typeof scoreCard.style_consistency_score === "number" ? (scoreCard.style_consistency_score * 100).toFixed(1) + "%" : "-"}</p>
-              <p>可拍性风险：{typeof scoreCard.shot_density_risk === "number" ? (scoreCard.shot_density_risk * 100).toFixed(1) + "%" : "-"}</p>
-              <p>字段完整率：{typeof scoreCard.completeness_rate === "number" ? (scoreCard.completeness_rate * 100).toFixed(1) + "%" : "-"}</p>
-              <div>
-                <p className="text-xs text-[#8E8379] mb-1">爆点评分（按集）</p>
-                <div className="max-h-28 overflow-auto pr-1 space-y-1">
-                  {Object.entries(scoreCard.hook_score_episode || {}).map(([ep, val]) => (
-                    <p key={ep} className="text-xs">第{ep}集：{Number(val).toFixed(0)}</p>
-                  ))}
-                </div>
+          {hasScoreData ? (
+            <Card className="p-4 bg-[#FEFCFA]">
+              <div className="flex items-center gap-2 mb-2">
+                <Gauge className="w-4 h-4 text-[#C8211B]" />
+                <p className="text-sm font-medium text-[#4A433D]">专业评分卡</p>
               </div>
-            </div>
-          </Card>
+              <div className="text-sm text-[#5E5650] space-y-2">
+                <p>风格一致性：{typeof scoreCard.style_consistency_score === "number" ? (scoreCard.style_consistency_score * 100).toFixed(1) + "%" : "-"}</p>
+                <p>可拍性风险：{typeof scoreCard.shot_density_risk === "number" ? (scoreCard.shot_density_risk * 100).toFixed(1) + "%" : "-"}</p>
+                <p>字段完整率：{typeof scoreCard.completeness_rate === "number" ? (scoreCard.completeness_rate * 100).toFixed(1) + "%" : "-"}</p>
+                {Object.keys(scoreCard.hook_score_episode || {}).length > 0 ? (
+                  <div>
+                    <p className="text-xs text-[#8E8379] mb-1">爆点评分（按集）</p>
+                    <div className="max-h-28 overflow-auto pr-1 space-y-1">
+                      {Object.entries(scoreCard.hook_score_episode || {}).map(([ep, val]) => (
+                        <p key={ep} className="text-xs">第{ep}集：{Number(val).toFixed(0)}</p>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </Card>
+          ) : null}
 
-          <Card className="p-4 bg-[#FEFCFA]">
-            <p className="text-sm font-medium text-[#4A433D] mb-2">质量门禁原因</p>
-            <ul className="text-xs text-[#6F665F] space-y-1 list-disc list-inside">
-              {(scoreCard.quality_gate_reasons || status?.quality_gate_reasons || []).map((r: string) => (
-                <li key={r}>{r}</li>
-              ))}
-              {!(scoreCard.quality_gate_reasons || status?.quality_gate_reasons || []).length ? <li>无</li> : null}
-            </ul>
-          </Card>
+          {qualityGateReasons.length > 0 ? (
+            <Card className="p-4 bg-[#FEFCFA]">
+              <p className="text-sm font-medium text-[#4A433D] mb-2">质量门禁原因</p>
+              <ul className="text-xs text-[#6F665F] space-y-1 list-disc list-inside">
+                {qualityGateReasons.map((r: string) => (
+                  <li key={r}>{r}</li>
+                ))}
+              </ul>
+            </Card>
+          ) : null}
 
           <Card className="p-4 text-xs text-[#7E756D] bg-[#FEFCFA]">
             <p>任务状态：{formatRunState(status?.run_state)}</p>

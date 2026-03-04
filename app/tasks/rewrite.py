@@ -243,8 +243,8 @@ def submit_rewrite_task(
     creation_task_id: int | None = None,
 ):
     begin_usage_session(f"rewrite:{self.request.id}")
-    from app.core.config import get_settings as _get_settings
-    hb_interval = max(5, int(_get_settings().creation_worker_heartbeat_seconds or 30))
+    from app.services.system_settings.runtime import get_effective_runtime_setting
+    hb_interval = max(5, int(get_effective_runtime_setting("creation_worker_heartbeat_seconds", int, 30) or 30))
     hb_ctx = background_heartbeat(creation_task_id, heartbeat_fn=_heartbeat_creation, interval_seconds=hb_interval)
     hb_ctx.__enter__()
     _worker_superseded = False

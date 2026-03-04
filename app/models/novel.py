@@ -471,6 +471,52 @@ class AdminAuditLog(Base):
     created_at = Column(DateTime, default=_utc_now)
 
 
+class SystemModelProvider(Base):
+    """Admin-managed model provider configuration."""
+
+    __tablename__ = "system_model_providers"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    provider_key = Column(String(64), nullable=False, unique=True, index=True)
+    display_name = Column(String(128), nullable=False)
+    adapter_type = Column(String(64), nullable=False, default="openai_compatible")
+    base_url = Column(String(512), nullable=True)
+    api_key_ciphertext = Column(Text, nullable=True)
+    api_key_is_encrypted = Column(Integer, nullable=False, default=0)  # sqlite-friendly bool
+    is_enabled = Column(Integer, nullable=False, default=1)  # sqlite-friendly bool
+    priority = Column(Integer, nullable=False, default=100)
+    created_at = Column(DateTime, default=_utc_now)
+    updated_at = Column(DateTime, default=_utc_now, onupdate=_utc_now)
+
+
+class SystemModelDefinition(Base):
+    """Admin-managed model definition under a provider."""
+
+    __tablename__ = "system_model_definitions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    provider_id = Column(Integer, ForeignKey("system_model_providers.id", ondelete="CASCADE"), nullable=False, index=True)
+    model_name = Column(String(255), nullable=False)
+    model_type = Column(String(32), nullable=False, default="chat")  # chat, embedding, image, video
+    is_default = Column(Integer, nullable=False, default=0)  # sqlite-friendly bool
+    is_enabled = Column(Integer, nullable=False, default=1)  # sqlite-friendly bool
+    metadata_ = Column("metadata", JSON, default=dict)
+    created_at = Column(DateTime, default=_utc_now)
+    updated_at = Column(DateTime, default=_utc_now, onupdate=_utc_now)
+
+
+class SystemRuntimeSetting(Base):
+    """Admin-managed runtime setting override with env fallback."""
+
+    __tablename__ = "system_runtime_settings"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    setting_key = Column(String(128), nullable=False, unique=True, index=True)
+    setting_value_json = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=_utc_now)
+    updated_at = Column(DateTime, default=_utc_now, onupdate=_utc_now)
+
+
 class NovelVersion(Base):
     """Versioned snapshot of a novel."""
 
@@ -573,6 +619,16 @@ Index("idx_rewrite_annotations_request_chapter", RewriteAnnotation.rewrite_reque
 Index("idx_users_email", User.email, unique=True)
 Index("idx_users_role_status", User.role, User.status)
 Index("idx_users_status_locked", User.status, User.locked_until)
+Index("idx_system_model_providers_priority", SystemModelProvider.priority)
+Index("idx_system_model_definitions_provider_type", SystemModelDefinition.provider_id, SystemModelDefinition.model_type)
+Index(
+    "idx_system_model_definitions_provider_name_type",
+    SystemModelDefinition.provider_id,
+    SystemModelDefinition.model_name,
+    SystemModelDefinition.model_type,
+    unique=True,
+)
+Index("idx_system_runtime_settings_key", SystemRuntimeSetting.setting_key, unique=True)
 Index("idx_user_quotas_user_plan", UserQuota.user_id, UserQuota.plan_key, unique=True)
 Index("idx_usage_ledger_user_created", UsageLedger.user_id, UsageLedger.created_at)
 Index("idx_admin_audit_logs_action", AdminAuditLog.action)

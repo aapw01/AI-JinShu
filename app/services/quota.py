@@ -9,8 +9,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
 from app.models.novel import GenerationTask, Novel, UsageLedger, User, UserQuota
+from app.services.system_settings.runtime import get_effective_runtime_setting
 
 
 class QuotaReason(str, Enum):
@@ -47,28 +47,32 @@ def _month_range_utc(now: datetime) -> tuple[datetime, datetime]:
 
 
 def ensure_user_quota(db: Session, user: User) -> UserQuota:
-    settings = get_settings()
     quota = db.execute(select(UserQuota).where(UserQuota.user_id == user.id)).scalar_one_or_none()
     if quota:
         return quota
     is_admin = user.role == "admin"
+    default_concurrency = max(1, int(get_effective_runtime_setting("creation_default_max_concurrent_tasks", int, 1) or 1))
+    free_chapter_limit = int(get_effective_runtime_setting("quota_free_monthly_chapter_limit", int, 1_000_000) or 1_000_000)
+    free_token_limit = int(get_effective_runtime_setting("quota_free_monthly_token_limit", int, 10_000_000_000) or 10_000_000_000)
+    admin_chapter_limit = int(get_effective_runtime_setting("quota_admin_monthly_chapter_limit", int, 10_000_000) or 10_000_000)
+    admin_token_limit = int(get_effective_runtime_setting("quota_admin_monthly_token_limit", int, 100_000_000_000) or 100_000_000_000)
     quota = UserQuota(
         user_id=user.id,
         plan_key="team" if is_admin else "free",
-        max_concurrent_tasks=max(1, int(settings.creation_default_max_concurrent_tasks or 1)),
+        max_concurrent_tasks=default_concurrency,
         monthly_chapter_limit=(
-            int(settings.quota_admin_monthly_chapter_limit)
+            admin_chapter_limit
             if is_admin
-            else int(settings.quota_free_monthly_chapter_limit)
+            else free_chapter_limit
         ),
         monthly_token_limit=(
-            int(settings.quota_admin_monthly_token_limit)
+            admin_token_limit
             if is_admin
-            else int(settings.quota_free_monthly_token_limit)
+            else free_token_limit
         ),
     )
     if user.role == "admin":
-        quota.max_concurrent_tasks = max(3, int(settings.creation_default_max_concurrent_tasks or 1))
+        quota.max_concurrent_tasks = max(3, default_concurrency)
     try:
         with db.begin_nested():
             db.add(quota)
@@ -92,7 +96,7 @@ def check_generation_quota(
     if quota.status != "active":
         return QuotaCheckResult(False, QuotaReason.QUOTA_SUSPENDED, _quota_user_message(QuotaReason.QUOTA_SUSPENDED))
 
-    if get_settings().quota_enforce_concurrency_limit:
+    if bool(get_effective_runtime_setting("quota_enforce_concurrency_limit", bool, False)):
         active_count = (
             db.execute(
                 select(func.count())

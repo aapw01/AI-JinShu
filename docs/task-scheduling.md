@@ -47,6 +47,10 @@ Client -> FastAPI Route -> Celery delay() -> Redis Broker -> Celery Worker
 - `task_track_started=True`：任务进入 started 阶段可追踪
 - `broker_connection_retry_on_startup=True`：启动时自动重试 broker 连接
 
+系统设置优先级：
+- 调度/配额的运行时参数优先读取管理员后台系统设置（DB），无配置时回退 `.env`。
+- 目前仍固定走 `.env` 的轮询参数：`CREATION_DISPATCH_POLL_SECONDS`、`CREATION_RECOVERY_POLL_SECONDS`（不支持后台热更新）。
+
 ## 4. 创作任务调度流（Generation + Rewrite + Storyboard）
 
 ## 4.1 小说生成（Generation）
@@ -62,7 +66,7 @@ Client -> FastAPI Route -> Celery delay() -> Redis Broker -> Celery Worker
 核心机制：
 - API 只负责创建 `creation_tasks`（状态 `queued`）
 - 调度器按用户并发额度抢占：`queued -> dispatching -> running`
-- 默认并发额度来自 `CREATION_DEFAULT_MAX_CONCURRENT_TASKS`（默认 1）
+- 默认并发额度来自系统设置 `creation_default_max_concurrent_tasks`，无覆盖时回退 `CREATION_DEFAULT_MAX_CONCURRENT_TASKS`（默认 1）
 - 用户级额度优先取 `user_quotas.max_concurrent_tasks`
 - `paused` 不占用并发槽位
 - worker 终态后自动触发下一任务派发

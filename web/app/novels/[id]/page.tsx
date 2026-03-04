@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Card } from "@/components/ui/Card";
 import { EmptyState } from "@/components/ui/EmptyState";
+import { Select } from "@/components/ui/Select";
 import { TopBar } from "@/components/ui/TopBar";
 import { formatNovelStatus } from "@/lib/display";
 
@@ -254,24 +255,21 @@ export default function NovelPage() {
         icon={<ArrowLeft className="w-5 h-5" />}
         actions={(
             <div className="flex items-center gap-2">
-            <div className="flex items-center gap-2 rounded-full border border-[#E5DED7] bg-[#FFFDFB] px-3 h-9">
-              <span className="text-xs text-[#7E756D]">版本</span>
-              <select
-                className="bg-transparent text-sm text-[#3A3A3C] outline-none"
-                value={activeVersionId ?? ""}
-                onChange={async (e) => {
-                  const nextId = Number(e.target.value);
+            <div className="w-[180px]">
+              <Select
+                value={String(activeVersionId ?? "")}
+                onValueChange={async (nextValue) => {
+                  const nextId = Number(nextValue);
                   setActiveVersionId(nextId);
                   const nextChapters = await api.getChapters(id, nextId);
                   setChapters(nextChapters);
                 }}
-              >
-                {versions.map((v) => (
-                  <option key={v.id} value={v.id}>
-                    v{v.version_no}{v.is_default ? "（默认）" : ""}
-                  </option>
-                ))}
-              </select>
+                className="h-9 px-3 py-2 text-sm bg-[#FFFDFB]"
+                options={versions.map((v) => ({
+                  value: String(v.id),
+                  label: `版本 v${v.version_no}${v.is_default ? "（默认）" : ""}`,
+                }))}
+              />
             </div>
             <Button
               size="sm"
@@ -478,26 +476,28 @@ export default function NovelPage() {
                     <p className="text-xs text-[#8E8379]">第 {selectionDraft.chapter_num} 章</p>
                     <p className="text-xs text-[#5E5650] line-clamp-3">“{selectionDraft.selected_text}”</p>
                     <div className="grid grid-cols-2 gap-2">
-                      <select
+                      <Select
                         value={issueTypeDraft}
-                        onChange={(e) => setIssueTypeDraft(e.target.value as RewriteAnnotationInput["issue_type"])}
-                        className="rounded-md border border-[#E5DED7] bg-white px-2 py-1 text-xs"
-                      >
-                        <option value="continuity">连续性</option>
-                        <option value="bug">逻辑问题</option>
-                        <option value="style">文风</option>
-                        <option value="pace">节奏</option>
-                        <option value="other">其他</option>
-                      </select>
-                      <select
+                        onValueChange={(v) => setIssueTypeDraft(v as RewriteAnnotationInput["issue_type"])}
+                        className="h-8 rounded-md px-2 py-1 text-xs"
+                        options={[
+                          { value: "continuity", label: "连续性" },
+                          { value: "bug", label: "逻辑问题" },
+                          { value: "style", label: "文风" },
+                          { value: "pace", label: "节奏" },
+                          { value: "other", label: "其他" },
+                        ]}
+                      />
+                      <Select
                         value={priorityDraft}
-                        onChange={(e) => setPriorityDraft(e.target.value as RewriteAnnotationInput["priority"])}
-                        className="rounded-md border border-[#E5DED7] bg-white px-2 py-1 text-xs"
-                      >
-                        <option value="must">必须</option>
-                        <option value="should">建议</option>
-                        <option value="nice">可选</option>
-                      </select>
+                        onValueChange={(v) => setPriorityDraft(v as RewriteAnnotationInput["priority"])}
+                        className="h-8 rounded-md px-2 py-1 text-xs"
+                        options={[
+                          { value: "must", label: "必须" },
+                          { value: "should", label: "建议" },
+                          { value: "nice", label: "可选" },
+                        ]}
+                      />
                     </div>
                     <textarea
                       value={instructionDraft}

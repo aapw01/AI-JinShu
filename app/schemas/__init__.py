@@ -22,6 +22,12 @@ from app.schemas.storyboard import (
     StoryboardCharacterGenerateResponse,
     StoryboardOptimizeResponse,
 )
+from app.schemas.system_settings import (
+    AdminModelSettingsUpdateRequest,
+    AdminModelSettingsResponse,
+    AdminRuntimeSettingsUpdateRequest,
+    AdminRuntimeSettingsResponse,
+)
 
 __all__ = [
     "NovelCreate",
@@ -43,4 +49,8 @@ __all__ = [
     "StoryboardCharacterPromptResponse",
     "StoryboardCharacterGenerateResponse",
     "StoryboardOptimizeResponse",
+    "AdminModelSettingsUpdateRequest",
+    "AdminModelSettingsResponse",
+    "AdminRuntimeSettingsUpdateRequest",
+    "AdminRuntimeSettingsResponse",
 ]

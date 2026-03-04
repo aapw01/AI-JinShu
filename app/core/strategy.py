@@ -4,6 +4,7 @@ from pathlib import Path
 import yaml
 
 from app.core.config import get_settings
+from app.services.system_settings.runtime import get_default_model_for_type
 
 STRATEGIES_DIR = Path(__file__).resolve().parents[2] / "presets" / "strategies"
 DEFAULT_STAGES = {
@@ -32,13 +33,16 @@ def get_strategy_config(strategy_key: str | None) -> dict:
 def get_model_for_stage(strategy_key: str | None, stage: str) -> tuple[str, str]:
     """Return (provider, model) for given strategy and stage."""
     settings = get_settings()
+    default_chat = get_default_model_for_type("chat") or {}
+    default_provider = str(default_chat.get("provider_key") or settings.default_llm_provider or "openai")
+    default_model = str(default_chat.get("model_name") or settings.default_llm_model or "gpt-4o-mini")
     config = get_strategy_config(strategy_key)
     stages = config.get("stages") or DEFAULT_STAGES
     s = stages.get(stage) or DEFAULT_STAGES.get(stage)
     if isinstance(s, dict):
-        provider = s.get("provider", settings.default_llm_provider or "openai")
-        model = s.get("model", settings.default_llm_model or "gpt-4o-mini")
+        provider = s.get("provider", default_provider)
+        model = s.get("model", default_model)
         if model in ("__default__", "default", "", None):
-            model = settings.default_llm_model or "gpt-4o-mini"
+            model = default_model
         return provider, model
-    return settings.default_llm_provider or "openai", settings.default_llm_model or "gpt-4o-mini"
+    return default_provider, default_model

@@ -16,7 +16,12 @@ from app.core.strategy import get_model_for_stage
 from app.models.novel import Novel, StoryCharacterProfile
 from app.models.storyboard import StoryboardCharacterPrompt, StoryboardProject, StoryboardShot, StoryboardVersion
 from app.prompts import render_prompt
-from app.services.generation.character_profiles import ETHNICITIES, SKIN_TONES
+from app.services.generation.character_profiles import (
+    ETHNICITIES,
+    SKIN_TONES,
+    normalize_ethnicity,
+    normalize_skin_tone,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +54,35 @@ def _identity_missing(profile: StoryCharacterProfile) -> list[str]:
     if str(profile.ethnicity or "").strip() not in ETHNICITIES:
         miss.append("ethnicity")
     return miss
+
+
+def _default_ethnicity_from_name(name: str) -> str:
+    return "east_asian" if re.search(r"[\u4e00-\u9fff]", str(name or "")) else "other_specified"
+
+
+def _ensure_identity_fields(profile: StoryCharacterProfile) -> list[str]:
+    skin = normalize_skin_tone(profile.skin_tone) or "medium"
+    ethnicity = normalize_ethnicity(profile.ethnicity) or _default_ethnicity_from_name(profile.display_name)
+
+    changed = False
+    if profile.skin_tone != skin:
+        profile.skin_tone = skin
+        changed = True
+    if profile.ethnicity != ethnicity:
+        profile.ethnicity = ethnicity
+        changed = True
+    if changed:
+        metadata = profile.metadata_ if isinstance(profile.metadata_, dict) else {}
+        metadata = {
+            **metadata,
+            "identity_autofill": {
+                "source": "storyboard_gate_fallback",
+                "skin_tone": skin,
+                "ethnicity": ethnicity,
+            },
+        }
+        profile.metadata_ = metadata
+    return _identity_missing(profile)
 
 
 def _compose_master_prompt(
@@ -151,7 +185,7 @@ def compose_character_prompts_for_version(
     missing_rows: list[dict[str, Any]] = []
     created = 0
     for profile in profiles:
-        missing = _identity_missing(profile)
+        missing = _ensure_identity_fields(profile)
         if missing:
             missing_rows.append(
                 {

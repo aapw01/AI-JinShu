@@ -30,6 +30,7 @@ dependencies = [
     "langdetect>=1.0.9",
     "language-tool-python>=3.2.2",
     "pyjwt>=2.11.0",
+    "cryptography>=46.0.5",
 ]
 
 [project.optional-dependencies]
