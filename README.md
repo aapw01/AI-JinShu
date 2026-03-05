@@ -68,10 +68,13 @@ AI-JinShu/
 - Rewrite diff: `GET /api/novels/{id}/versions/{version_id}/diff?compare_to={base_version_id}`
 - Admin observability: `GET /api/admin/observability/summary`
 - Admin system settings: `GET/PUT /api/admin/settings/models`, `GET/PUT /api/admin/settings/runtime`, `GET /api/admin/settings/effective`
-- Storyboard: `POST /api/storyboards`, `POST /api/storyboards/{id}/generate`, `GET /api/storyboards/{id}/status`
+- Storyboard project: `GET/POST /api/storyboards`
+- Storyboard preflight/run: `POST /api/storyboards/{id}/preflight`, `POST /api/storyboards/{id}/runs`, `GET /api/storyboards/{id}/runs`, `GET /api/storyboards/{id}/runs/{run_id}`, `GET /api/storyboards/{id}/runs/{run_id}/events`, `POST /api/storyboards/{id}/runs/{run_id}/actions`
+- Storyboard compatibility status: `GET /api/storyboards/{id}/status`, `POST /api/storyboards/{id}/generate|pause|resume|cancel|retry`
 - Storyboard styles: `GET /api/storyboards/style-presets`, `POST /api/storyboards/style-recommendations`
 - Character profiles: `GET /api/novels/{id}/character-profiles`
-- Storyboard workbench: `GET /api/storyboards/{id}/versions`, `GET/PUT /api/storyboards/{id}/shots`, `GET /api/storyboards/{id}/characters`, `POST /api/storyboards/{id}/characters/generate`, `POST /api/storyboards/{id}/versions/{version_id}/optimize|finalize`, `GET /api/storyboards/{id}/export/csv`, `GET /api/storyboards/{id}/characters/export`
+- Storyboard workbench: `GET /api/storyboards/{id}/versions`, `POST /api/storyboards/{id}/versions/{version_id}/activate|finalize|optimize`, `GET /api/storyboards/{id}/versions/{version_id}/shots`, `PUT /api/storyboards/{id}/versions/{version_id}/shots/{shot_id}`, `GET /api/storyboards/{id}/versions/{version_id}/character-cards`, `PUT /api/storyboards/{id}/versions/{version_id}/character-cards/{card_id}`
+- Storyboard export v2: `POST /api/storyboards/{id}/versions/{version_id}/exports`, `GET /api/storyboards/{id}/exports/{export_id}`, `GET /api/storyboards/{id}/exports/{export_id}/download`
 
 ## Docs
 

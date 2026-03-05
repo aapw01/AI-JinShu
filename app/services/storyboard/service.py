@@ -104,6 +104,7 @@ def create_project(
     )
     project = StoryboardProject(
         novel_id=novel.id,
+        source_novel_version_id=source_novel_version_id,
         owner_user_uuid=owner_user_uuid,
         status="draft",
         target_episodes=target_episodes,

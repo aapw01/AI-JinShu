@@ -9,7 +9,7 @@ from langchain_core.output_parsers import PydanticOutputParser
 
 from app.core.llm import get_llm_with_fallback, response_to_text, _is_retryable
 from app.prompts import render_prompt
-from app.services.generation.common import normalize_title_text
+from app.services.generation.common import extract_chapter_body_from_response, normalize_title_text
 
 logger = logging.getLogger(__name__)
 
@@ -441,7 +441,7 @@ class WriterAgent:
                 "writer",
                 {"novel_id": novel_id, "chapter_num": chapter_num, "provider": provider, "model": model, "template": template},
             )
-            content = response_to_text(response).strip()
+            content = extract_chapter_body_from_response(response_to_text(response))
             logger.info(f"WriterAgent completed for novel {novel_id} chapter {chapter_num}, length: {len(content)}")
             return content
         except Exception as e:
@@ -663,7 +663,7 @@ class FinalizerAgent:
                 "finalizer",
                 {"provider": provider, "model": model, "language": language},
             )
-            content = response_to_text(response).strip()
+            content = extract_chapter_body_from_response(response_to_text(response))
             logger.info(f"FinalizerAgent completed, length: {len(content)}")
             return content
         except Exception as e:

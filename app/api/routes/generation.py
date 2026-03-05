@@ -124,6 +124,7 @@ def _to_status_response(payload: dict) -> GenerationStatusResponse:
     subtask_key = payload.get("subtask_key") or step or current_phase
     subtask_label = payload.get("subtask_label") or SUBTASK_LABELS.get(str(subtask_key or ""), str(subtask_key or ""))
     return GenerationStatusResponse(
+        task_id=payload.get("task_id"),
         status=payload.get("status", "unknown"),
         trace_id=payload.get("trace_id"),
         run_state=payload.get("run_state") or payload.get("status"),

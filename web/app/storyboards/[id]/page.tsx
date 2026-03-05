@@ -4,7 +4,15 @@ import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useSearchParams } from "next/navigation";
 import { ArrowLeft, Gauge, Play, Pause, RotateCcw, Ban, Download, CheckCircle2, Copy } from "lucide-react";
-import { api, StoryboardCharacterPrompt, StoryboardShot, StoryboardTaskStatus, StoryboardVersion, getErrorMessage } from "@/lib/api";
+import {
+  api,
+  StoryboardCharacterCard,
+  StoryboardRun,
+  StoryboardShot,
+  StoryboardTaskStatus,
+  StoryboardVersion,
+  getErrorMessage,
+} from "@/lib/api";
 import { formatRunState, formatStoryboardLane, formatStoryboardPhase } from "@/lib/display";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
@@ -16,22 +24,26 @@ export default function StoryboardWorkbenchPage() {
   const search = useSearchParams();
   const projectId = Number(params.id);
   const taskIdFromUrl = search.get("task_id") || undefined;
+  const runIdFromUrl = search.get("run_id") || undefined;
 
   const [status, setStatus] = useState<StoryboardTaskStatus | null>(null);
+  const [currentRunId, setCurrentRunId] = useState<string | null>(runIdFromUrl || null);
   const [versions, setVersions] = useState<StoryboardVersion[]>([]);
   const [activeVersionId, setActiveVersionId] = useState<number | null>(null);
   const [shots, setShots] = useState<StoryboardShot[]>([]);
-  const [characterPrompts, setCharacterPrompts] = useState<StoryboardCharacterPrompt[]>([]);
+  const [characterCards, setCharacterCards] = useState<StoryboardCharacterCard[]>([]);
   const [episodeNo, setEpisodeNo] = useState<number | undefined>(undefined);
   const [episodeOptions, setEpisodeOptions] = useState<number[]>([]);
   const [loading, setLoading] = useState(true);
   const [savingShotId, setSavingShotId] = useState<number | null>(null);
+  const [savingCardId, setSavingCardId] = useState<number | null>(null);
   const [activeTab, setActiveTab] = useState<"shots" | "characters">("shots");
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string>("");
   const [actionMessageType, setActionMessageType] = useState<"success" | "error">("success");
   const lastRunStateRef = useRef<string>("");
+  const runEventSourceRef = useRef<EventSource | null>(null);
 
   const loadVersions = async () => {
     const vs = await api.listStoryboardVersions(projectId);
@@ -55,25 +67,75 @@ export default function StoryboardWorkbenchPage() {
     setEpisodeOptions(Array.from(set).sort((a, b) => a - b));
   };
 
-  const loadCharacterPrompts = async (versionId: number) => {
-    const rows = await api.listStoryboardCharacterPrompts(projectId, versionId);
-    setCharacterPrompts(rows);
+  const loadCharacterCards = async (versionId: number) => {
+    const rows = await api.listStoryboardCharacterCards(projectId, versionId);
+    setCharacterCards(rows);
+  };
+
+  const toLegacyStatus = (run: StoryboardRun, preferredLane?: string): StoryboardTaskStatus => {
+    const lane =
+      run.lanes.find((item) => item.lane === preferredLane) ||
+      run.lanes.find((item) => item.status === "running" || item.run_state === "running") ||
+      run.lanes[0];
+    const gate = (lane?.gate_report_json || {}) as Record<string, unknown>;
+    return {
+      storyboard_project_id: run.storyboard_project_id,
+      task_id: lane?.creation_task_public_id || undefined,
+      status: run.status,
+      run_state: run.run_state,
+      current_phase: lane?.current_phase || run.current_phase || undefined,
+      current_lane: lane?.lane,
+      progress: Number(lane?.progress ?? run.progress ?? 0),
+      message: lane?.message || run.message || undefined,
+      error: lane?.error || run.error || undefined,
+      error_code: lane?.error_code || run.error_code || undefined,
+      error_category: lane?.error_category || run.error_category || undefined,
+      retryable: undefined,
+      style_consistency_score:
+        typeof gate.style_consistency_score === "number" ? Number(gate.style_consistency_score) : undefined,
+      hook_score_episode:
+        gate.hook_score_episode && typeof gate.hook_score_episode === "object"
+          ? (gate.hook_score_episode as Record<string, number>)
+          : undefined,
+      quality_gate_reasons: Array.isArray(gate.quality_gate_reasons)
+        ? (gate.quality_gate_reasons as string[])
+        : undefined,
+      character_prompt_phase:
+        typeof gate.character_prompt_phase === "string" ? String(gate.character_prompt_phase) : undefined,
+      character_profiles_count:
+        typeof gate.character_profiles_count === "number" ? Number(gate.character_profiles_count) : undefined,
+      missing_identity_fields_count:
+        typeof gate.missing_identity_fields_count === "number" ? Number(gate.missing_identity_fields_count) : undefined,
+      failed_identity_characters: Array.isArray(gate.failed_identity_characters)
+        ? (gate.failed_identity_characters as Array<Record<string, unknown>>)
+        : undefined,
+    };
+  };
+
+  const loadRuntimeStatus = async (
+    runId: string | null,
+    preferredLane?: string
+  ): Promise<StoryboardTaskStatus | null> => {
+    if (runId) {
+      const run = await api.getStoryboardRun(projectId, runId);
+      return toLegacyStatus(run, preferredLane);
+    }
+    return api.getStoryboardStatus(projectId, taskIdFromUrl).catch(() => null);
   };
 
   const refresh = async () => {
     setLoading(true);
     try {
-      const [st, vs] = await Promise.all([
-        api.getStoryboardStatus(projectId, taskIdFromUrl).catch(() => null),
-        loadVersions(),
-      ]);
-      setStatus(st);
+      const vs = await loadVersions();
       const versionId = activeVersionId || vs.find((v) => v.is_default)?.id || vs[0]?.id;
+      const preferredLane = versionId ? vs.find((v) => v.id === versionId)?.lane : undefined;
+      const st = await loadRuntimeStatus(currentRunId, preferredLane);
+      setStatus(st);
       if (versionId) {
         setActiveVersionId(versionId);
         await loadEpisodeOptions(versionId);
         await loadShots(versionId, episodeNo);
-        await loadCharacterPrompts(versionId);
+        await loadCharacterCards(versionId);
       }
     } finally {
       setLoading(false);
@@ -85,10 +147,63 @@ export default function StoryboardWorkbenchPage() {
   }, [projectId]);
 
   useEffect(() => {
+    if (runIdFromUrl) {
+      setCurrentRunId(runIdFromUrl);
+    }
+  }, [runIdFromUrl]);
+
+  useEffect(() => {
+    if (!currentRunId) return;
+    let reconnectTimer: number | null = null;
+
+    const connect = () => {
+      if (runEventSourceRef.current) {
+        runEventSourceRef.current.close();
+      }
+      const stream = api.streamStoryboardRun(projectId, currentRunId);
+      runEventSourceRef.current = stream;
+      stream.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data || "{}") as { type?: string; payload?: StoryboardRun };
+          if (data.type !== "run_status" || !data.payload) return;
+          const preferredLane = activeVersionId ? versions.find((v) => v.id === activeVersionId)?.lane : undefined;
+          setStatus(toLegacyStatus(data.payload, preferredLane));
+          if (["completed", "failed", "cancelled"].includes(String(data.payload.run_state || ""))) {
+            void refresh();
+          }
+        } catch {
+          // ignore broken stream payload
+        }
+      };
+      stream.onerror = () => {
+        stream.close();
+        if (reconnectTimer != null) {
+          window.clearTimeout(reconnectTimer);
+        }
+        reconnectTimer = window.setTimeout(() => {
+          connect();
+        }, 2200);
+      };
+    };
+
+    connect();
+    return () => {
+      if (reconnectTimer != null) {
+        window.clearTimeout(reconnectTimer);
+      }
+      if (runEventSourceRef.current) {
+        runEventSourceRef.current.close();
+        runEventSourceRef.current = null;
+      }
+    };
+  }, [projectId, currentRunId, activeVersionId, versions]);
+
+  useEffect(() => {
     const timer = setInterval(() => {
       void (async () => {
         try {
-          const st = await api.getStoryboardStatus(projectId, taskIdFromUrl);
+          const preferredLane = activeVersionId ? versions.find((v) => v.id === activeVersionId)?.lane : undefined;
+          const st = await loadRuntimeStatus(currentRunId, preferredLane);
           setStatus(st);
         } catch (e) {
           if (!(e instanceof Error) || !e.message.includes("404")) {
@@ -98,13 +213,13 @@ export default function StoryboardWorkbenchPage() {
       })();
     }, 3000);
     return () => clearInterval(timer);
-  }, [projectId, taskIdFromUrl]);
+  }, [projectId, taskIdFromUrl, currentRunId, activeVersionId, versions]);
 
   useEffect(() => {
     if (activeVersionId) {
       void loadEpisodeOptions(activeVersionId);
       void loadShots(activeVersionId, episodeNo);
-      void loadCharacterPrompts(activeVersionId);
+      void loadCharacterCards(activeVersionId);
     }
   }, [activeVersionId, episodeNo]);
 
@@ -113,8 +228,8 @@ export default function StoryboardWorkbenchPage() {
   const missingIdentityCount = Number(status?.missing_identity_fields_count || scoreCard.missing_identity_fields_count || 0);
   const failedIdentityCharacters = (status?.failed_identity_characters || scoreCard.failed_identity_characters || []) as Array<Record<string, unknown>>;
   const isFinal = Boolean(activeVersion?.is_final);
-  const canFinalize = Boolean(activeVersion && !isFinal && missingIdentityCount === 0 && characterPrompts.length > 0);
-  const canExport = Boolean(activeVersion && isFinal && missingIdentityCount === 0 && characterPrompts.length > 0);
+  const canFinalize = Boolean(activeVersion && !isFinal && missingIdentityCount === 0 && characterCards.length > 0);
+  const canExport = Boolean(activeVersion && isFinal && missingIdentityCount === 0 && characterCards.length > 0);
   const runState = status?.run_state || "";
   const canPause = ["running", "retrying", "submitted"].includes(runState);
   const canResume = ["paused"].includes(runState);
@@ -152,6 +267,29 @@ export default function StoryboardWorkbenchPage() {
     }
   };
 
+  const onUpdateCharacterCard = async (card: StoryboardCharacterCard) => {
+    if (!activeVersionId || isFinal) return;
+    setSavingCardId(card.id);
+    try {
+      await api.updateStoryboardCharacterCard(projectId, activeVersionId, card.id, {
+        skin_tone: String(card.skin_tone || "").trim(),
+        ethnicity: String(card.ethnicity || "").trim(),
+        master_prompt_text: String(card.master_prompt_text || "").trim(),
+        negative_prompt_text: String(card.negative_prompt_text || "").trim() || null,
+        consistency_anchors_json: (card.consistency_anchors_json || []).map((x) => String(x).trim()).filter(Boolean),
+      });
+      await loadCharacterCards(activeVersionId);
+      setActionMessageType("success");
+      setActionMessage(`角色「${card.display_name || card.character_key}」已保存`);
+    } catch (e) {
+      const msg = getErrorMessage(e, "角色卡保存失败");
+      setActionMessageType("error");
+      setActionMessage(msg);
+    } finally {
+      setSavingCardId(null);
+    }
+  };
+
   const statusText = status?.message || (status?.run_state ? `状态：${formatRunState(status.run_state)}` : "暂无任务状态");
 
   const copyText = async (value: string, key: string) => {
@@ -182,6 +320,29 @@ export default function StoryboardWorkbenchPage() {
     }
   };
 
+  const requestExport = async (format: "csv" | "json" | "pdf") => {
+    if (!activeVersion) return;
+    const create = await api.createStoryboardExport(projectId, activeVersion.id, format, {
+      idempotencyKey: `export-${projectId}-${activeVersion.id}-${format}-${Date.now()}`,
+    });
+    const wait = async () => {
+      for (let i = 0; i < 30; i += 1) {
+        const row = await api.getStoryboardExport(projectId, create.export_id);
+        if (row.status === "completed" && row.download_url) {
+          const url = api.resolveApiUrl(row.download_url);
+          window.open(url, "_blank");
+          return;
+        }
+        if (row.status === "failed") {
+          throw new Error(row.error || "导出失败");
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 700));
+      }
+      throw new Error("导出任务仍在处理中，请稍后刷新查看");
+    };
+    await wait();
+  };
+
   useEffect(() => {
     const currentState = status?.run_state;
     if (!currentState) return;
@@ -205,29 +366,159 @@ export default function StoryboardWorkbenchPage() {
               <Button variant="secondary" size="sm" className={toolbarBtnClass} loading={actionBusy === "refresh"} onClick={() => void runAction("refresh", async () => refresh(), "已刷新")}>
                 刷新
               </Button>
-              <Button variant="secondary" size="sm" className={toolbarBtnClass} disabled={!canPause} loading={actionBusy === "pause"} onClick={() => void runAction("pause", async () => { await api.pauseStoryboard(projectId, status?.task_id); }, "任务已暂停")}>
+              <Button
+                variant="secondary"
+                size="sm"
+                className={toolbarBtnClass}
+                disabled={!canPause}
+                loading={actionBusy === "pause"}
+                onClick={() =>
+                  void runAction(
+                    "pause",
+                    async () => {
+                      if (currentRunId) {
+                        await api.actionStoryboardRun(projectId, currentRunId, "pause");
+                      } else {
+                        await api.pauseStoryboard(projectId, status?.task_id);
+                      }
+                    },
+                    "任务已暂停"
+                  )
+                }
+              >
                 <Pause className="w-4 h-4 mr-1.5" />暂停
               </Button>
-              <Button variant="secondary" size="sm" className={toolbarBtnClass} disabled={!canResume} loading={actionBusy === "resume"} onClick={() => void runAction("resume", async () => { await api.resumeStoryboard(projectId, status?.task_id); }, "任务已恢复")}>
+              <Button
+                variant="secondary"
+                size="sm"
+                className={toolbarBtnClass}
+                disabled={!canResume}
+                loading={actionBusy === "resume"}
+                onClick={() =>
+                  void runAction(
+                    "resume",
+                    async () => {
+                      if (currentRunId) {
+                        await api.actionStoryboardRun(projectId, currentRunId, "resume");
+                      } else {
+                        await api.resumeStoryboard(projectId, status?.task_id);
+                      }
+                    },
+                    "任务已恢复"
+                  )
+                }
+              >
                 <Play className="w-4 h-4 mr-1.5" />恢复
               </Button>
-              <Button variant="secondary" size="sm" className={toolbarBtnClass} disabled={!canRetry} loading={actionBusy === "retry"} onClick={() => void runAction("retry", async () => { await api.retryStoryboard(projectId); }, "已提交重试任务")}>
+              <Button
+                variant="secondary"
+                size="sm"
+                className={toolbarBtnClass}
+                disabled={!canRetry}
+                loading={actionBusy === "retry"}
+                onClick={() =>
+                  void runAction(
+                    "retry",
+                    async () => {
+                      if (currentRunId) {
+                        const resp = await api.actionStoryboardRun(projectId, currentRunId, "retry", {
+                          idempotencyKey: `retry-${projectId}-${Date.now()}`,
+                        });
+                        setCurrentRunId(resp.run_id);
+                      } else {
+                        await api.retryStoryboard(projectId);
+                      }
+                    },
+                    "已提交重试任务"
+                  )
+                }
+              >
                 <RotateCcw className="w-4 h-4 mr-1.5" />重试
               </Button>
-              <Button variant="secondary" size="sm" className={toolbarBtnClass} disabled={!canCancel} loading={actionBusy === "cancel"} onClick={() => { if (!window.confirm("确定要取消当前分镜任务吗？")) return; void runAction("cancel", async () => { await api.cancelStoryboard(projectId, status?.task_id); }, "任务已取消"); }}>
+              <Button
+                variant="secondary"
+                size="sm"
+                className={toolbarBtnClass}
+                disabled={!canCancel}
+                loading={actionBusy === "cancel"}
+                onClick={() => {
+                  if (!window.confirm("确定要取消当前分镜任务吗？")) return;
+                  void runAction(
+                    "cancel",
+                    async () => {
+                      if (currentRunId) {
+                        await api.actionStoryboardRun(projectId, currentRunId, "cancel");
+                      } else {
+                        await api.cancelStoryboard(projectId, status?.task_id);
+                      }
+                    },
+                    "任务已取消"
+                  );
+                }}
+              >
                 <Ban className="w-4 h-4 mr-1.5" />取消
               </Button>
             </div>
 
             <div className="flex items-center gap-1.5 rounded-xl border border-[#E5DED7] bg-[#FAF7F4] p-1">
               {activeVersion ? (
-                <Button variant="secondary" size="sm" className={toolbarBtnClass} disabled={!canExport} onClick={() => window.open(api.getStoryboardCsvUrl(projectId, activeVersion.id), "_blank")}>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className={toolbarBtnClass}
+                  disabled={!canExport}
+                  loading={actionBusy === "export-csv"}
+                  onClick={() =>
+                    void runAction(
+                      "export-csv",
+                      async () => {
+                        await requestExport("csv");
+                      },
+                      "CSV 导出已完成"
+                    )
+                  }
+                >
                   <Download className="w-4 h-4 mr-1.5" />导出CSV
                 </Button>
               ) : null}
               {activeVersion ? (
-                <Button variant="secondary" size="sm" className={toolbarBtnClass} disabled={!canExport} onClick={() => window.open(api.getStoryboardCharacterExportUrl(projectId, activeVersion.id, activeVersion.lane, "csv"), "_blank")}>
-                  <Download className="w-4 h-4 mr-1.5" />导出角色CSV
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className={toolbarBtnClass}
+                  disabled={!canExport}
+                  loading={actionBusy === "export-json"}
+                  onClick={() =>
+                    void runAction(
+                      "export-json",
+                      async () => {
+                        await requestExport("json");
+                      },
+                      "JSON 导出已完成"
+                    )
+                  }
+                >
+                  <Download className="w-4 h-4 mr-1.5" />导出JSON
+                </Button>
+              ) : null}
+              {activeVersion ? (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  className={toolbarBtnClass}
+                  disabled={!canExport}
+                  loading={actionBusy === "export-pdf"}
+                  onClick={() =>
+                    void runAction(
+                      "export-pdf",
+                      async () => {
+                        await requestExport("pdf");
+                      },
+                      "PDF 导出已完成"
+                    )
+                  }
+                >
+                  <Download className="w-4 h-4 mr-1.5" />导出PDF
                 </Button>
               ) : null}
               {activeVersion ? (
@@ -334,7 +625,7 @@ export default function StoryboardWorkbenchPage() {
                 onClick={() => setActiveTab("characters")}
                 className={`h-8 px-3 rounded-full text-sm border ${activeTab === "characters" ? "border-[#C8211B] bg-[#F8ECEA] text-[#A52A25]" : "border-[#E5DED7] bg-white text-[#6F665F]"}`}
               >
-                角色主形象提示词
+                角色主形象卡
               </button>
             </div>
             {loading ? <p className="p-4 text-sm text-[#7E756D]">加载中...</p> : null}
@@ -393,12 +684,12 @@ export default function StoryboardWorkbenchPage() {
                 </table>
               </div>
             ) : null}
-            {!loading && activeTab === "characters" && characterPrompts.length === 0 ? (
-              <p className="p-4 text-sm text-[#7E756D]">暂无角色提示词，请先点击“生成人物主形象提示词”。</p>
+            {!loading && activeTab === "characters" && characterCards.length === 0 ? (
+              <p className="p-4 text-sm text-[#7E756D]">暂无角色主形象卡，请先点击“生成人物主形象提示词”。</p>
             ) : null}
-            {!loading && activeTab === "characters" && characterPrompts.length > 0 ? (
+            {!loading && activeTab === "characters" && characterCards.length > 0 ? (
               <div className="p-4 space-y-3 max-h-[72vh] overflow-auto">
-                {characterPrompts.map((item) => (
+                {characterCards.map((item) => (
                   <div key={item.id} className="rounded-xl border border-[#E5DED7] bg-gradient-to-b from-white to-[#FFFCFA] p-3">
                     <div className="flex items-center justify-between gap-3">
                       <div>
@@ -412,13 +703,92 @@ export default function StoryboardWorkbenchPage() {
                         <Button variant="secondary" size="sm" className="h-8 px-3" disabled={!item.negative_prompt_text?.trim()} onClick={() => void copyText(item.negative_prompt_text || "", `negative-${item.id}`)}>
                           <Copy className="w-4 h-4 mr-1.5" />{copiedKey === `negative-${item.id}` ? "已复制" : "复制负面词"}
                         </Button>
+                        {!isFinal ? (
+                          <Button
+                            variant="secondary"
+                            size="sm"
+                            className="h-8 px-3"
+                            loading={savingCardId === item.id}
+                            onClick={() => void onUpdateCharacterCard(item)}
+                          >
+                            保存
+                          </Button>
+                        ) : null}
                       </div>
                     </div>
-                    <p className="mt-2 text-xs text-[#4A433D] whitespace-pre-wrap">{item.master_prompt_text}</p>
-                    {item.negative_prompt_text ? <p className="mt-2 text-[11px] text-[#7E756D]">Negative: {item.negative_prompt_text}</p> : null}
-                    {(item.consistency_anchors_json || []).length ? (
-                      <p className="mt-2 text-[11px] text-[#7E756D]">一致性锚点：{item.consistency_anchors_json.join("；")}</p>
-                    ) : null}
+                    <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <label className="space-y-1 text-xs text-[#6A615A]">
+                        <span>肤色（skin_tone）</span>
+                        <input
+                          value={item.skin_tone || ""}
+                          disabled={isFinal}
+                          onChange={(e) => {
+                            const value = e.target.value;
+                            setCharacterCards((prev) => prev.map((row) => (row.id === item.id ? { ...row, skin_tone: value } : row)));
+                          }}
+                          className="w-full h-9 rounded-md border border-[#E5DED7] px-2 bg-white text-sm focus:border-[#C8211B] outline-none"
+                        />
+                      </label>
+                      <label className="space-y-1 text-xs text-[#6A615A]">
+                        <span>族裔（ethnicity）</span>
+                        <input
+                          value={item.ethnicity || ""}
+                          disabled={isFinal}
+                          onChange={(e) => {
+                            const value = e.target.value;
+                            setCharacterCards((prev) => prev.map((row) => (row.id === item.id ? { ...row, ethnicity: value } : row)));
+                          }}
+                          className="w-full h-9 rounded-md border border-[#E5DED7] px-2 bg-white text-sm focus:border-[#C8211B] outline-none"
+                        />
+                      </label>
+                    </div>
+
+                    <label className="mt-3 block space-y-1 text-xs text-[#6A615A]">
+                      <span>主提示词</span>
+                      <textarea
+                        className="w-full min-h-[92px] border border-[#E5DED7] rounded-md p-2 bg-white text-xs focus:border-[#C8211B] outline-none"
+                        value={item.master_prompt_text || ""}
+                        disabled={isFinal}
+                        onChange={(e) => {
+                          const value = e.target.value;
+                          setCharacterCards((prev) => prev.map((row) => (row.id === item.id ? { ...row, master_prompt_text: value } : row)));
+                        }}
+                      />
+                    </label>
+
+                    <label className="mt-3 block space-y-1 text-xs text-[#6A615A]">
+                      <span>负面词（Negative）</span>
+                      <textarea
+                        className="w-full min-h-[72px] border border-[#E5DED7] rounded-md p-2 bg-white text-xs focus:border-[#C8211B] outline-none"
+                        value={item.negative_prompt_text || ""}
+                        disabled={isFinal}
+                        onChange={(e) => {
+                          const value = e.target.value;
+                          setCharacterCards((prev) =>
+                            prev.map((row) => (row.id === item.id ? { ...row, negative_prompt_text: value } : row))
+                          );
+                        }}
+                      />
+                    </label>
+
+                    <label className="mt-3 block space-y-1 text-xs text-[#6A615A]">
+                      <span>一致性锚点（使用 `；` 分隔）</span>
+                      <input
+                        value={(item.consistency_anchors_json || []).join("；")}
+                        disabled={isFinal}
+                        onChange={(e) => {
+                          const value = e.target.value;
+                          const anchors = value
+                            .split(/[；;,\n]/g)
+                            .map((x) => x.trim())
+                            .filter(Boolean);
+                          setCharacterCards((prev) =>
+                            prev.map((row) => (row.id === item.id ? { ...row, consistency_anchors_json: anchors } : row))
+                          );
+                        }}
+                        className="w-full h-9 rounded-md border border-[#E5DED7] px-2 bg-white text-sm focus:border-[#C8211B] outline-none"
+                      />
+                    </label>
                   </div>
                 ))}
               </div>

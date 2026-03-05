@@ -95,8 +95,14 @@ function StoryboardCreateForm() {
       setLoading(true);
       setError(null);
       setErrorDialogOpen(false);
+      const versions = await api.getVersions(novelId);
+      const activeVersion = versions.find((v) => v.is_default) || versions[0];
+      if (!activeVersion) {
+        throw new Error("小说暂无可用版本，无法创建分镜");
+      }
       const project = await api.createStoryboardProject({
         novel_id: novelId,
+        source_novel_version_id: activeVersion.id,
         target_episodes: targetEpisodes,
         target_episode_seconds: targetEpisodeSeconds,
         style_profile: styleProfile || undefined,
@@ -109,13 +115,22 @@ function StoryboardCreateForm() {
         audience_goal: audienceGoal,
         copyright_assertion: copyrightAssertion,
       });
-      const versions = await api.getVersions(novelId);
-      const activeVersion = versions.find((v) => v.is_default) || versions[0];
-      if (!activeVersion) {
-        throw new Error("小说暂无可用版本，无法生成分镜");
+      const preflight = await api.runStoryboardPreflight(project.id);
+      if (!preflight.ok) {
+        const sample = preflight.failed_identity_characters
+          .slice(0, 3)
+          .map((item) => String(item.display_name || item.character_key || "未知角色"))
+          .join("、");
+        throw new Error(
+          sample
+            ? `Preflight 未通过：仍有 ${preflight.missing_identity_fields_count} 个角色缺少身份字段（如 ${sample}）`
+            : `Preflight 未通过：仍有 ${preflight.missing_identity_fields_count} 个角色缺少身份字段`
+        );
       }
-      const gen = await api.generateStoryboard(project.id, activeVersion.id);
-      router.push(`/storyboards/${project.id}?task_id=${encodeURIComponent(gen.task_id)}`);
+      const run = await api.startStoryboardRun(project.id, {
+        idempotencyKey: `create-${project.id}-${Date.now()}`,
+      });
+      router.push(`/storyboards/${project.id}?run_id=${encodeURIComponent(run.public_id)}`);
     } catch (err) {
       setError(getErrorMessage(err, "创建失败"));
       setErrorDialogOpen(true);

@@ -17,13 +17,91 @@ _PLACEHOLDER_TITLE_RE = re.compile(
     r"^\s*(第\s*[零一二三四五六七八九十百千两\d]+\s*章|chapter\s*\d+|ch\s*\d+)\s*$",
     re.IGNORECASE,
 )
+_PURE_SYMBOL_TITLE_RE = re.compile(r"^[#*_`~\-\s·•|/\\]+$")
+_CHAPTER_HEADING_LINE_RE = re.compile(
+    r"^\s*(?:#{1,6}\s*)?(?:\*\*)?\s*第\s*[零一二三四五六七八九十百千两\d]+\s*章(?:[：:\s·\-].*)?(?:\*\*)?\s*$",
+    re.IGNORECASE,
+)
+_PREFACE_SEPARATOR_RE = re.compile(r"^\s*[-_*]{3,}\s*$")
+_PREFACE_LIST_RE = re.compile(r"^\s*(?:[-*•]|\d+[.)、])\s+")
+_PREFACE_BOLD_ITEM_RE = re.compile(r"^\s*\*\*[^*]+\*\*\s*[:：]")
+_CHAPTER_BODY_TAG_RE = re.compile(r"<chapter_body>(.*?)</chapter_body>", re.IGNORECASE | re.DOTALL)
+_META_TITLE_PHRASES = (
+    "以下是根据反馈",
+    "重点解决如下问题",
+    "原章节内容",
+    "人工标注",
+    "修订版",
+    "全面打磨",
+    "提示词",
+    "保持原有",
+)
+_LEADING_META_PREFIXES = (
+    "以下是根据反馈",
+    "重点解决如下问题",
+    "原章节内容",
+    "人工标注",
+    "要求：",
+    "要求:",
+    "保留原有",
+)
+_STRONG_PREFACE_MARKERS = (
+    "以下是根据反馈",
+    "重点解决如下问题",
+    "原章节内容",
+    "人工标注",
+)
+
+
+def _strip_markdown_wrappers(text: str) -> str:
+    out = str(text or "").strip()
+    out = re.sub(r"^[#*_`~\-\s]+", "", out)
+    out = re.sub(r"[#*_`~\-\s]+$", "", out)
+    return out.strip("：:|·- ").strip()
+
+
+def _looks_like_meta_text(text: str) -> bool:
+    source = str(text or "").strip()
+    if not source:
+        return False
+    lowered = source.lower()
+    if "feedback" in lowered and "chapter" in lowered:
+        return True
+    for phrase in _META_TITLE_PHRASES:
+        if phrase in source:
+            return True
+    return False
+
+
+def _is_preface_line(line: str, *, dropped_any: bool = False) -> bool:
+    stripped = str(line or "").strip()
+    if not stripped:
+        return True
+    if _PREFACE_SEPARATOR_RE.match(stripped):
+        return True
+    if _CHAPTER_HEADING_LINE_RE.match(stripped):
+        return True
+    if dropped_any and _PREFACE_BOLD_ITEM_RE.match(stripped):
+        return True
+    if dropped_any and _PREFACE_LIST_RE.match(stripped):
+        return True
+    if _looks_like_meta_text(stripped):
+        return True
+    for prefix in _LEADING_META_PREFIXES:
+        if stripped.startswith(prefix):
+            return True
+    return False
 
 
 def normalize_title_text(title: str | None) -> str:
     """Normalize title text by trimming and collapsing repeated chapter prefixes."""
-    text = str(title or "").strip()
+    text = str(title or "").replace("\r", "\n").strip()
     if not text:
         return ""
+    if "\n" in text:
+        first_non_empty = next((line for line in text.split("\n") if line.strip()), "")
+        text = first_non_empty or text
+    text = _strip_markdown_wrappers(text)
     text = re.sub(r"\s+", " ", text)
     text = re.sub(
         r"^(第\s*[零一二三四五六七八九十百千两\d]+\s*章)\s*\1+",
@@ -39,11 +117,27 @@ def is_effective_title(title: str | None, chapter_num: int | None = None) -> boo
     text = normalize_title_text(title)
     if not text:
         return False
+    if _PURE_SYMBOL_TITLE_RE.match(text):
+        return False
+    if not re.search(r"[A-Za-z0-9\u4e00-\u9fff]", text):
+        return False
     if _PLACEHOLDER_TITLE_RE.match(text):
+        return False
+    if _looks_like_meta_text(text):
         return False
     if chapter_num is not None:
         chapter_str = str(chapter_num)
         if text in {f"第{chapter_str}章", f"Chapter {chapter_str}", f"CH {chapter_str}", f"Ch {chapter_str}"}:
+            return False
+        remainder = re.sub(
+            r"^第\s*[零一二三四五六七八九十百千两\d]+\s*章[:：\s·\-]*",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        ).strip()
+        if not remainder:
+            return False
+        if _looks_like_meta_text(remainder):
             return False
     return True
 
@@ -52,6 +146,8 @@ def _extract_title_suffix(text: str | None) -> str:
     source = str(text or "").strip()
     if not source:
         return ""
+    if _looks_like_meta_text(source):
+        return ""
     source = source.replace("\r", "\n")
     source = re.sub(r"第\s*[零一二三四五六七八九十百千两\d]+\s*章[:：]?", "", source)
     parts = re.split(r"[。！？!?\n；;]", source)
@@ -59,9 +155,12 @@ def _extract_title_suffix(text: str | None) -> str:
         segment = part.strip()
         if not segment:
             continue
+        segment = _strip_markdown_wrappers(segment)
         segment = re.split(r"[，,、]", segment)[0].strip()
         segment = re.sub(r"^(本章|这一章|该章|章节)\s*", "", segment)
         if len(segment) < 2:
+            continue
+        if _looks_like_meta_text(segment):
             continue
         if segment in {"推进主线", "推进剧情", "无", "none", "None"}:
             continue
@@ -96,6 +195,126 @@ def resolve_chapter_title(
     if suffix:
         return normalize_title_text(f"第{chapter_num}章：{suffix}")
     return f"第{chapter_num}章：关键事件"
+
+
+def sanitize_chapter_content_for_storage(raw: str | None, chapter_num: int) -> str:
+    """Best-effort sanitizer (deprecated in write path; keep for manual/offline cleanup only)."""
+    source = str(raw or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not source.strip():
+        return ""
+
+    lines = source.split("\n")
+    # Only sanitize when contamination signal is strong enough to avoid deleting valid openings.
+    strong_signal = 0
+    scanned = 0
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        scanned += 1
+        if any(stripped.startswith(marker) for marker in _STRONG_PREFACE_MARKERS):
+            strong_signal += 1
+        elif _CHAPTER_HEADING_LINE_RE.match(stripped):
+            strong_signal += 1
+        elif _PREFACE_SEPARATOR_RE.match(stripped):
+            strong_signal += 1
+        if scanned >= 8:
+            break
+    if strong_signal == 0:
+        return source.strip()
+
+    idx = 0
+    dropped_any = False
+
+    while idx < len(lines):
+        stripped = lines[idx].strip()
+        if not stripped:
+            idx += 1
+            continue
+        if _is_preface_line(stripped, dropped_any=dropped_any):
+            dropped_any = True
+            idx += 1
+            continue
+        break
+
+    cleaned_lines = lines[idx:] if dropped_any else lines
+    if cleaned_lines and _CHAPTER_HEADING_LINE_RE.match(cleaned_lines[0].strip() or ""):
+        cleaned_lines = cleaned_lines[1:]
+        while cleaned_lines and not cleaned_lines[0].strip():
+            cleaned_lines = cleaned_lines[1:]
+
+    cleaned = "\n".join(cleaned_lines).strip()
+    if not cleaned:
+        logger.warning("chapter.content.sanitize.empty_fallback chapter=%s", chapter_num)
+        return source.strip()
+    return cleaned
+
+
+def detect_chapter_content_contamination(raw: str | None, chapter_num: int | None = None) -> dict:
+    """Detect prompt/meta leakage without mutating content."""
+    text = str(raw or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return {"contaminated": False, "reasons": [], "evidence": []}
+
+    reasons: list[str] = []
+    evidence: list[str] = []
+    non_empty: list[str] = [line.strip() for line in text.split("\n") if line.strip()]
+    head = non_empty[:10]
+
+    for idx, line in enumerate(head):
+        if any(line.startswith(marker) for marker in _STRONG_PREFACE_MARKERS):
+            reasons.append("strong_preface_marker")
+            evidence.append(line[:80])
+        if idx <= 2 and _looks_like_meta_text(line):
+            reasons.append("meta_phrase")
+            evidence.append(line[:80])
+        if idx == 0 and _CHAPTER_HEADING_LINE_RE.match(line):
+            reasons.append("leading_chapter_heading")
+            evidence.append(line[:80])
+        if idx <= 3 and _PREFACE_SEPARATOR_RE.match(line):
+            reasons.append("preface_separator")
+            evidence.append(line[:80])
+        if idx <= 4 and _PREFACE_BOLD_ITEM_RE.match(line):
+            reasons.append("preface_bold_item")
+            evidence.append(line[:80])
+        if idx <= 4 and _PREFACE_LIST_RE.match(line):
+            if any(r in reasons for r in ("strong_preface_marker", "meta_phrase", "preface_separator", "preface_bold_item")):
+                reasons.append("preface_list_item")
+                evidence.append(line[:80])
+
+    if chapter_num is not None and head:
+        first = head[0]
+        chapter_plain = normalize_title_text(first)
+        if chapter_plain in {
+            f"第{chapter_num}章",
+            f"Chapter {chapter_num}",
+            f"CH {chapter_num}",
+            f"Ch {chapter_num}",
+        }:
+            reasons.append("leading_placeholder_heading")
+            evidence.append(first[:80])
+
+    uniq_reasons = list(dict.fromkeys(reasons))
+    uniq_evidence = list(dict.fromkeys(evidence))
+    return {"contaminated": bool(uniq_reasons), "reasons": uniq_reasons, "evidence": uniq_evidence[:5]}
+
+
+def extract_chapter_body_from_response(raw: str | None) -> str:
+    """Extract chapter body from tag-constrained model outputs."""
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    if text.startswith("```"):
+        lines = text.split("\n")
+        lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    match = _CHAPTER_BODY_TAG_RE.search(text)
+    if not match:
+        return text
+    body = (match.group(1) or "").strip()
+    return body or text
 
 def save_prewrite_artifacts(novel_id: int, prewrite: dict) -> None:
     db = SessionLocal()

@@ -1,11 +1,20 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { motion } from "framer-motion";
 import { ArrowLeft, BarChart3, Clapperboard, Copy, Download, Wand2 } from "lucide-react";
-import { api, Novel, NovelVersion, Chapter, ChapterProgress, RewriteAnnotationInput, getErrorMessage } from "@/lib/api";
+import {
+  api,
+  Novel,
+  NovelVersion,
+  Chapter,
+  ChapterProgress,
+  PresetCategory,
+  RewriteAnnotationInput,
+  getErrorMessage,
+} from "@/lib/api";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Card } from "@/components/ui/Card";
@@ -26,6 +35,7 @@ const CHAPTER_STATUS_MAP: Record<ChapterProgress["status"], { label: string; var
   generating: { label: "生成中", variant: "warning" },
   completed: { label: "已完成", variant: "success" },
 };
+const GRAMMAR_SKIPPED_TEXT = "未启用语法检查（language_tool_python 不可用），跳过该项。";
 
 function getDisplayChapterTitle(chapterNum: number, title?: string) {
   const value = (title || "").trim();
@@ -36,6 +46,32 @@ function getChapterHeading(chapterNum: number, title?: string) {
   const display = getDisplayChapterTitle(chapterNum, title);
   const compact = display.replace(new RegExp(`^第\\s*${chapterNum}\\s*章[:：\\s-]*`), "").trim();
   return compact ? `第 ${chapterNum} 章 · ${compact}` : `第 ${chapterNum} 章`;
+}
+
+function countVisibleChars(content?: string): number {
+  const text = (content || "").trim();
+  if (!text) return 0;
+  return text.replace(/\s+/g, "").length;
+}
+
+function buildPresetLabelMap(items?: PresetCategory[string]): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!Array.isArray(items)) return out;
+  for (const item of items) {
+    if (!item?.id || !item?.label) continue;
+    out[item.id] = item.label;
+  }
+  return out;
+}
+
+function toDisplayLabel(rawValue: string | undefined, labelMap: Record<string, string>, fallback: string): string {
+  if (!rawValue) return "";
+  return labelMap[rawValue] || fallback;
+}
+
+function sanitizeLanguageReport(report?: string): string {
+  if (!report) return "";
+  return report.replaceAll(GRAMMAR_SKIPPED_TEXT, "").replace(/\s{2,}/g, " ").trim();
 }
 
 export default function NovelPage() {
@@ -52,6 +88,10 @@ export default function NovelPage() {
   const [loading, setLoading] = useState(true);
   const [submittingRewrite, setSubmittingRewrite] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const [genreLabelMap, setGenreLabelMap] = useState<Record<string, string>>({});
+  const [styleLabelMap, setStyleLabelMap] = useState<Record<string, string>>({});
+
   const [annotations, setAnnotations] = useState<RewriteAnnotationInput[]>([]);
   const [selectionDraft, setSelectionDraft] = useState<{
     chapter_num: number;
@@ -59,38 +99,50 @@ export default function NovelPage() {
     start_offset: number;
     end_offset: number;
   } | null>(null);
+  const [selectionBubble, setSelectionBubble] = useState<{ left: number; top: number } | null>(null);
   const [instructionDraft, setInstructionDraft] = useState("");
   const [issueTypeDraft, setIssueTypeDraft] = useState<RewriteAnnotationInput["issue_type"]>("continuity");
   const [priorityDraft, setPriorityDraft] = useState<RewriteAnnotationInput["priority"]>("must");
+
   const [copyState, setCopyState] = useState<"idle" | "title_copied" | "content_copied" | "error">("idle");
   const contentRef = useRef<HTMLDivElement | null>(null);
+  const selectionBubbleRef = useRef<HTMLDivElement | null>(null);
   const copyTimerRef = useRef<number | null>(null);
 
-  // Export dropdown
   const [showExport, setShowExport] = useState(false);
 
   useEffect(() => {
-    loadData();
+    void loadData();
   }, [id]);
 
   const loadData = async () => {
     try {
       setLoading(true);
       setError(null);
-      const novelData = await api.getNovel(id);
+      const [novelData, presetsData] = await Promise.all([
+        api.getNovel(id),
+        api.getPresets().catch(() => null),
+      ]);
+
       let versionsData: NovelVersion[] = [];
       let defaultVersion: NovelVersion | null = null;
       try {
         versionsData = await api.getVersions(id);
         defaultVersion = versionsData.find((v) => v.is_default) || versionsData[0] || null;
       } catch (versionErr) {
-        // Fallback for legacy/inconsistent environments where versions endpoint may fail.
         console.error(versionErr);
       }
+
       const [progressData, chaptersData] = await Promise.all([
         api.getChapterProgress(id),
         api.getChapters(id, defaultVersion?.id),
       ]);
+
+      const nextGenreMap = buildPresetLabelMap(presetsData?.genres);
+      const nextStyleMap = buildPresetLabelMap(presetsData?.styles);
+
+      setGenreLabelMap(nextGenreMap);
+      setStyleLabelMap(nextStyleMap);
       setNovel(novelData);
       setChapters(chaptersData);
       setChapterProgress(progressData);
@@ -113,16 +165,62 @@ export default function NovelPage() {
   const selectedChapterMeta = selectedChapterNum !== null
     ? chapterProgress.find((c) => c.chapter_num === selectedChapterNum) || null
     : null;
-  const novelTitle = novel?.title || "";
+
+  const novelTitle = novel?.title || "未命名小说";
   const selectedChapterTitleDisplay = selectedChapter
     ? getDisplayChapterTitle(selectedChapter.chapter_num, selectedChapter.title)
     : "";
-  const topBarTitle = selectedChapter
+
+  const selectedWordCount = useMemo(() => {
+    if (!selectedChapter) return 0;
+    if (typeof selectedChapter.word_count === "number" && selectedChapter.word_count >= 0) {
+      return selectedChapter.word_count;
+    }
+    return countVisibleChars(selectedChapter.content);
+  }, [selectedChapter]);
+  const selectedLanguageReport = useMemo(
+    () => sanitizeLanguageReport(selectedChapter?.language_quality_report),
+    [selectedChapter?.language_quality_report]
+  );
+
+  const genreLabel = toDisplayLabel(novel?.genre, genreLabelMap, "未定义体裁");
+  const styleLabel = toDisplayLabel(novel?.style, styleLabelMap, "未定义风格");
+  const chapterLabel = selectedChapter
     ? getChapterHeading(selectedChapter.chapter_num, selectedChapter.title)
-    : novelTitle;
-  const topBarSubtitle = selectedChapter
-    ? [novelTitle, novel?.genre, novel?.style].filter(Boolean).join(" · ")
-    : [novel?.genre, novel?.style].filter(Boolean).join(" · ");
+    : "";
+
+  const topBarTitle = novelTitle;
+  const topBarSubtitle = [chapterLabel, genreLabel, styleLabel].filter(Boolean).join(" · ");
+  const annotationCountByChapter = useMemo(() => {
+    const out = new Map<number, number>();
+    for (const ann of annotations) {
+      out.set(ann.chapter_num, (out.get(ann.chapter_num) || 0) + 1);
+    }
+    return out;
+  }, [annotations]);
+  const selectedChapterAnnotations = useMemo(() => {
+    if (!selectedChapter) return [];
+    return annotations
+      .map((ann, index) => ({ ...ann, _index: index }))
+      .filter((ann) => ann.chapter_num === selectedChapter.chapter_num);
+  }, [annotations, selectedChapter]);
+
+  const selectedChapterAnnotationRanges = useMemo(() => {
+    if (!selectedChapter?.content) return [];
+    const total = selectedChapter.content.length;
+    return selectedChapterAnnotations
+      .map((ann) => {
+        if (typeof ann.start_offset !== "number" || typeof ann.end_offset !== "number") {
+          return null;
+        }
+        const start = Math.max(0, Math.min(total, ann.start_offset));
+        const end = Math.max(0, Math.min(total, ann.end_offset));
+        if (end <= start) return null;
+        return { ...ann, start, end };
+      })
+      .filter((ann): ann is RewriteAnnotationInput & { _index: number; start: number; end: number } => ann !== null)
+      .sort((a, b) => a.start - b.start);
+  }, [selectedChapter?.content, selectedChapterAnnotations]);
 
   const resetCopyState = () => {
     if (copyTimerRef.current) {
@@ -133,6 +231,14 @@ export default function NovelPage() {
       setCopyState("idle");
       copyTimerRef.current = null;
     }, 1400);
+  };
+
+  const clearSelectionDraft = () => {
+    setSelectionDraft(null);
+    setSelectionBubble(null);
+    setInstructionDraft("");
+    const selection = window.getSelection();
+    if (selection) selection.removeAllRanges();
   };
 
   const handleCopyTitle = async () => {
@@ -168,26 +274,75 @@ export default function NovelPage() {
     }
   }, []);
 
+  useEffect(() => {
+    setSelectionDraft(null);
+    setSelectionBubble(null);
+    setInstructionDraft("");
+  }, [selectedChapterNum, activeVersionId]);
+
+  useEffect(() => {
+    if (!selectionDraft) return;
+
+    const onMouseDown = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (!target) return;
+      if (selectionBubbleRef.current?.contains(target)) return;
+      clearSelectionDraft();
+    };
+
+    const onEsc = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        clearSelectionDraft();
+      }
+    };
+
+    window.addEventListener("mousedown", onMouseDown);
+    window.addEventListener("keydown", onEsc);
+    return () => {
+      window.removeEventListener("mousedown", onMouseDown);
+      window.removeEventListener("keydown", onEsc);
+    };
+  }, [selectionDraft]);
+
   const onContentMouseUp = () => {
     if (!selectedChapter || !contentRef.current) return;
     const sel = window.getSelection();
     if (!sel || sel.rangeCount === 0) return;
     const range = sel.getRangeAt(0);
     if (!contentRef.current.contains(range.commonAncestorContainer)) return;
+
     const selectedText = sel.toString().trim();
-    if (!selectedText) return;
+    if (!selectedText) {
+      clearSelectionDraft();
+      return;
+    }
 
     const preRange = range.cloneRange();
     preRange.selectNodeContents(contentRef.current);
     preRange.setEnd(range.startContainer, range.startOffset);
     const startOffset = preRange.toString().length;
     const endOffset = startOffset + selectedText.length;
+
+    const rect = range.getBoundingClientRect();
+    const bubbleWidth = 360;
+    const bubbleHeight = 280;
+    const edge = 12;
+
+    let left = rect.left + rect.width / 2 - bubbleWidth / 2;
+    left = Math.max(edge, Math.min(left, window.innerWidth - bubbleWidth - edge));
+
+    let top = rect.bottom + 10;
+    if (top + bubbleHeight > window.innerHeight - edge) {
+      top = Math.max(edge, rect.top - bubbleHeight - 10);
+    }
+
     setSelectionDraft({
       chapter_num: selectedChapter.chapter_num,
       selected_text: selectedText,
       start_offset: startOffset,
       end_offset: endOffset,
     });
+    setSelectionBubble({ left, top });
   };
 
   const addAnnotation = () => {
@@ -201,12 +356,60 @@ export default function NovelPage() {
         priority: priorityDraft,
       },
     ]);
-    setSelectionDraft(null);
-    setInstructionDraft("");
+    clearSelectionDraft();
   };
 
   const removeAnnotation = (index: number) => {
     setAnnotations((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const renderSelectedChapterContent = (): ReactNode => {
+    const content = selectedChapter?.content || "";
+    if (!content.trim()) {
+      return "暂无内容";
+    }
+    if (!selectedChapterAnnotationRanges.length) {
+      return content;
+    }
+
+    const nodes: ReactNode[] = [];
+    let cursor = 0;
+    let chunkId = 0;
+    for (const ann of selectedChapterAnnotationRanges) {
+      if (ann.start < cursor) {
+        continue;
+      }
+      if (ann.start > cursor) {
+        nodes.push(content.slice(cursor, ann.start));
+      }
+      const snippet = content.slice(ann.start, ann.end);
+      nodes.push(
+        <span
+          key={`ann-${ann._index}-${chunkId++}`}
+          className="rounded-[6px] bg-[#FFE8E5] px-1 py-0.5 text-[#A52A25] border border-[#FFD2CC] inline cursor-pointer"
+          onClick={(event) => {
+            event.stopPropagation();
+            removeAnnotation(ann._index);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              removeAnnotation(ann._index);
+            }
+          }}
+          role="button"
+          tabIndex={0}
+          title="点击删除该建议"
+        >
+          {snippet}
+        </span>
+      );
+      cursor = ann.end;
+    }
+    if (cursor < content.length) {
+      nodes.push(content.slice(cursor));
+    }
+    return nodes;
   };
 
   const submitRewrite = async () => {
@@ -254,15 +457,27 @@ export default function NovelPage() {
         backHref="/novels"
         icon={<ArrowLeft className="w-5 h-5" />}
         actions={(
-            <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             <div className="w-[180px]">
               <Select
                 value={String(activeVersionId ?? "")}
                 onValueChange={async (nextValue) => {
                   const nextId = Number(nextValue);
-                  setActiveVersionId(nextId);
-                  const nextChapters = await api.getChapters(id, nextId);
-                  setChapters(nextChapters);
+                  if (!Number.isFinite(nextId) || nextId === activeVersionId) return;
+                  if (annotations.length > 0) {
+                    const confirmed = window.confirm("切换版本会清空当前未提交的修改建议，是否继续？");
+                    if (!confirmed) return;
+                    setAnnotations([]);
+                    clearSelectionDraft();
+                  }
+                  try {
+                    const nextChapters = await api.getChapters(id, nextId);
+                    setActiveVersionId(nextId);
+                    setChapters(nextChapters);
+                  } catch (err) {
+                    console.error(err);
+                    setError(getErrorMessage(err, "版本切换失败"));
+                  }
                 }}
                 className="h-9 px-3 py-2 text-sm bg-[#FFFDFB]"
                 options={versions.map((v) => ({
@@ -279,7 +494,7 @@ export default function NovelPage() {
               onClick={submitRewrite}
             >
               <Wand2 className="w-4 h-4 mr-1.5" />
-              提交修改建议
+              提交修改建议（{annotations.length}）
             </Button>
             <div className="inline-flex h-9 items-center gap-1.5 rounded-full border border-[#E5DED7] bg-[#FFFDFB] px-3 text-sm font-medium text-[#6F665F]">
               <span
@@ -300,19 +515,19 @@ export default function NovelPage() {
                 variant="secondary"
                 size="sm"
                 className="h-9 px-3 shadow-none border-[#E5DED7] bg-white hover:bg-[#F8F5F1]"
-                onClick={() => setShowExport(!showExport)}
+                onClick={() => setShowExport((prev) => !prev)}
               >
                 <Download className="w-4 h-4 mr-2" />
                 导出
               </Button>
-              {showExport && (
+              {showExport ? (
                 <>
                   <div className="fixed inset-0 z-10" onClick={() => setShowExport(false)} />
                   <div className="absolute right-0 mt-1.5 w-40 bg-white border border-[#E5DED7] rounded-[12px] shadow-[0_10px_30px_rgba(0,0,0,0.08)] z-20 overflow-hidden">
                     {(["txt", "md", "zip"] as const).map((format) => (
                       <a
                         key={format}
-                        href={api.getExportUrl(id, format)}
+                        href={api.getExportUrl(id, format, activeVersionId ?? undefined)}
                         download
                         className="block px-4 py-2.5 text-sm text-[#3A3A3C] hover:bg-[#F6F3EF] transition-colors"
                         onClick={() => setShowExport(false)}
@@ -322,7 +537,7 @@ export default function NovelPage() {
                     ))}
                   </div>
                 </>
-              )}
+              ) : null}
             </div>
             <Link href={`/novels/${id}/progress`}>
               <Button
@@ -371,7 +586,7 @@ export default function NovelPage() {
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.4, ease: [0.25, 0.1, 0.25, 1] }}
-            className="grid grid-cols-1 lg:grid-cols-5 gap-6"
+            className="grid grid-cols-1 lg:grid-cols-4 gap-6"
           >
             <aside className="lg:col-span-1">
               <Card className="p-4 sticky top-24">
@@ -381,16 +596,22 @@ export default function NovelPage() {
                     <button
                       key={chapter.chapter_num}
                       onClick={() => setSelectedChapterNum(chapter.chapter_num)}
-                      className={`
-                        w-full text-left px-3 py-2 rounded-lg text-sm transition-all
-                        ${selectedChapterNum === chapter.chapter_num
+                      className={[
+                        "w-full text-left px-3 py-2 rounded-lg text-sm transition-all",
+                        selectedChapterNum === chapter.chapter_num
                           ? "bg-[#F8ECEA] text-[#A52A25] border border-[#EED1CC]"
-                          : "text-[#7E756D] hover:bg-[#F6F3EF] hover:text-[#1F1B18]"
-                        }
-                      `}
+                          : "text-[#7E756D] hover:bg-[#F6F3EF] hover:text-[#1F1B18]",
+                      ].join(" ")}
                     >
                       <div className="font-medium flex items-center justify-between gap-2">
-                        <span>第 {chapter.chapter_num} 章</span>
+                        <span className="inline-flex items-center gap-2">
+                          <span>第 {chapter.chapter_num} 章</span>
+                          {(annotationCountByChapter.get(chapter.chapter_num) || 0) > 0 ? (
+                            <span className="inline-flex min-w-5 h-5 items-center justify-center rounded-full bg-[#C8211B] px-1 text-[11px] font-semibold text-white">
+                              {annotationCountByChapter.get(chapter.chapter_num)}
+                            </span>
+                          ) : null}
+                        </span>
                         <Badge variant={CHAPTER_STATUS_MAP[chapter.status].variant}>
                           {CHAPTER_STATUS_MAP[chapter.status].label}
                         </Badge>
@@ -409,9 +630,7 @@ export default function NovelPage() {
                 {selectedChapter ? (
                   <article className="max-w-none">
                     <div className="mb-5 flex items-center justify-between gap-3">
-                      <p className="text-sm text-[#7E756D]">
-                        {selectedChapter.word_count ? `${selectedChapter.word_count.toLocaleString()} 字` : "字数待统计"}
-                      </p>
+                      <p className="text-sm text-[#7E756D]">{selectedWordCount.toLocaleString()} 字</p>
                       <div className="flex items-center gap-2">
                         <Button
                           variant="secondary"
@@ -442,18 +661,52 @@ export default function NovelPage() {
                       onMouseUp={onContentMouseUp}
                       className="text-[#3A3A3C] leading-relaxed whitespace-pre-wrap cursor-text"
                     >
-                      {selectedChapter.content || "暂无内容"}
+                      {renderSelectedChapterContent()}
                     </div>
-                    {(typeof selectedChapter.language_quality_score === "number" || selectedChapter.language_quality_report) && (
+                    {selectedChapterAnnotations.length ? (
+                      <div className="mt-6 rounded-[12px] border border-[#E7DDD4] bg-[#FFFCFA] p-4">
+                        <h4 className="text-sm font-medium text-[#3A3A3C]">
+                          本章修改建议（{selectedChapterAnnotations.length}）
+                        </h4>
+                        <div className="mt-3 space-y-2">
+                          {selectedChapterAnnotations.map((ann) => (
+                            <div
+                              key={`ann-list-${ann._index}`}
+                              className="rounded-[10px] border border-[#E5DED7] bg-white px-3 py-2"
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <p className="text-xs text-[#7E756D]">
+                                  类型：{ann.issue_type || "other"} · 优先级：{ann.priority || "should"}
+                                </p>
+                                <button
+                                  className="text-xs text-[#C4372D]"
+                                  onClick={() => removeAnnotation(ann._index)}
+                                >
+                                  删除
+                                </button>
+                              </div>
+                              {ann.selected_text ? (
+                                <p className="mt-1 text-xs text-[#7E756D] line-clamp-2">“{ann.selected_text}”</p>
+                              ) : null}
+                              <p className="mt-1 text-xs text-[#3A3A3C]">{ann.instruction}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+                    {(typeof selectedChapter.language_quality_score === "number" || selectedLanguageReport) ? (
                       <div className="mt-6 border-t border-[rgba(60,60,67,0.12)] pt-4 text-xs text-[#7E756D]">
                         语言质量：{typeof selectedChapter.language_quality_score === "number"
                           ? (selectedChapter.language_quality_score * 10).toFixed(1)
                           : "-"} / 10
-                        {selectedChapter.language_quality_report && (
-                          <p className="mt-2 text-[#7E756D] whitespace-pre-wrap">{selectedChapter.language_quality_report}</p>
-                        )}
+                        {selectedLanguageReport ? (
+                          <p className="mt-2 text-[#7E756D] whitespace-pre-wrap">{selectedLanguageReport}</p>
+                        ) : null}
                       </div>
-                    )}
+                    ) : null}
+                    <p className="mt-4 text-xs text-[#8E8379]">
+                      提示：选中正文片段后会出现冒泡编辑器，添加后将挂在该片段并计入章节目录气泡。
+                    </p>
                   </article>
                 ) : (
                   <div className="text-center py-12 text-[#7E756D]">
@@ -464,82 +717,72 @@ export default function NovelPage() {
                 )}
               </Card>
             </div>
-
-            <aside className="lg:col-span-1">
-              <Card className="p-4 sticky top-24">
-                <h3 className="text-sm font-medium text-[#7E756D] mb-3">修改建议</h3>
-                <p className="text-xs text-[#8E8379] mb-3">
-                  选中文本后添加建议，系统会从最早命中章节开始级联重写。
-                </p>
-                {selectionDraft ? (
-                  <div className="space-y-2 border border-[#E5DED7] rounded-lg p-3 bg-[#FFFDFB] mb-3">
-                    <p className="text-xs text-[#8E8379]">第 {selectionDraft.chapter_num} 章</p>
-                    <p className="text-xs text-[#5E5650] line-clamp-3">“{selectionDraft.selected_text}”</p>
-                    <div className="grid grid-cols-2 gap-2">
-                      <Select
-                        value={issueTypeDraft}
-                        onValueChange={(v) => setIssueTypeDraft(v as RewriteAnnotationInput["issue_type"])}
-                        className="h-8 rounded-md px-2 py-1 text-xs"
-                        options={[
-                          { value: "continuity", label: "连续性" },
-                          { value: "bug", label: "逻辑问题" },
-                          { value: "style", label: "文风" },
-                          { value: "pace", label: "节奏" },
-                          { value: "other", label: "其他" },
-                        ]}
-                      />
-                      <Select
-                        value={priorityDraft}
-                        onValueChange={(v) => setPriorityDraft(v as RewriteAnnotationInput["priority"])}
-                        className="h-8 rounded-md px-2 py-1 text-xs"
-                        options={[
-                          { value: "must", label: "必须" },
-                          { value: "should", label: "建议" },
-                          { value: "nice", label: "可选" },
-                        ]}
-                      />
-                    </div>
-                    <textarea
-                      value={instructionDraft}
-                      onChange={(e) => setInstructionDraft(e.target.value)}
-                      placeholder="输入修改方向，例如：角色伤势应延续到下一章，避免双手持剑。"
-                      className="w-full min-h-[90px] rounded-md border border-[#E5DED7] bg-white p-2 text-xs outline-none"
-                    />
-                    <Button size="sm" className="w-full" onClick={addAnnotation}>
-                      添加到建议列表
-                    </Button>
-                  </div>
-                ) : (
-                  <p className="text-xs text-[#8E8379] mb-3">在正文中选中一段文本后，这里会出现标注编辑器。</p>
-                )}
-
-                <div className="space-y-2 max-h-[45vh] overflow-y-auto">
-                  {annotations.map((ann, idx) => (
-                    <div key={`${ann.chapter_num}-${idx}`} className="border border-[#E5DED7] rounded-lg p-2 bg-white">
-                      <div className="flex items-center justify-between gap-2">
-                        <p className="text-xs font-medium text-[#5E5650]">第 {ann.chapter_num} 章 · {ann.priority}</p>
-                        <button
-                          className="text-xs text-[#C4372D]"
-                          onClick={() => removeAnnotation(idx)}
-                        >
-                          删除
-                        </button>
-                      </div>
-                      {ann.selected_text ? (
-                        <p className="text-xs text-[#7E756D] line-clamp-2 mt-1">“{ann.selected_text}”</p>
-                      ) : null}
-                      <p className="text-xs text-[#3A3A3C] mt-1">{ann.instruction}</p>
-                    </div>
-                  ))}
-                  {!annotations.length ? (
-                    <p className="text-xs text-[#8E8379]">暂无建议</p>
-                  ) : null}
-                </div>
-              </Card>
-            </aside>
           </motion.div>
         )}
       </div>
+
+      {selectionDraft && selectionBubble ? (
+        <div
+          className="fixed z-40"
+          style={{ left: `${selectionBubble.left}px`, top: `${selectionBubble.top}px`, width: "360px" }}
+        >
+          <div
+            ref={selectionBubbleRef}
+            className="rounded-[14px] border border-[#E7DDD4] bg-white shadow-[0_12px_30px_rgba(31,27,24,0.14)] p-3"
+          >
+            <p className="text-xs text-[#8E8379]">第 {selectionDraft.chapter_num} 章</p>
+            <p className="mt-1 text-xs text-[#5E5650] line-clamp-3">“{selectionDraft.selected_text}”</p>
+            <div className="grid grid-cols-2 gap-2 mt-2">
+              <Select
+                value={issueTypeDraft}
+                onValueChange={(v) => setIssueTypeDraft(v as RewriteAnnotationInput["issue_type"])}
+                className="h-8 rounded-md px-2 py-1 text-xs"
+                options={[
+                  { value: "continuity", label: "连续性" },
+                  { value: "bug", label: "逻辑问题" },
+                  { value: "style", label: "文风" },
+                  { value: "pace", label: "节奏" },
+                  { value: "other", label: "其他" },
+                ]}
+              />
+              <Select
+                value={priorityDraft}
+                onValueChange={(v) => setPriorityDraft(v as RewriteAnnotationInput["priority"])}
+                className="h-8 rounded-md px-2 py-1 text-xs"
+                options={[
+                  { value: "must", label: "必须" },
+                  { value: "should", label: "建议" },
+                  { value: "nice", label: "可选" },
+                ]}
+              />
+            </div>
+            <textarea
+              value={instructionDraft}
+              onChange={(e) => setInstructionDraft(e.target.value)}
+              placeholder="输入修改方向，例如：伏笔提前、语气更克制、人物动作要与前文一致。"
+              className="w-full min-h-[96px] rounded-md border border-[#E5DED7] bg-white p-2 text-xs outline-none mt-2"
+            />
+            <div className="mt-2 flex items-center justify-end gap-2">
+              <Button
+                variant="secondary"
+                size="sm"
+                className="h-8 px-3"
+                onClick={clearSelectionDraft}
+              >
+                取消
+              </Button>
+              <Button
+                size="sm"
+                className="h-8 px-3"
+                onClick={addAnnotation}
+                disabled={!instructionDraft.trim()}
+              >
+                添加建议
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }

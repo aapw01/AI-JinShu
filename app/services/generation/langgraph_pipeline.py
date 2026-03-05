@@ -31,6 +31,7 @@ from app.services.generation.agents import (
 from app.services.generation.common import (
     MAX_RETRIES,
     REVIEW_SCORE_THRESHOLD,
+    detect_chapter_content_contamination,
     generate_chapter_summary,
     logger,
     resolve_chapter_title,
@@ -1760,7 +1761,40 @@ def _node_finalize(state: GenerationState) -> GenerationState:
     chapter_num = state["current_chapter"]
     _progress(state, "finalizer", chapter_num, _chapter_progress(state, 0.70), "定稿...", {"current_phase": "chapter_finalizing", "total_chapters": state["num_chapters"]})
     f_provider, f_model = get_model_for_stage(state["strategy"], "finalizer")
-    final_content = state["finalizer"].run(state["draft"], state["feedback"], state["target_language"], f_provider, f_model)
+    base_feedback = str(state.get("feedback") or "")
+    format_guardrail = (
+        "【输出格式纠偏】上一次输出包含说明性前言或标题污染。\n"
+        "现在必须仅输出章节正文，不要任何解释/总结/标题/Markdown；"
+        "禁止出现“以下是根据反馈”“重点解决如下问题”等语句。"
+    )
+    final_content = ""
+    contamination = {"contaminated": False, "reasons": [], "evidence": []}
+    feedback_for_attempt = base_feedback
+    for attempt in range(2):
+        final_content = state["finalizer"].run(
+            state["draft"],
+            feedback_for_attempt,
+            state["target_language"],
+            f_provider,
+            f_model,
+        ).strip()
+        contamination = detect_chapter_content_contamination(final_content, chapter_num=chapter_num)
+        if not contamination.get("contaminated"):
+            break
+        logger.warning(
+            "chapter.content.contaminated source=finalizer chapter=%s attempt=%s reasons=%s evidence=%s",
+            chapter_num,
+            attempt + 1,
+            contamination.get("reasons"),
+            contamination.get("evidence"),
+        )
+        feedback_for_attempt = (
+            f"{base_feedback}\n\n{format_guardrail}" if base_feedback else format_guardrail
+        )
+    if contamination.get("contaminated"):
+        raise RuntimeError(
+            f"chapter_content_contaminated chapter={chapter_num} reasons={contamination.get('reasons')}"
+        )
     extracted_facts = state["fact_extractor"].run(
         chapter_num=chapter_num,
         content=final_content,
