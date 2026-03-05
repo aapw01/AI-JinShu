@@ -186,11 +186,14 @@ export default function ProgressPage() {
 
   useEffect(() => {
     if (rewriteRequestId) return;
-    const loadClosure = () => api.getClosureReport(id, taskId || undefined).then(setClosureReport).catch(() => undefined);
+    const loadClosure = () => {
+      const nextTaskId = taskId || status?.task_id;
+      return api.getClosureReport(id, nextTaskId || undefined).then(setClosureReport).catch(() => undefined);
+    };
     loadClosure();
     const timer = setInterval(loadClosure, 5000);
     return () => clearInterval(timer);
-  }, [id, taskId, rewriteRequestId]);
+  }, [id, rewriteRequestId, status?.task_id, taskId]);
 
   useEffect(() => {
     if (rewriteRequestId) return;
@@ -203,13 +206,14 @@ export default function ProgressPage() {
 
   // SSE connection for real-time updates
   useEffect(() => {
-    if (rewriteRequestId || !taskId) return;
+    const streamTaskId = taskId || status?.task_id;
+    if (rewriteRequestId || !streamTaskId) return;
     let disposed = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
     const connectSSE = () => {
       if (disposed) return;
-      const es = api.streamProgress(id, taskId);
+      const es = api.streamProgress(id, streamTaskId);
       eventSourceRef.current = es;
 
       es.onmessage = (event) => {
@@ -242,7 +246,7 @@ export default function ProgressPage() {
       if (reconnectTimer) clearTimeout(reconnectTimer);
       eventSourceRef.current?.close();
     };
-  }, [id, taskId, rewriteRequestId]);
+  }, [id, rewriteRequestId, status?.task_id, taskId]);
 
   // Auto-scroll logs
   useEffect(() => {
@@ -277,6 +281,7 @@ export default function ProgressPage() {
   const isFailed = isRewriteMode ? rewriteStatus?.status === "failed" : status?.status === "failed";
   const isAwaitingOutline = false;
   const runState = status?.run_state || status?.status;
+  const effectiveTaskId = taskId || status?.task_id || undefined;
   const isRunning = isRewriteMode
     ? rewriteStatus?.status === "running" || rewriteStatus?.status === "queued"
     : status?.status === "queued" || status?.status === "dispatching" || status?.status === "running" || runState === "running";
@@ -356,7 +361,7 @@ export default function ProgressPage() {
                 onClick={async () => {
                   try {
                     setRetrying(true);
-                    const res = await api.retryGeneration(id, taskId || undefined);
+                    const res = await api.retryGeneration(id, effectiveTaskId);
                     router.replace(`/novels/${id}/progress?task_id=${res.task_id}`);
                   } catch (e) {
                     setLogs((prev) => [...prev, getErrorMessage(e, "重试提交失败，请稍后重试")]);
@@ -418,13 +423,12 @@ export default function ProgressPage() {
               <Button
                 variant="secondary"
                 size="sm"
-                disabled={mutatingRunState || !taskId || !isRunning || isPaused}
+                disabled={mutatingRunState || !isRunning || isPaused}
                 onClick={async () => {
-                  if (!taskId) return;
                   try {
                     setMutatingRunState(true);
-                    await api.pauseGeneration(id, taskId);
-                    const next = await api.getGenerationStatus(id, taskId);
+                    await api.pauseGeneration(id, effectiveTaskId);
+                    const next = await api.getGenerationStatus(id, effectiveTaskId);
                     setStatus(next);
                   } finally {
                     setMutatingRunState(false);
@@ -437,13 +441,12 @@ export default function ProgressPage() {
               <Button
                 variant="secondary"
                 size="sm"
-                disabled={mutatingRunState || !taskId || !isPaused}
+                disabled={mutatingRunState || !isPaused}
                 onClick={async () => {
-                  if (!taskId) return;
                   try {
                     setMutatingRunState(true);
-                    await api.resumeGeneration(id, taskId);
-                    const next = await api.getGenerationStatus(id, taskId);
+                    await api.resumeGeneration(id, effectiveTaskId);
+                    const next = await api.getGenerationStatus(id, effectiveTaskId);
                     setStatus(next);
                   } finally {
                     setMutatingRunState(false);
@@ -456,14 +459,13 @@ export default function ProgressPage() {
               <Button
                 variant="secondary"
                 size="sm"
-                disabled={mutatingRunState || !taskId || isComplete || isFailed}
+                disabled={mutatingRunState || isComplete || isFailed}
                 onClick={async () => {
-                  if (!taskId) return;
                   if (!window.confirm("确定要取消当前生成任务吗？此操作不可撤销。")) return;
                   try {
                     setMutatingRunState(true);
-                    await api.cancelGenerationByNovel(id, taskId);
-                    const next = await api.getGenerationStatus(id, taskId);
+                    await api.cancelGenerationByNovel(id, effectiveTaskId);
+                    const next = await api.getGenerationStatus(id, effectiveTaskId);
                     setStatus(next);
                   } finally {
                     setMutatingRunState(false);
@@ -481,13 +483,13 @@ export default function ProgressPage() {
               已启用自动节奏加速（连续低推进 {status?.low_progress_streak || 0} 章，信号 {Math.round((status?.progress_signal || 0) * 100)}%，原因 {(pacingState?.reasons || []).join(" / ") || "low_progress_streak"}）
             </p>
           ) : null}
-          {isAwaitingOutline && taskId && (
+          {isAwaitingOutline && effectiveTaskId && (
             <div className="mt-4">
               <Button
                 onClick={async () => {
                   try {
-                    await api.confirmOutline(id, taskId);
-                    const s = await api.getGenerationStatus(id, taskId);
+                    await api.confirmOutline(id, effectiveTaskId);
+                    const s = await api.getGenerationStatus(id, effectiveTaskId);
                     setStatus(s);
                     setLogs((prev) => [...prev, "已确认大纲，继续写作"]);
                   } catch (e) {

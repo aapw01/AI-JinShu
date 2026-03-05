@@ -99,6 +99,7 @@ export interface ChapterProgress {
 }
 
 export interface GenerationStatus {
+  task_id?: string;
   status: string;
   trace_id?: string;
   run_state?: string;
@@ -392,6 +393,7 @@ export interface StoryboardProject {
   uuid: string;
   novel_id: string;
   novel_title?: string;
+  source_novel_version_id?: number | null;
   status: "draft" | "generating" | "ready" | "finalized" | "failed";
   target_episodes: number;
   target_episode_seconds: number;
@@ -506,6 +508,7 @@ export interface StoryboardCharacterPrompt {
 
 export interface StoryboardCreateData {
   novel_id: string;
+  source_novel_version_id?: number;
   target_episodes: number;
   target_episode_seconds: number;
   style_profile?: string;
@@ -523,6 +526,97 @@ export interface StoryboardGenerateResponse {
   task_id: string;
   storyboard_project_id: number;
   created_version_ids: number[];
+}
+
+export interface StoryboardPreflightResponse {
+  ok: boolean;
+  storyboard_project_id: number;
+  gate_status: "passed" | "blocked" | string;
+  source_novel_version_id: number;
+  profiles_count: number;
+  chapters_count: number;
+  missing_identity_fields_count: number;
+  failed_identity_characters: Array<Record<string, unknown>>;
+  snapshot_hash: string;
+}
+
+export interface StoryboardRunLane {
+  id: number;
+  lane: StoryboardLane;
+  storyboard_version_id: number;
+  creation_task_public_id?: string | null;
+  status: string;
+  run_state: string;
+  current_phase?: string | null;
+  progress: number;
+  message?: string | null;
+  error?: string | null;
+  error_code?: string | null;
+  error_category?: string | null;
+  gate_report_json: Record<string, unknown>;
+  updated_at?: string | null;
+}
+
+export interface StoryboardRun {
+  id: number;
+  public_id: string;
+  storyboard_project_id: number;
+  status: string;
+  run_state: string;
+  current_phase?: string | null;
+  progress: number;
+  message?: string | null;
+  error?: string | null;
+  error_code?: string | null;
+  error_category?: string | null;
+  lanes: StoryboardRunLane[];
+  created_at: string;
+  updated_at?: string | null;
+  finished_at?: string | null;
+}
+
+export interface StoryboardRunActionResponse {
+  ok: boolean;
+  storyboard_project_id: number;
+  run_id: string;
+  action: "pause" | "resume" | "cancel" | "retry" | string;
+  run_state: string;
+  status: string;
+}
+
+export interface StoryboardCharacterCard {
+  id: number;
+  storyboard_project_id: number;
+  storyboard_version_id: number;
+  lane: StoryboardLane;
+  character_key: string;
+  display_name: string;
+  skin_tone: string;
+  ethnicity: string;
+  master_prompt_text: string;
+  negative_prompt_text?: string | null;
+  style_tags_json: string[];
+  consistency_anchors_json: string[];
+  quality_score?: number | null;
+  metadata_json: Record<string, unknown>;
+  created_at: string;
+  updated_at?: string | null;
+}
+
+export interface StoryboardExportTask {
+  id: string;
+  storyboard_project_id: number;
+  storyboard_version_id: number;
+  format: "csv" | "json" | "pdf" | string;
+  status: "queued" | "running" | "completed" | "failed" | string;
+  file_name?: string | null;
+  content_type?: string | null;
+  size_bytes?: number | null;
+  error?: string | null;
+  error_code?: string | null;
+  download_url?: string | null;
+  created_at: string;
+  updated_at?: string | null;
 }
 
 export interface StoryboardStylePresetItem {
@@ -966,12 +1060,18 @@ export const api = {
     fetchApi<PresetCategory[string]>(`/api/presets/${category}`),
 
   // Export
-  getExportUrl: (novelId: string, format: 'txt' | 'md' | 'zip') =>
-    `${BASE}/api/novels/${novelId}/export?format=${format}`,
+  getExportUrl: (novelId: string, format: 'txt' | 'md' | 'zip', versionId?: number) =>
+    `${BASE}/api/novels/${novelId}/export?format=${format}${typeof versionId === "number" ? `&version_id=${encodeURIComponent(versionId)}` : ""}`,
 
   // SSE Progress stream
   streamProgress: (novelId: string, taskId: string) => {
     const url = `${BASE}/api/novels/${novelId}/generation/progress?task_id=${taskId}`;
+    return new EventSource(url);
+  },
+
+  streamStoryboardRun: (projectId: number, runId: string) => {
+    const encoded = encodeURIComponent(runId);
+    const url = `${BASE}/api/storyboards/${projectId}/runs/${encoded}/events`;
     return new EventSource(url);
   },
 
@@ -1028,6 +1128,33 @@ export const api = {
         body: JSON.stringify({ novel_id: novelId }),
       }
     ),
+
+  runStoryboardPreflight: (projectId: number, forceRefreshSnapshot = false) =>
+    fetchApi<StoryboardPreflightResponse>(`/api/storyboards/${projectId}/preflight`, {
+      method: "POST",
+      body: JSON.stringify({ force_refresh_snapshot: forceRefreshSnapshot }),
+    }),
+
+  startStoryboardRun: (projectId: number, options?: { idempotencyKey?: string }) =>
+    fetchApi<StoryboardRun>(`/api/storyboards/${projectId}/runs`, {
+      method: "POST",
+      headers: options?.idempotencyKey ? { "Idempotency-Key": options.idempotencyKey } : undefined,
+    }),
+
+  getStoryboardRun: (projectId: number, runId: string) =>
+    fetchApi<StoryboardRun>(`/api/storyboards/${projectId}/runs/${encodeURIComponent(runId)}`),
+
+  actionStoryboardRun: (
+    projectId: number,
+    runId: string,
+    action: "pause" | "resume" | "cancel" | "retry",
+    options?: { idempotencyKey?: string }
+  ) =>
+    fetchApi<StoryboardRunActionResponse>(`/api/storyboards/${projectId}/runs/${encodeURIComponent(runId)}/actions`, {
+      method: "POST",
+      headers: options?.idempotencyKey ? { "Idempotency-Key": options.idempotencyKey } : undefined,
+      body: JSON.stringify({ action }),
+    }),
 
   generateStoryboard: (projectId: number, novelVersionId: number) =>
     fetchApi<StoryboardGenerateResponse>(`/api/storyboards/${projectId}/generate`, {
@@ -1118,6 +1245,34 @@ export const api = {
     }>(`/api/storyboards/${projectId}/characters/generate${suffix}`, { method: "POST" });
   },
 
+  listStoryboardCharacterCards: (projectId: number, versionId: number, lane?: StoryboardLane) => {
+    const qs = new URLSearchParams();
+    if (lane) qs.set("lane", lane);
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    return fetchApi<StoryboardCharacterCard[]>(
+      `/api/storyboards/${projectId}/versions/${versionId}/character-cards${suffix}`
+    );
+  },
+
+  updateStoryboardCharacterCard: (
+    projectId: number,
+    versionId: number,
+    cardId: number,
+    data: Partial<
+      Pick<
+        StoryboardCharacterCard,
+        "skin_tone" | "ethnicity" | "master_prompt_text" | "negative_prompt_text" | "consistency_anchors_json" | "metadata_json"
+      >
+    >
+  ) =>
+    fetchApi<StoryboardCharacterCard>(
+      `/api/storyboards/${projectId}/versions/${versionId}/character-cards/${cardId}`,
+      {
+        method: "PUT",
+        body: JSON.stringify(data),
+      }
+    ),
+
   optimizeStoryboardVersion: (projectId: number, versionId: number) =>
     fetchApi<{
       ok: boolean;
@@ -1147,6 +1302,31 @@ export const api = {
     if (lane) qs.set("lane", lane);
     qs.set("format", format);
     return `${BASE}/api/storyboards/${projectId}/characters/export?${qs.toString()}`;
+  },
+
+  createStoryboardExport: (
+    projectId: number,
+    versionId: number,
+    format: "csv" | "json" | "pdf",
+    options?: { idempotencyKey?: string }
+  ) =>
+    fetchApi<{ ok: boolean; storyboard_project_id: number; version_id: number; export_id: string; status: string }>(
+      `/api/storyboards/${projectId}/versions/${versionId}/exports`,
+      {
+        method: "POST",
+        headers: options?.idempotencyKey ? { "Idempotency-Key": options.idempotencyKey } : undefined,
+        body: JSON.stringify({ format }),
+      }
+    ),
+
+  getStoryboardExport: (projectId: number, exportId: string) =>
+    fetchApi<StoryboardExportTask>(`/api/storyboards/${projectId}/exports/${encodeURIComponent(exportId)}`),
+
+  resolveApiUrl: (path: string) => {
+    if (!path) return BASE || "";
+    if (path.startsWith("http://") || path.startsWith("https://")) return path;
+    if (BASE) return `${BASE}${path.startsWith("/") ? path : `/${path}`}`;
+    return path;
   },
 };
 

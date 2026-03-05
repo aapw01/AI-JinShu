@@ -215,9 +215,10 @@
 ## Storyboard Endpoints
 
 ### `POST /api/storyboards`
-- 作用：为已完结小说创建导演分镜项目（V1 强制专业模式）。
+- 作用：为已完结小说创建导演分镜项目（V2 固定绑定小说版本快照入口）。
 - 关键入参：
   - `novel_id`（仅允许 `novel.status=completed`）
+  - `source_novel_version_id`（可选；不传时锁定小说默认版本）
   - `mode`（`quick|professional`，默认 `quick`）
   - `genre_style_key` / `director_style_key`（可选，默认用推荐）
   - `auto_style_recommendation`（默认 true）
@@ -228,20 +229,30 @@
   - `audience_goal`
   - `copyright_assertion=true`（必填硬门槛）
 
-### `POST /api/storyboards/{project_id}/generate`
-- 作用：异步生成双 lane 导演分镜草案。
-- 返回：`task_id` + `created_version_ids`。
+### `POST /api/storyboards/{project_id}/preflight`
+- 作用：执行硬门禁预检查（角色身份字段、源快照）。
+- 入参：`force_refresh_snapshot`（默认 false）。
+- 返回：`gate_status`、`missing_identity_fields_count`、`failed_identity_characters`、`snapshot_hash`。
 
-### `GET /api/storyboards/{project_id}/status?task_id=...`
-- 返回：`run_state/current_phase/current_lane/progress/eta`。
-- 专业字段：
-  - `style_consistency_score`
-  - `hook_score_episode`
-  - `quality_gate_reasons`
-  - `character_prompt_phase`
-  - `character_profiles_count`
-  - `missing_identity_fields_count`
-  - `failed_identity_characters`
+### `POST /api/storyboards/{project_id}/runs`
+- 作用：启动一次分镜运行（Run），由调度器按 lane 派发子任务。
+- 幂等：支持 `Idempotency-Key` 请求头。
+- 前置条件：项目必须先 `preflight_passed`，否则返回 `409 storyboard_preflight_required`。
+
+### `GET /api/storyboards/{project_id}/runs`
+- 作用：按创建时间倒序列出运行记录（含 lane 子状态）。
+
+### `GET /api/storyboards/{project_id}/runs/{run_id}`
+- 作用：读取单个 Run 聚合状态（`status/run_state/current_phase/progress` + `lanes[]`）。
+
+### `GET /api/storyboards/{project_id}/runs/{run_id}/events`
+- 作用：Run 实时状态 SSE 流（事件类型：`run_status`）。
+- 用途：工作台实时刷新，不必仅依赖轮询。
+
+### `POST /api/storyboards/{project_id}/runs/{run_id}/actions`
+- 作用：运行控制（`pause|resume|cancel|retry`）。
+- 请求体：`{"action":"pause|resume|cancel|retry"}`。
+- 幂等：`retry` 支持 `Idempotency-Key`。
 
 ### `GET /api/storyboards/style-presets`
 - 作用：获取内置双层风格库（题材风格 + 导演风格）。
@@ -249,9 +260,6 @@
 ### `POST /api/storyboards/style-recommendations`
 - 入参：`novel_id`
 - 作用：返回 AI 推荐 Top3 风格组合（含置信度和理由）。
-
-### `POST /api/storyboards/{project_id}/pause|resume|cancel|retry`
-- 作用：任务控制与故障恢复。
 
 ### `GET /api/storyboards/{project_id}/versions`
 - 作用：查看版本列表（含 `lane`, `is_default`, `is_final`, `quality_report_json`）。
@@ -263,20 +271,26 @@
 - 作用：人工确认定稿（定稿后导出）。
 - 额外门禁：必须先通过角色身份字段门禁（每角色 `skin_tone/ethnicity` 必填合法）。
 
-### `GET /api/storyboards/{project_id}/shots?version_id=...&episode_no=...`
-- 作用：读取镜头级分镜数据。
+### `GET /api/storyboards/{project_id}/versions/{version_id}/shots?episode_no=...`
+- 作用：按版本读取镜头级分镜数据。
 
-### `PUT /api/storyboards/{project_id}/shots/{shot_id}`
-- 作用：人工编辑镜头字段（定稿版本不可编辑）。
+### `PUT /api/storyboards/{project_id}/versions/{version_id}/shots/{shot_id}`
+- 作用：人工编辑镜头字段（定稿版本不可编辑，且镜头必须归属该版本）。
+
+### `GET /api/storyboards/{project_id}/versions/{version_id}/character-cards`
+- 作用：按版本读取角色主形象卡（V2 新表，版本绑定）。
+
+### `PUT /api/storyboards/{project_id}/versions/{version_id}/character-cards/{card_id}`
+- 作用：人工修正角色卡关键字段（含 `skin_tone/ethnicity`）。
 
 ### `GET /api/storyboards/{project_id}/characters?version_id=...&lane=...`
-- 作用：读取角色主形象提示词（按版本/lane）。
+- 作用：读取角色主形象提示词（兼容旧表）。
 
 ### `POST /api/storyboards/{project_id}/characters/generate`
-- 作用：手动重生角色主形象提示词（默认会覆盖该版本旧产物）。
+- 作用：手动重生角色主形象提示词（会回填到 V2 `character_cards` 与旧表）。
 
 ### `GET /api/storyboards/{project_id}/characters/export?version_id=...&lane=...&format=csv|json`
-- 作用：导出角色主形象提示词产物。
+- 作用：导出角色主形象提示词（兼容接口）。
 - 限制：仅 `is_final=true` 且身份字段门禁通过可导出。
 
 ### `POST /api/storyboards/{project_id}/versions/{version_id}/optimize`
@@ -300,8 +314,23 @@
 ### `GET /api/storyboards/{project_id}/versions/{version_id}/diff?compare_to=...`
 - 作用：版本差异（新增/删除/修改镜头统计）。
 
-### `GET /api/storyboards/{project_id}/export/csv?version_id=...`
-- 作用：导出导演分镜 CSV（仅 `is_final=true` 可导出）。
+### `POST /api/storyboards/{project_id}/versions/{version_id}/exports`
+- 作用：提交异步导出任务（`csv|json|pdf`）。
+- 幂等：支持 `Idempotency-Key`，同版本同格式重复请求可复用已有任务。
+
+### `GET /api/storyboards/{project_id}/exports/{export_id}`
+- 作用：查询导出任务状态；完成后返回签名下载地址。
+
+### `GET /api/storyboards/{project_id}/exports/{export_id}/download?expires=...&sig=...`
+- 作用：下载导出工件（签名校验 + 过期校验）。
+
+### 兼容接口（保留）
+- `POST /api/storyboards/{project_id}/generate`
+- `GET /api/storyboards/{project_id}/status`
+- `POST /api/storyboards/{project_id}/pause|resume|cancel|retry`
+- `GET /api/storyboards/{project_id}/shots`
+- `PUT /api/storyboards/{project_id}/shots/{shot_id}`
+- `GET /api/storyboards/{project_id}/export/csv`
 
 ## 权限矩阵（RBAC + Resource Policy）
 

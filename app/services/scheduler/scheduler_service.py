@@ -513,6 +513,64 @@ def _enqueue_worker_task(db: Session, *, task: CreationTask) -> None:
             req.task_id = task.public_id
             req.status = "queued"
             req.message = "重写任务已入队"
+    elif task.task_type == "storyboard_lane":
+        from app.models.novel import NovelVersion
+        from app.models.storyboard import StoryboardProject, StoryboardRun, StoryboardRunLane, StoryboardVersion
+        from app.tasks.storyboard import run_storyboard_lane
+
+        payload = task.payload_json or {}
+        for key in ("project_id", "run_id", "run_lane_id", "lane", "version_id", "novel_version_id"):
+            if payload.get(key) is None:
+                raise ValueError(f"missing payload key for storyboard_lane: {key}")
+        project_id = int(payload["project_id"])
+        run_id = int(payload["run_id"])
+        run_lane_id = int(payload["run_lane_id"])
+        lane = str(payload["lane"])
+        version_id = int(payload["version_id"])
+        novel_version_id = int(payload["novel_version_id"])
+
+        project = db.execute(select(StoryboardProject).where(StoryboardProject.id == project_id)).scalar_one_or_none()
+        if not project:
+            raise ValueError(f"storyboard project not found: {project_id}")
+        run = db.execute(
+            select(StoryboardRun).where(
+                StoryboardRun.id == run_id,
+                StoryboardRun.storyboard_project_id == project_id,
+            )
+        ).scalar_one_or_none()
+        if not run:
+            raise ValueError(f"storyboard run context not found: {run_id}")
+        run_lane = db.execute(
+            select(StoryboardRunLane).where(
+                StoryboardRunLane.id == run_lane_id,
+                StoryboardRunLane.storyboard_run_id == run_id,
+                StoryboardRunLane.storyboard_project_id == project_id,
+            )
+        ).scalar_one_or_none()
+        if not run_lane:
+            raise ValueError(f"storyboard run lane context not found: {run_lane_id}")
+        version = db.execute(
+            select(StoryboardVersion).where(
+                StoryboardVersion.id == version_id,
+                StoryboardVersion.storyboard_project_id == project_id,
+            )
+        ).scalar_one_or_none()
+        if not version:
+            raise ValueError(f"storyboard version context not found: {version_id}")
+        if version.lane != lane:
+            raise ValueError("storyboard run lane/version mismatch")
+        source_version = db.execute(select(NovelVersion).where(NovelVersion.id == novel_version_id)).scalar_one_or_none()
+        if not source_version or int(source_version.novel_id) != int(project.novel_id):
+            raise ValueError("storyboard novel_version context invalid")
+        async_result = run_storyboard_lane.delay(
+            project_id=project_id,
+            run_id=run_id,
+            run_lane_id=run_lane_id,
+            version_id=version_id,
+            lane=lane,
+            novel_version_id=novel_version_id,
+            creation_task_id=int(task.id),
+        )
     elif task.task_type == "storyboard":
         from app.models.novel import NovelVersion
         from app.models.storyboard import StoryboardProject, StoryboardTask, StoryboardVersion

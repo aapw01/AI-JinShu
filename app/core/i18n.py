@@ -1,6 +1,7 @@
 """Multilingual support helpers for 9 languages and quality evaluation."""
 from __future__ import annotations
 
+import logging
 import re
 from typing import Tuple
 
@@ -34,6 +35,8 @@ _NATIVE_STYLE_PROFILE = {
     "ko": "자연스러운 한국어 문체, 어미/조사 사용의 일관성, 대화체의 현실감 유지.",
     "ar": "اسلوب عربي فصيح طبيعي، تراكيب سليمة، وتدفق سردي متوازن بدون ترجمة حرفية.",
 }
+
+logger = logging.getLogger(__name__)
 
 
 def _normalize_lang_code(code: str) -> str:
@@ -158,7 +161,7 @@ def evaluate_language_quality(text: str, lang_code: str) -> Tuple[float, str]:
                 score -= 0.15
                 report_parts.append(f"语法问题密度偏高（{len(matches)} 条）。")
     except Exception:
-        report_parts.append("未启用语法检查（language_tool_python 不可用），跳过该项。")
+        logger.info("language_quality.grammar_check_skipped lang=%s", lang_code)
 
     score = max(0.0, min(1.0, score))
     if not report_parts:

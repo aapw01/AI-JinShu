@@ -4,11 +4,12 @@ from __future__ import annotations
 import io
 import json
 import logging
+import asyncio
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 
 import redis
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -25,7 +26,11 @@ from app.core.time_utils import to_utc_iso_z
 from app.models.novel import ChapterVersion, Novel, NovelVersion
 from app.models.storyboard import (
     StoryboardAssertion,
+    StoryboardCharacterCard,
     StoryboardCharacterPrompt,
+    StoryboardExport,
+    StoryboardRun,
+    StoryboardRunLane,
     StoryboardProject,
     StoryboardShot,
     StoryboardTask,
@@ -33,14 +38,25 @@ from app.models.storyboard import (
 )
 from app.schemas.storyboard import (
     StoryboardActionResponse,
+    StoryboardCharacterCardResponse,
+    StoryboardCharacterCardUpdateRequest,
     StoryboardCharacterGenerateResponse,
     StoryboardCharacterPromptResponse,
     StoryboardCreateRequest,
     StoryboardDiffResponse,
+    StoryboardExportCreateRequest,
+    StoryboardExportCreateResponse,
+    StoryboardExportStatusResponse,
     StoryboardGenerateResponse,
     StoryboardGenerateRequest,
     StoryboardOptimizeResponse,
+    StoryboardPreflightRequest,
+    StoryboardPreflightResponse,
     StoryboardProjectResponse,
+    StoryboardRunActionRequest,
+    StoryboardRunActionResponse,
+    StoryboardRunLaneResponse,
+    StoryboardRunResponse,
     StoryboardStylePresetsResponse,
     StoryboardStyleRecommendationRequest,
     StoryboardStyleRecommendationResponse,
@@ -49,11 +65,23 @@ from app.schemas.storyboard import (
     StoryboardTaskStatusResponse,
     StoryboardVersionResponse,
 )
+from app.services.storyboard.export_v2 import build_export_download_url, open_export_blob, verify_download_signature
 from app.services.storyboard.exporter import export_shots_to_csv
 from app.services.storyboard.character_prompts import (
     compose_character_prompts_for_version,
     export_character_prompts_csv,
     list_character_prompts,
+)
+from app.services.storyboard.runtime_v2 import (
+    create_run_and_dispatch,
+    get_export_by_public_id,
+    get_project_or_404 as get_project_or_404_v2,
+    get_run_by_public_id,
+    list_run_lanes,
+    persist_character_cards,
+    refresh_run_status,
+    run_action as run_action_v2,
+    run_preflight,
 )
 from app.services.storyboard.service import (
     RUNNING_STATES,
@@ -70,6 +98,7 @@ from app.services.storyboard.service import (
     task_status_payload,
     update_task_state,
 )
+from app.tasks.storyboard import run_storyboard_export
 from app.services.rewrite.service import get_default_version_id
 from app.services.storyboard.style_catalog import list_style_presets, recommend_styles
 from app.services.scheduler.scheduler_service import (
@@ -105,6 +134,7 @@ def _to_project_response(p: StoryboardProject, novel_public_id: str, novel_title
         uuid=p.uuid,
         novel_id=novel_public_id,
         novel_title=novel_title,
+        source_novel_version_id=(int(p.source_novel_version_id) if p.source_novel_version_id is not None else None),
         status=p.status,
         target_episodes=p.target_episodes,
         target_episode_seconds=p.target_episode_seconds,
@@ -186,6 +216,142 @@ def _to_character_prompt_response(s: StoryboardCharacterPrompt) -> StoryboardCha
         created_at=to_utc_iso_z(s.created_at),
         updated_at=to_utc_iso_z(s.updated_at),
     )
+
+
+def _to_character_card_response(s: StoryboardCharacterCard) -> StoryboardCharacterCardResponse:
+    return StoryboardCharacterCardResponse(
+        id=s.id,
+        storyboard_project_id=s.storyboard_project_id,
+        storyboard_version_id=s.storyboard_version_id,
+        lane=s.lane,
+        character_key=s.character_key,
+        display_name=s.display_name,
+        skin_tone=s.skin_tone,
+        ethnicity=s.ethnicity,
+        master_prompt_text=s.master_prompt_text,
+        negative_prompt_text=s.negative_prompt_text,
+        style_tags_json=[str(x) for x in (s.style_tags_json or []) if str(x).strip()],
+        consistency_anchors_json=[str(x) for x in (s.consistency_anchors_json or []) if str(x).strip()],
+        quality_score=s.quality_score,
+        metadata_json=s.metadata_json if isinstance(s.metadata_json, dict) else {},
+        created_at=to_utc_iso_z(s.created_at),
+        updated_at=to_utc_iso_z(s.updated_at),
+    )
+
+
+def _to_run_lane_response(row: StoryboardRunLane) -> StoryboardRunLaneResponse:
+    return StoryboardRunLaneResponse(
+        id=row.id,
+        lane=row.lane,
+        storyboard_version_id=row.storyboard_version_id,
+        creation_task_public_id=row.creation_task_public_id,
+        status=row.status,
+        run_state=row.run_state,
+        current_phase=row.current_phase,
+        progress=float(row.progress or 0.0),
+        message=row.message,
+        error=row.error,
+        error_code=row.error_code,
+        error_category=row.error_category,
+        gate_report_json=row.gate_report_json if isinstance(row.gate_report_json, dict) else {},
+        updated_at=to_utc_iso_z(row.updated_at),
+    )
+
+
+def _to_run_response(run: StoryboardRun, lanes: list[StoryboardRunLane]) -> StoryboardRunResponse:
+    return StoryboardRunResponse(
+        id=run.id,
+        public_id=run.public_id,
+        storyboard_project_id=run.storyboard_project_id,
+        status=run.status,
+        run_state=run.run_state,
+        current_phase=run.current_phase,
+        progress=float(run.progress or 0.0),
+        message=run.message,
+        error=run.error,
+        error_code=run.error_code,
+        error_category=run.error_category,
+        lanes=[_to_run_lane_response(row) for row in lanes],
+        created_at=to_utc_iso_z(run.created_at),
+        updated_at=to_utc_iso_z(run.updated_at),
+        finished_at=to_utc_iso_z(run.finished_at),
+    )
+
+
+def _run_to_legacy_task_payload(run: StoryboardRun, lanes: list[StoryboardRunLane]) -> dict:
+    lane = next(
+        (
+            row
+            for row in lanes
+            if row.run_state in {"running", "retrying", "submitted", "queued", "dispatching"}
+        ),
+        lanes[0] if lanes else None,
+    )
+    gate = lane.gate_report_json if lane and isinstance(lane.gate_report_json, dict) else {}
+    return {
+        "storyboard_project_id": int(run.storyboard_project_id),
+        "task_id": lane.creation_task_public_id if lane else None,
+        "status": str(run.status),
+        "run_state": str(run.run_state),
+        "current_phase": (lane.current_phase if lane else run.current_phase),
+        "current_lane": (lane.lane if lane else None),
+        "progress": float((lane.progress if lane else run.progress) or 0.0),
+        "current_episode": None,
+        "eta_seconds": None,
+        "eta_label": None,
+        "message": (lane.message if lane else run.message),
+        "error": (lane.error if lane else run.error),
+        "error_code": (lane.error_code if lane else run.error_code),
+        "error_category": (lane.error_category if lane else run.error_category),
+        "retryable": None,
+        "style_consistency_score": gate.get("style_consistency_score"),
+        "hook_score_episode": gate.get("hook_score_episode"),
+        "quality_gate_reasons": gate.get("quality_gate_reasons"),
+        "character_prompt_phase": gate.get("character_prompt_phase"),
+        "character_profiles_count": gate.get("character_profiles_count"),
+        "missing_identity_fields_count": gate.get("missing_identity_fields_count"),
+        "failed_identity_characters": gate.get("failed_identity_characters"),
+    }
+
+
+def _resolve_version_or_404(db: Session, *, project_id: int, version_id: int) -> StoryboardVersion:
+    version = db.execute(
+        select(StoryboardVersion).where(
+            StoryboardVersion.id == version_id,
+            StoryboardVersion.storyboard_project_id == project_id,
+        )
+    ).scalar_one_or_none()
+    if not version:
+        raise http_error(404, "storyboard_version_not_found", "Version not found")
+    return version
+
+
+def _to_export_status_response(row: StoryboardExport, *, include_download: bool = True) -> StoryboardExportStatusResponse:
+    download_url: str | None = None
+    if include_download and row.status == "completed" and row.storage_path:
+        download_url = build_export_download_url(
+            project_id=int(row.storyboard_project_id),
+            export_id=str(row.public_id),
+        )
+    return StoryboardExportStatusResponse(
+        id=str(row.public_id),
+        storyboard_project_id=int(row.storyboard_project_id),
+        storyboard_version_id=int(row.storyboard_version_id),
+        format=str(row.format),
+        status=str(row.status),
+        file_name=row.file_name,
+        content_type=row.content_type,
+        size_bytes=row.size_bytes,
+        error=row.error,
+        error_code=row.error_code,
+        download_url=download_url,
+        created_at=to_utc_iso_z(row.created_at),
+        updated_at=to_utc_iso_z(row.updated_at),
+    )
+
+
+def _sse_event(event_type: str, payload: dict) -> str:
+    return f"data: {json.dumps({'type': event_type, 'payload': payload}, ensure_ascii=False)}\n\n"
 
 
 def _active_task_or_404(db: Session, project_id: int, task_id: str | None) -> StoryboardTask:
@@ -270,10 +436,23 @@ def create_storyboard_project(
     if not req.copyright_assertion:
         raise http_error(400, "copyright_assertion_required", "请先确认改编权声明")
 
+    source_version_id = int(req.source_novel_version_id or 0)
+    if source_version_id > 0:
+        version = db.execute(
+            select(NovelVersion).where(
+                NovelVersion.id == source_version_id,
+                NovelVersion.novel_id == novel.id,
+            )
+        ).scalar_one_or_none()
+        if not version:
+            raise http_error(400, "invalid_novel_version", "小说版本无效")
+    else:
+        source_version_id = int(get_default_version_id(db, novel.id))
+
     project = create_project(
         db,
         novel=novel,
-        source_novel_version_id=get_default_version_id(db, novel.id),
+        source_novel_version_id=source_version_id,
         owner_user_uuid=principal.user_uuid or "",
         target_episodes=req.target_episodes,
         target_episode_seconds=req.target_episode_seconds,
@@ -297,6 +476,207 @@ def create_storyboard_project(
         output_lanes=project.output_lanes,
     )
     return _to_project_response(project, novel.uuid or str(novel.id))
+
+
+@router.post("/{project_id}/preflight", response_model=StoryboardPreflightResponse)
+def storyboard_preflight(
+    project_id: int,
+    req: StoryboardPreflightRequest,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(Permission.STORYBOARD_GENERATE, resource_loader=load_storyboard_resource)),
+):
+    project = get_project_or_404_v2(db, project_id)
+    if not project:
+        raise http_error(404, "storyboard_project_not_found", "Storyboard project not found")
+    report = run_preflight(
+        db,
+        project=project,
+        actor_user_uuid=principal.user_uuid or "",
+        force_refresh_snapshot=bool(req.force_refresh_snapshot),
+    )
+    db.commit()
+    return StoryboardPreflightResponse(
+        ok=bool(report.get("ok")),
+        storyboard_project_id=project.id,
+        gate_status=str(report.get("gate_status") or "blocked"),
+        source_novel_version_id=int(report.get("source_novel_version_id") or 0),
+        profiles_count=int(report.get("profiles_count") or 0),
+        chapters_count=int(report.get("chapters_count") or 0),
+        missing_identity_fields_count=int(report.get("missing_identity_fields_count") or 0),
+        failed_identity_characters=report.get("failed_identity_characters") or [],
+        snapshot_hash=str(report.get("snapshot_hash") or ""),
+    )
+
+
+@router.post("/{project_id}/runs", response_model=StoryboardRunResponse)
+def start_storyboard_run(
+    project_id: int,
+    request: Request,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(Permission.STORYBOARD_GENERATE, resource_loader=load_storyboard_resource)),
+):
+    project = get_project_or_404_v2(db, project_id)
+    if not project:
+        raise http_error(404, "storyboard_project_not_found", "Storyboard project not found")
+    try:
+        run, lanes = create_run_and_dispatch(
+            db,
+            project=project,
+            actor_user_uuid=principal.user_uuid or "",
+            trace_id=getattr(request.state, "trace_id", None),
+            idempotency_key=(idempotency_key or "").strip() or None,
+        )
+    except ValueError as exc:
+        code = str(exc)
+        if code == "preflight_required":
+            raise http_error(409, "storyboard_preflight_required", "请先完成 preflight 门禁检查")
+        if code == "run_already_active":
+            raise http_error(409, "storyboard_run_active", "已有进行中的分镜运行")
+        raise http_error(400, "storyboard_run_invalid", "无法启动分镜运行")
+    db.commit()
+    return _to_run_response(run, lanes)
+
+
+@router.get("/{project_id}/runs/{run_id}", response_model=StoryboardRunResponse)
+def get_storyboard_run_status(
+    project_id: int,
+    run_id: str,
+    db: Session = Depends(get_db),
+    _: Principal = Depends(require_permission(Permission.STORYBOARD_READ, resource_loader=load_storyboard_resource)),
+):
+    run = get_run_by_public_id(db, project_id=project_id, run_public_id=run_id)
+    if not run:
+        raise http_error(404, "storyboard_run_not_found", "Storyboard run not found")
+    refreshed = refresh_run_status(db, run_id=run.id) or run
+    lanes = list_run_lanes(db, run_id=refreshed.id)
+    db.commit()
+    return _to_run_response(refreshed, lanes)
+
+
+@router.get("/{project_id}/runs/{run_id}/events")
+def stream_storyboard_run_events(
+    project_id: int,
+    run_id: str,
+    db: Session = Depends(get_db),
+    _: Principal = Depends(require_permission(Permission.STORYBOARD_READ, resource_loader=load_storyboard_resource)),
+):
+    run = get_run_by_public_id(db, project_id=project_id, run_public_id=run_id)
+    if not run:
+        raise http_error(404, "storyboard_run_not_found", "Storyboard run not found")
+
+    async def event_stream():
+        last = None
+        while True:
+            db.expire_all()
+            row = get_run_by_public_id(db, project_id=project_id, run_public_id=run_id)
+            if not row:
+                yield _sse_event("error", {"code": "storyboard_run_not_found", "message": "Storyboard run not found"})
+                break
+            lanes = list_run_lanes(db, run_id=row.id)
+            payload = _to_run_response(row, lanes).model_dump(mode="json")
+            encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+            if encoded != last:
+                last = encoded
+                yield _sse_event("run_status", payload)
+            if str(row.run_state or "") in {"completed", "failed", "cancelled"}:
+                break
+            await asyncio.sleep(0.8)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
+    )
+
+
+@router.get("/{project_id}/runs", response_model=list[StoryboardRunResponse])
+def list_storyboard_runs(
+    project_id: int,
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    _: Principal = Depends(require_permission(Permission.STORYBOARD_READ, resource_loader=load_storyboard_resource)),
+):
+    rows = db.execute(
+        select(StoryboardRun)
+        .where(StoryboardRun.storyboard_project_id == project_id)
+        .order_by(StoryboardRun.id.desc())
+        .limit(limit)
+    ).scalars().all()
+    out: list[StoryboardRunResponse] = []
+    for row in rows:
+        lanes = list_run_lanes(db, run_id=row.id)
+        out.append(_to_run_response(row, lanes))
+    return out
+
+
+@router.post("/{project_id}/runs/{run_id}/actions", response_model=StoryboardRunActionResponse)
+def action_storyboard_run(
+    project_id: int,
+    run_id: str,
+    req: StoryboardRunActionRequest,
+    request: Request,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(Permission.STORYBOARD_GENERATE, resource_loader=load_storyboard_resource)),
+):
+    run = get_run_by_public_id(db, project_id=project_id, run_public_id=run_id)
+    if not run:
+        raise http_error(404, "storyboard_run_not_found", "Storyboard run not found")
+    action = str(req.action or "").strip().lower()
+    if action == "retry":
+        project = get_project_or_404_v2(db, project_id)
+        if not project:
+            raise http_error(404, "storyboard_project_not_found", "Storyboard project not found")
+        if run.status not in {"failed", "cancelled", "completed"}:
+            raise http_error(409, "storyboard_run_not_retryable", "仅终态 run 可重试")
+        new_run, _ = create_run_and_dispatch(
+            db,
+            project=project,
+            actor_user_uuid=principal.user_uuid or "",
+            trace_id=getattr(request.state, "trace_id", None),
+            idempotency_key=(idempotency_key or "").strip() or None,
+        )
+        db.commit()
+        return StoryboardRunActionResponse(
+            ok=True,
+            storyboard_project_id=project_id,
+            run_id=new_run.public_id,
+            action=action,
+            run_state=new_run.run_state,
+            status=new_run.status,
+        )
+    try:
+        run = run_action_v2(db, run=run, action=action, actor_user_uuid=principal.user_uuid or "")
+    except ValueError:
+        raise http_error(400, "storyboard_run_action_invalid", "不支持的 run action")
+    db.commit()
+    return StoryboardRunActionResponse(
+        ok=True,
+        storyboard_project_id=project_id,
+        run_id=run.public_id,
+        action=action,
+        run_state=run.run_state,
+        status=run.status,
+    )
+
+
+@router.get("/{project_id}/versions/{version_id}/shots", response_model=list[StoryboardShotResponse])
+def list_storyboard_version_shots(
+    project_id: int,
+    version_id: int,
+    episode_no: int | None = Query(default=None),
+    db: Session = Depends(get_db),
+    _: Principal = Depends(require_permission(Permission.STORYBOARD_READ, resource_loader=load_storyboard_resource)),
+):
+    _resolve_version_or_404(db, project_id=project_id, version_id=version_id)
+    stmt = select(StoryboardShot).where(StoryboardShot.storyboard_version_id == version_id)
+    if episode_no is not None:
+        stmt = stmt.where(StoryboardShot.episode_no == episode_no)
+    rows = db.execute(
+        stmt.order_by(StoryboardShot.episode_no.asc(), StoryboardShot.scene_no.asc(), StoryboardShot.shot_no.asc())
+    ).scalars().all()
+    return [_to_shot_response(row) for row in rows]
 
 
 @router.post("/{project_id}/generate", response_model=StoryboardGenerateResponse)
@@ -382,7 +762,24 @@ def get_storyboard_status(
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.STORYBOARD_READ, resource_loader=load_storyboard_resource)),
 ):
-    row = _active_task_or_404(db, project_id, task_id)
+    row = None
+    try:
+        row = _active_task_or_404(db, project_id, task_id)
+    except HTTPException:
+        row = None
+    if row is None:
+        latest_run = db.execute(
+            select(StoryboardRun)
+            .where(StoryboardRun.storyboard_project_id == project_id)
+            .order_by(StoryboardRun.id.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if not latest_run:
+            raise http_error(404, "storyboard_task_not_found", "Storyboard task not found")
+        refreshed = refresh_run_status(db, run_id=latest_run.id) or latest_run
+        lanes = list_run_lanes(db, run_id=refreshed.id)
+        db.commit()
+        return StoryboardTaskStatusResponse(**_run_to_legacy_task_payload(refreshed, lanes))
     raw = _get_redis().get(_redis_key(row.task_id))
     if raw:
         try:
@@ -625,13 +1022,19 @@ def finalize_storyboard_version(
         raise http_error(404, "storyboard_version_not_found", "Version not found")
     if version.status != "completed":
         raise http_error(409, "storyboard_finalize_requires_completed", "仅 completed 版本可定稿")
-    prompts_count = db.execute(
-        select(StoryboardCharacterPrompt.id)
-        .where(StoryboardCharacterPrompt.storyboard_version_id == version_id)
+    cards_count = db.execute(
+        select(StoryboardCharacterCard.id)
+        .where(StoryboardCharacterCard.storyboard_version_id == version_id)
         .limit(1)
     ).scalar_one_or_none()
-    if prompts_count is None:
-        raise http_error(409, "storyboard_finalize_character_prompt_missing", "角色主形象提示词尚未生成，暂不可定稿")
+    if cards_count is None:
+        prompts_count = db.execute(
+            select(StoryboardCharacterPrompt.id)
+            .where(StoryboardCharacterPrompt.storyboard_version_id == version_id)
+            .limit(1)
+        ).scalar_one_or_none()
+        if prompts_count is None:
+            raise http_error(409, "storyboard_finalize_character_prompt_missing", "角色主形象提示词尚未生成，暂不可定稿")
     report = version.quality_report_json if isinstance(version.quality_report_json, dict) else {}
     missing_identity_fields_count = int(report.get("missing_identity_fields_count") or 0)
     if missing_identity_fields_count > 0:
@@ -728,6 +1131,106 @@ def list_storyboard_character_prompts(
     return [_to_character_prompt_response(r) for r in rows]
 
 
+@router.get("/{project_id}/versions/{version_id}/character-cards", response_model=list[StoryboardCharacterCardResponse])
+def list_storyboard_character_cards(
+    project_id: int,
+    version_id: int,
+    lane: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+    _: Principal = Depends(require_permission(Permission.STORYBOARD_READ, resource_loader=load_storyboard_resource)),
+):
+    version = _resolve_version_or_404(db, project_id=project_id, version_id=version_id)
+    stmt = select(StoryboardCharacterCard).where(
+        StoryboardCharacterCard.storyboard_project_id == project_id,
+        StoryboardCharacterCard.storyboard_version_id == version_id,
+    )
+    if lane:
+        stmt = stmt.where(StoryboardCharacterCard.lane == lane)
+    else:
+        stmt = stmt.where(StoryboardCharacterCard.lane == version.lane)
+    rows = db.execute(
+        stmt.order_by(StoryboardCharacterCard.display_name.asc(), StoryboardCharacterCard.character_key.asc())
+    ).scalars().all()
+    if not rows:
+        # Backfill v2 cards from legacy prompts so old projects can edit within the new UI.
+        prompt_rows = list_character_prompts(
+            db,
+            project_id=project_id,
+            version_id=version_id,
+            lane=(lane or version.lane),
+        )
+        if prompt_rows:
+            persist_character_cards(
+                db,
+                project_id=project_id,
+                version_id=version_id,
+                lane=(lane or version.lane),
+                cards=[
+                    {
+                        "character_key": row.character_key,
+                        "display_name": row.display_name,
+                        "skin_tone": row.skin_tone,
+                        "ethnicity": row.ethnicity,
+                        "master_prompt_text": row.master_prompt_text,
+                        "negative_prompt_text": row.negative_prompt_text,
+                        "style_tags_json": row.style_tags_json or [],
+                        "consistency_anchors_json": row.consistency_anchors_json or [],
+                        "quality_score": float(row.quality_score or 0.0),
+                        "metadata_json": {"source": "legacy_prompt_backfill"},
+                    }
+                    for row in prompt_rows
+                ],
+            )
+            db.commit()
+            rows = db.execute(
+                stmt.order_by(StoryboardCharacterCard.display_name.asc(), StoryboardCharacterCard.character_key.asc())
+            ).scalars().all()
+    return [_to_character_card_response(row) for row in rows]
+
+
+@router.put("/{project_id}/versions/{version_id}/character-cards/{card_id}", response_model=StoryboardCharacterCardResponse)
+def update_storyboard_character_card(
+    project_id: int,
+    version_id: int,
+    card_id: int,
+    req: StoryboardCharacterCardUpdateRequest,
+    db: Session = Depends(get_db),
+    _: Principal = Depends(require_permission(Permission.STORYBOARD_UPDATE, resource_loader=load_storyboard_resource)),
+):
+    version = _resolve_version_or_404(db, project_id=project_id, version_id=version_id)
+    if bool(version.is_final):
+        raise http_error(409, "storyboard_final_version_readonly", "定稿版本不可编辑")
+    row = db.execute(
+        select(StoryboardCharacterCard).where(
+            StoryboardCharacterCard.id == card_id,
+            StoryboardCharacterCard.storyboard_project_id == project_id,
+            StoryboardCharacterCard.storyboard_version_id == version_id,
+        )
+    ).scalar_one_or_none()
+    if not row:
+        raise http_error(404, "storyboard_character_card_not_found", "Character card not found")
+
+    payload = req.model_dump(exclude_unset=True)
+    for key, value in payload.items():
+        setattr(row, key, value)
+
+    # Sync legacy table used by old pages/exports.
+    legacy = db.execute(
+        select(StoryboardCharacterPrompt).where(
+            StoryboardCharacterPrompt.storyboard_project_id == project_id,
+            StoryboardCharacterPrompt.storyboard_version_id == version_id,
+            StoryboardCharacterPrompt.character_key == row.character_key,
+        )
+    ).scalar_one_or_none()
+    if legacy:
+        for key in ("skin_tone", "ethnicity", "master_prompt_text", "negative_prompt_text", "consistency_anchors_json"):
+            if key in payload:
+                setattr(legacy, key, payload[key])
+    db.commit()
+    db.refresh(row)
+    return _to_character_card_response(row)
+
+
 @router.post("/{project_id}/characters/generate", response_model=StoryboardCharacterGenerateResponse)
 def regenerate_storyboard_character_prompts(
     project_id: int,
@@ -768,11 +1271,39 @@ def regenerate_storyboard_character_prompts(
         novel=novel,
         force_regenerate=True,
     )
+    prompt_rows = list_character_prompts(
+        db,
+        project_id=project.id,
+        version_id=version.id,
+        lane=version.lane,
+    )
+    persist_character_cards(
+        db,
+        project_id=project.id,
+        version_id=version.id,
+        lane=version.lane,
+        cards=[
+            {
+                "character_key": row.character_key,
+                "display_name": row.display_name,
+                "skin_tone": row.skin_tone,
+                "ethnicity": row.ethnicity,
+                "master_prompt_text": row.master_prompt_text,
+                "negative_prompt_text": row.negative_prompt_text,
+                "style_tags_json": row.style_tags_json or [],
+                "consistency_anchors_json": row.consistency_anchors_json or [],
+                "quality_score": float(row.quality_score or 0.0),
+                "metadata_json": {"source": "manual_regenerate"},
+            }
+            for row in prompt_rows
+        ],
+    )
     gate = {
         "character_prompt_phase": "character_prompt_compose",
         "character_profiles_count": int(report.get("profiles_count") or 0),
         "missing_identity_fields_count": int(report.get("missing_identity_fields_count") or 0),
         "failed_identity_characters": report.get("failed_identity_characters") or [],
+        "character_cards_count": len(prompt_rows),
     }
     version.quality_report_json = {**(version.quality_report_json or {}), **gate}
     latest = get_latest_task(db, project_id)
@@ -811,6 +1342,34 @@ def update_storyboard_shot(
     if version and bool(version.is_final):
         raise http_error(409, "storyboard_final_version_readonly", "定稿版本不可编辑")
 
+    for key, value in req.model_dump(exclude_unset=True).items():
+        setattr(shot, key, value)
+    db.commit()
+    db.refresh(shot)
+    return _to_shot_response(shot)
+
+
+@router.put("/{project_id}/versions/{version_id}/shots/{shot_id}", response_model=StoryboardShotResponse)
+def update_storyboard_shot_by_version(
+    project_id: int,
+    version_id: int,
+    shot_id: int,
+    req: StoryboardShotUpdateRequest,
+    db: Session = Depends(get_db),
+    _: Principal = Depends(require_permission(Permission.STORYBOARD_UPDATE, resource_loader=load_storyboard_resource)),
+):
+    _resolve_version_or_404(db, project_id=project_id, version_id=version_id)
+    shot = db.execute(
+        select(StoryboardShot).where(
+            StoryboardShot.id == shot_id,
+            StoryboardShot.storyboard_version_id == version_id,
+        )
+    ).scalar_one_or_none()
+    if not shot:
+        raise http_error(404, "storyboard_shot_not_found", "Shot not found")
+    version = db.execute(select(StoryboardVersion).where(StoryboardVersion.id == version_id)).scalar_one_or_none()
+    if version and bool(version.is_final):
+        raise http_error(409, "storyboard_final_version_readonly", "定稿版本不可编辑")
     for key, value in req.model_dump(exclude_unset=True).items():
         setattr(shot, key, value)
     db.commit()
@@ -927,6 +1486,105 @@ def storyboard_diff(
         },
         episodes=episodes,
     )
+
+
+@router.post("/{project_id}/versions/{version_id}/exports", response_model=StoryboardExportCreateResponse)
+def create_storyboard_export(
+    project_id: int,
+    version_id: int,
+    req: StoryboardExportCreateRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(Permission.STORYBOARD_EXPORT, resource_loader=load_storyboard_resource)),
+):
+    version = _resolve_version_or_404(db, project_id=project_id, version_id=version_id)
+    if not bool(version.is_final):
+        raise http_error(409, "storyboard_export_requires_final", "仅定稿版本允许导出")
+    report = version.quality_report_json if isinstance(version.quality_report_json, dict) else {}
+    if int(report.get("missing_identity_fields_count") or 0) > 0:
+        raise http_error(409, "storyboard_export_identity_gate_failed", "角色身份字段门禁未通过，暂不可导出")
+
+    fmt = str(req.format or "").strip().lower()
+    if fmt not in {"csv", "json", "pdf"}:
+        raise http_error(400, "storyboard_export_format_invalid", "format must be csv/json/pdf")
+
+    key = (idempotency_key or "").strip()
+    if key:
+        existing = db.execute(
+            select(StoryboardExport).where(
+                StoryboardExport.storyboard_project_id == project_id,
+                StoryboardExport.storyboard_version_id == version_id,
+                StoryboardExport.idempotency_key == key,
+            )
+            .order_by(StoryboardExport.id.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if existing:
+            return StoryboardExportCreateResponse(
+                ok=True,
+                storyboard_project_id=project_id,
+                version_id=version_id,
+                export_id=str(existing.public_id),
+                status=str(existing.status),
+            )
+
+    row = StoryboardExport(
+        storyboard_project_id=project_id,
+        storyboard_version_id=version_id,
+        requested_by_user_uuid=principal.user_uuid or "",
+        format=fmt,
+        status="queued",
+        idempotency_key=key or None,
+    )
+    db.add(row)
+    db.flush()
+    run_storyboard_export.delay(export_db_id=int(row.id))
+    db.commit()
+    return StoryboardExportCreateResponse(
+        ok=True,
+        storyboard_project_id=project_id,
+        version_id=version_id,
+        export_id=str(row.public_id),
+        status=str(row.status),
+    )
+
+
+@router.get("/{project_id}/exports/{export_id}", response_model=StoryboardExportStatusResponse)
+def get_storyboard_export_status(
+    project_id: int,
+    export_id: str,
+    db: Session = Depends(get_db),
+    _: Principal = Depends(require_permission(Permission.STORYBOARD_EXPORT, resource_loader=load_storyboard_resource)),
+):
+    row = get_export_by_public_id(db, project_id=project_id, export_public_id=export_id)
+    if not row:
+        raise http_error(404, "storyboard_export_not_found", "Export not found")
+    return _to_export_status_response(row)
+
+
+@router.get("/{project_id}/exports/{export_id}/download")
+def download_storyboard_export(
+    project_id: int,
+    export_id: str,
+    expires: int = Query(...),
+    sig: str = Query(...),
+    db: Session = Depends(get_db),
+    _: Principal = Depends(require_permission(Permission.STORYBOARD_EXPORT, resource_loader=load_storyboard_resource)),
+):
+    if not verify_download_signature(export_id, int(expires), sig):
+        raise http_error(403, "storyboard_export_signature_invalid", "导出链接已失效或签名不合法")
+    row = get_export_by_public_id(db, project_id=project_id, export_public_id=export_id)
+    if not row:
+        raise http_error(404, "storyboard_export_not_found", "Export not found")
+    if row.status != "completed" or not row.storage_path:
+        raise http_error(409, "storyboard_export_not_ready", "导出任务尚未完成")
+    try:
+        blob = open_export_blob(str(row.storage_path))
+    except FileNotFoundError:
+        raise http_error(404, "storyboard_export_file_not_found", "导出文件不存在")
+    file_name = row.file_name or f"storyboard-export-{row.public_id}.{row.format}"
+    headers = {"Content-Disposition": f'attachment; filename="{file_name}"'}
+    return StreamingResponse(io.BytesIO(blob), media_type=row.content_type or "application/octet-stream", headers=headers)
 
 
 @router.get("/{project_id}/export/csv")

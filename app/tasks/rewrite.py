@@ -6,13 +6,17 @@ import logging
 from sqlalchemy import select
 
 from app.core.database import SessionLocal
-from app.core.llm import get_llm_with_fallback
+from app.core.llm import get_llm_with_fallback, response_to_text
 from app.core.llm_usage import begin_usage_session, end_usage_session, snapshot_usage
 from app.core.logging_config import bind_log_context, log_event
 from app.core.strategy import get_model_for_stage
 from app.models.novel import ChapterVersion, Novel, NovelVersion, RewriteRequest
 from app.prompts import render_prompt
-from app.services.generation.common import resolve_chapter_title
+from app.services.generation.common import (
+    detect_chapter_content_contamination,
+    extract_chapter_body_from_response,
+    resolve_chapter_title,
+)
 from app.services.rewrite.service import group_annotations_by_chapter
 from app.services.scheduler.scheduler_service import (
     heartbeat_task as heartbeat_creation_task,
@@ -354,7 +358,7 @@ def submit_rewrite_task(
                 target_language=novel.target_language or "zh",
             )
             try:
-                rewritten = str(llm.invoke(prompt).content or "").strip()
+                rewritten = extract_chapter_body_from_response(response_to_text(llm.invoke(prompt)))
             except Exception as e:
                 log_event(
                     logger,
@@ -370,6 +374,31 @@ def submit_rewrite_task(
 
             if not rewritten:
                 rewritten = (base_chapter.content or "").strip()
+            contamination = detect_chapter_content_contamination(rewritten, chapter_num=chapter_num)
+            if contamination.get("contaminated"):
+                logger.warning(
+                    "chapter.content.contaminated source=rewrite chapter=%s reasons=%s evidence=%s",
+                    chapter_num,
+                    contamination.get("reasons"),
+                    contamination.get("evidence"),
+                )
+                retry_prompt = (
+                    f"{prompt}\n\n"
+                    "【系统纠偏】你上次输出包含说明性前言或标题污染。"
+                    "现在必须仅输出章节正文，不要任何解释/总结/标题/Markdown，"
+                    "禁止出现“以下是根据反馈”“重点解决如下问题”等语句。"
+                )
+                try:
+                    rewritten_retry = extract_chapter_body_from_response(response_to_text(llm.invoke(retry_prompt)))
+                except Exception as e:
+                    raise RuntimeError(f"重写第{chapter_num}章纠偏重试失败: {type(e).__name__}: {e}") from e
+                if rewritten_retry:
+                    rewritten = rewritten_retry
+                contamination_retry = detect_chapter_content_contamination(rewritten, chapter_num=chapter_num)
+                if contamination_retry.get("contaminated"):
+                    raise RuntimeError(
+                        f"重写第{chapter_num}章输出污染未消除: reasons={contamination_retry.get('reasons')}"
+                    )
             chapter_title = resolve_chapter_title(
                 chapter_num=chapter_num,
                 title=base_chapter.title,

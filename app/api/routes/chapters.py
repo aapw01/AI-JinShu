@@ -32,6 +32,13 @@ class ChapterProgressItem(BaseModel):
     status: str  # pending | generating | completed
 
 
+def _count_content_words(content: str | None) -> int:
+    text = (content or "").strip()
+    if not text:
+        return 0
+    return len("".join(text.split()))
+
+
 def _resolve_progress_title(chapter_num: int, outline_title: str | None, chapter_title: str | None) -> str:
     if is_effective_title(chapter_title, chapter_num):
         return str(chapter_title).strip()
@@ -81,6 +88,7 @@ def _to_version_response(
         review_score=c.review_score,
         language_quality_score=c.language_quality_score,
         language_quality_report=c.language_quality_report,
+        word_count=_count_content_words(c.content),
         created_at=to_utc_iso_z(c.created_at),
     )
 

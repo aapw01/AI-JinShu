@@ -9,6 +9,7 @@ LANES = ("vertical_feed", "horizontal_cinematic")
 
 class StoryboardCreateRequest(BaseModel):
     novel_id: str
+    source_novel_version_id: int | None = Field(default=None, ge=1)
     target_episodes: int = Field(default=40, ge=1, le=200)
     target_episode_seconds: int = Field(default=90, ge=30, le=600)
     style_profile: str | None = Field(default=None, max_length=100)
@@ -29,6 +30,7 @@ class StoryboardProjectResponse(BaseModel):
     uuid: str
     novel_id: str
     novel_title: str | None = None
+    source_novel_version_id: int | None = None
     status: str
     target_episodes: int
     target_episode_seconds: int
@@ -206,3 +208,123 @@ class StoryboardCharacterGenerateResponse(BaseModel):
     profiles_count: int
     missing_identity_fields_count: int
     failed_identity_characters: list[dict] = Field(default_factory=list)
+
+
+class StoryboardPreflightRequest(BaseModel):
+    force_refresh_snapshot: bool = False
+
+
+class StoryboardPreflightResponse(BaseModel):
+    ok: bool
+    storyboard_project_id: int
+    gate_status: str
+    source_novel_version_id: int
+    profiles_count: int
+    chapters_count: int
+    missing_identity_fields_count: int
+    failed_identity_characters: list[dict] = Field(default_factory=list)
+    snapshot_hash: str
+
+
+class StoryboardRunLaneResponse(BaseModel):
+    id: int
+    lane: str
+    storyboard_version_id: int
+    creation_task_public_id: str | None = None
+    status: str
+    run_state: str
+    current_phase: str | None = None
+    progress: float = 0.0
+    message: str | None = None
+    error: str | None = None
+    error_code: str | None = None
+    error_category: str | None = None
+    gate_report_json: dict = Field(default_factory=dict)
+    updated_at: str | None = None
+
+
+class StoryboardRunResponse(BaseModel):
+    id: int
+    public_id: str
+    storyboard_project_id: int
+    status: str
+    run_state: str
+    current_phase: str | None = None
+    progress: float = 0.0
+    message: str | None = None
+    error: str | None = None
+    error_code: str | None = None
+    error_category: str | None = None
+    lanes: list[StoryboardRunLaneResponse] = Field(default_factory=list)
+    created_at: str
+    updated_at: str | None = None
+    finished_at: str | None = None
+
+
+class StoryboardRunActionRequest(BaseModel):
+    action: str = Field(pattern="^(pause|resume|cancel|retry)$")
+
+
+class StoryboardRunActionResponse(BaseModel):
+    ok: bool
+    storyboard_project_id: int
+    run_id: str
+    action: str
+    run_state: str
+    status: str
+
+
+class StoryboardCharacterCardResponse(BaseModel):
+    id: int
+    storyboard_project_id: int
+    storyboard_version_id: int
+    lane: str
+    character_key: str
+    display_name: str
+    skin_tone: str
+    ethnicity: str
+    master_prompt_text: str
+    negative_prompt_text: str | None = None
+    style_tags_json: list[str] = Field(default_factory=list)
+    consistency_anchors_json: list[str] = Field(default_factory=list)
+    quality_score: float | None = None
+    metadata_json: dict = Field(default_factory=dict)
+    created_at: str
+    updated_at: str | None = None
+
+
+class StoryboardCharacterCardUpdateRequest(BaseModel):
+    skin_tone: str | None = None
+    ethnicity: str | None = None
+    master_prompt_text: str | None = None
+    negative_prompt_text: str | None = None
+    consistency_anchors_json: list[str] | None = None
+    metadata_json: dict | None = None
+
+
+class StoryboardExportCreateRequest(BaseModel):
+    format: str = Field(pattern="^(csv|json|pdf)$")
+
+
+class StoryboardExportCreateResponse(BaseModel):
+    ok: bool
+    storyboard_project_id: int
+    version_id: int
+    export_id: str
+    status: str
+
+
+class StoryboardExportStatusResponse(BaseModel):
+    id: str
+    storyboard_project_id: int
+    storyboard_version_id: int
+    format: str
+    status: str
+    file_name: str | None = None
+    content_type: str | None = None
+    size_bytes: int | None = None
+    error: str | None = None
+    error_code: str | None = None
+    download_url: str | None = None
+    created_at: str
+    updated_at: str | None = None

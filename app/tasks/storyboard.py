@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from datetime import datetime, timezone
 
 import redis
 from sqlalchemy import select
@@ -13,7 +14,17 @@ from app.core.database import SessionLocal
 from app.core.llm_usage import begin_usage_session, end_usage_session, snapshot_usage
 from app.core.logging_config import log_event
 from app.models.novel import Novel
-from app.models.storyboard import StoryboardProject, StoryboardTask, StoryboardVersion
+from app.models.storyboard import (
+    StoryboardExport,
+    StoryboardGateReport,
+    StoryboardProject,
+    StoryboardRun,
+    StoryboardRunLane,
+    StoryboardShot,
+    StoryboardSourceSnapshot,
+    StoryboardTask,
+    StoryboardVersion,
+)
 from app.prompts import render_prompt
 from app.services.scheduler.scheduler_service import (
     finalize_task as finalize_creation_task,
@@ -29,6 +40,12 @@ from app.services.task_runtime.checkpoint_repo import (
 )
 from app.services.task_runtime.lease_service import background_heartbeat
 from app.services.storyboard.character_prompts import compose_character_prompts_for_version
+from app.services.storyboard.export_v2 import render_export_blob, save_export_blob
+from app.services.storyboard.runtime_v2 import (
+    persist_character_cards,
+    refresh_run_status,
+    update_run_lane_state,
+)
 from app.services.storyboard.service import (
     build_quality_report,
     generate_lane_shots,
@@ -38,6 +55,7 @@ from app.services.storyboard.service import (
     set_default_version,
     update_task_state,
 )
+from app.services.storyboard.adapter import AdaptedChapter
 from app.workers.celery_app import app
 
 logger = logging.getLogger(__name__)
@@ -698,3 +716,445 @@ def run_storyboard_pipeline(
         hb_ctx.__exit__(None, None, None)
         db.close()
         end_usage_session()
+
+
+def _ensure_lane_creation_state(creation_task_id: int | None, *, current_celery_id: str | None = None) -> None:
+    if creation_task_id is None:
+        return
+    if current_celery_id:
+        _check_worker_superseded(creation_task_id, current_celery_id)
+    c_state = _get_creation_task_state(creation_task_id)
+    if c_state == "cancelled":
+        raise RuntimeError("storyboard_cancelled")
+    if c_state == "paused":
+        raise RuntimeError("storyboard_paused")
+
+
+def _chapters_from_snapshot(snapshot: StoryboardSourceSnapshot) -> list[AdaptedChapter]:
+    out: list[AdaptedChapter] = []
+    for row in list(snapshot.chapters_json or []):
+        out.append(
+            AdaptedChapter(
+                chapter_num=int(row.get("chapter_num") or 0),
+                title=str(row.get("title") or ""),
+                summary=str(row.get("summary") or ""),
+                content=str(row.get("content") or ""),
+            )
+        )
+    return [row for row in out if row.chapter_num > 0]
+
+
+def _build_character_cards(
+    *,
+    profiles: list[dict],
+    shots,
+    lane: str,
+    style_profile: str | None,
+    genre: str | None,
+) -> tuple[list[dict], list[dict]]:
+    from app.services.generation.character_profiles import normalize_ethnicity, normalize_skin_tone
+
+    cards: list[dict] = []
+    failed: list[dict] = []
+    for row in profiles:
+        skin = normalize_skin_tone(str(row.get("skin_tone") or ""))
+        eth = normalize_ethnicity(str(row.get("ethnicity") or ""))
+        if not skin or not eth:
+            miss: list[str] = []
+            if not skin:
+                miss.append("skin_tone")
+            if not eth:
+                miss.append("ethnicity")
+            failed.append(
+                {
+                    "character_key": row.get("character_key") or "",
+                    "display_name": row.get("display_name") or "",
+                    "missing_fields": miss,
+                }
+            )
+            continue
+        display_name = str(row.get("display_name") or row.get("character_key") or "角色")
+        shot_refs: list[str] = []
+        for shot in shots[:200]:
+            chars = [str(x) for x in (shot.characters_json or [])]
+            if display_name in chars:
+                shot_refs.append(f"E{shot.episode_no}S{shot.scene_no}#{shot.shot_no}:{(shot.action or '')[:26]}")
+                if len(shot_refs) >= 3:
+                    break
+        cards.append(
+            {
+                "character_key": str(row.get("character_key") or display_name),
+                "display_name": display_name,
+                "skin_tone": skin,
+                "ethnicity": eth,
+                "master_prompt_text": (
+                    f"{display_name}，{lane}分镜风格，题材={genre or '通用'}，视觉风格={style_profile or '平台默认'}。"
+                    f"肤色={skin}，族裔={eth}。关键镜头锚点：{'；'.join(shot_refs) if shot_refs else '暂无'}。"
+                ),
+                "negative_prompt_text": "避免脸型漂移、发色漂移、时代错置、服装突变",
+                "style_tags_json": [style_profile or "", lane, genre or ""],
+                "consistency_anchors_json": row.get("visual_do_not_change_json") or [],
+                "quality_score": float(row.get("confidence") or 0.0),
+                "metadata_json": {"source": "storyboard_v2"},
+            }
+        )
+    return cards, failed
+
+
+def _refresh_run_after_lane(db, run_id: int) -> None:
+    refreshed = refresh_run_status(db, run_id=run_id)
+    if refreshed:
+        log_event(
+            logger,
+            "storyboard.run.refresh",
+            storyboard_project_id=refreshed.storyboard_project_id,
+            run_id=refreshed.public_id,
+            run_state=refreshed.run_state,
+            status=refreshed.status,
+            progress=refreshed.progress,
+        )
+
+
+@app.task(bind=True, acks_late=True, reject_on_worker_lost=True)
+def run_storyboard_lane(
+    self,
+    *,
+    project_id: int,
+    run_id: int,
+    run_lane_id: int,
+    version_id: int,
+    lane: str,
+    novel_version_id: int,
+    creation_task_id: int | None = None,
+):
+    begin_usage_session(f"storyboard-lane:{self.request.id}")
+    hb_ctx = background_heartbeat(
+        creation_task_id,
+        heartbeat_fn=_heartbeat_creation,
+        interval_seconds=max(5, int(get_settings().creation_worker_heartbeat_seconds or 30)),
+    )
+    hb_ctx.__enter__()
+    db = SessionLocal()
+    try:
+        if creation_task_id is not None:
+            _mark_creation_running(creation_task_id)
+        project = db.execute(select(StoryboardProject).where(StoryboardProject.id == project_id)).scalar_one_or_none()
+        run = db.execute(select(StoryboardRun).where(StoryboardRun.id == run_id)).scalar_one_or_none()
+        run_lane = db.execute(select(StoryboardRunLane).where(StoryboardRunLane.id == run_lane_id)).scalar_one_or_none()
+        version = db.execute(select(StoryboardVersion).where(StoryboardVersion.id == version_id)).scalar_one_or_none()
+        if not project or not run or not run_lane or not version:
+            raise RuntimeError("storyboard_lane_context_not_found")
+        novel = db.execute(select(Novel).where(Novel.id == int(project.novel_id))).scalar_one_or_none()
+        if not novel:
+            raise RuntimeError("storyboard_lane_novel_not_found")
+
+        update_run_lane_state(
+            db,
+            run_lane_id=run_lane.id,
+            status="running",
+            run_state="running",
+            current_phase="shot_expand",
+            progress=3.0,
+            message=f"{lane} 正在生成分镜",
+        )
+        db.commit()
+
+        _ensure_lane_creation_state(creation_task_id, current_celery_id=self.request.id)
+        snapshot = db.execute(
+            select(StoryboardSourceSnapshot)
+            .where(
+                StoryboardSourceSnapshot.storyboard_project_id == project.id,
+                StoryboardSourceSnapshot.novel_version_id == novel_version_id,
+            )
+            .order_by(StoryboardSourceSnapshot.id.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if not snapshot:
+            raise RuntimeError("storyboard_source_snapshot_not_found")
+        chapters = _chapters_from_snapshot(snapshot)
+        if not chapters:
+            raise RuntimeError("storyboard_source_snapshot_chapters_empty")
+
+        lane_shots, contract, quality = generate_lane_shots(
+            lane=lane,
+            novel=novel,
+            chapters=chapters,
+            target_episodes=int(project.target_episodes or 40),
+            target_episode_seconds=int(project.target_episode_seconds or 90),
+            style_profile=project.style_profile,
+            mode=(project.config_json or {}).get("mode") or "quick",
+            genre_style_key=(project.config_json or {}).get("genre_style_key"),
+            director_style_key=(project.config_json or {}).get("director_style_key"),
+        )
+        # Deterministic per-version shot persistence for reproducibility.
+        from app.services.storyboard.service import persist_shots
+
+        shot_count = persist_shots(db, version.id, lane_shots)
+        quality_report = build_quality_report(lane=lane, quality=quality, prompt_contract_json=contract)
+        update_run_lane_state(
+            db,
+            run_lane_id=run_lane.id,
+            status="running",
+            run_state="running",
+            current_phase="quality_gate",
+            progress=65.0,
+            message=f"{lane} 质量门禁校验中",
+            gate_report_json=quality_report,
+        )
+        if quality.style_consistency_score < 0.75:
+            db.add(
+                StoryboardGateReport(
+                    storyboard_project_id=project.id,
+                    storyboard_run_id=run.id,
+                    storyboard_version_id=version.id,
+                    gate_type="quality",
+                    gate_status="failed",
+                    missing_count=0,
+                    report_json=quality_report,
+                    created_by_user_uuid=run.requested_by_user_uuid,
+                )
+            )
+            version.status = "failed"
+            update_run_lane_state(
+                db,
+                run_lane_id=run_lane.id,
+                status="failed",
+                run_state="failed",
+                current_phase="quality_gate",
+                progress=100.0,
+                message=f"{lane} 风格门禁失败",
+                error="style consistency gate failed",
+                error_code="GATE_STYLE_FAILED",
+                error_category="policy",
+            )
+            db.commit()
+            _refresh_run_after_lane(db, run.id)
+            if creation_task_id is not None:
+                _finalize_creation(
+                    creation_task_id,
+                    final_status="failed",
+                    progress=100.0,
+                    phase="quality_gate",
+                    message=f"{lane} 风格门禁失败",
+                    error_code="GATE_STYLE_FAILED",
+                    error_category="policy",
+                )
+            return
+
+        _ensure_lane_creation_state(creation_task_id, current_celery_id=self.request.id)
+        shot_rows = db.execute(
+            select(StoryboardShot)
+            .where(StoryboardShot.storyboard_version_id == version.id)
+            .order_by(StoryboardShot.episode_no.asc(), StoryboardShot.scene_no.asc(), StoryboardShot.shot_no.asc())
+        ).scalars().all()
+
+        cards, failed_rows = _build_character_cards(
+            profiles=list(snapshot.character_profiles_json or []),
+            shots=shot_rows,
+            lane=lane,
+            style_profile=project.style_profile,
+            genre=novel.genre,
+        )
+        quality_report["missing_identity_fields_count"] = len(failed_rows)
+        quality_report["failed_identity_characters"] = failed_rows[:20]
+        if failed_rows:
+            db.add(
+                StoryboardGateReport(
+                    storyboard_project_id=project.id,
+                    storyboard_run_id=run.id,
+                    storyboard_version_id=version.id,
+                    gate_type="identity",
+                    gate_status="blocked",
+                    missing_count=len(failed_rows),
+                    report_json=quality_report,
+                    created_by_user_uuid=run.requested_by_user_uuid,
+                )
+            )
+            version.status = "failed"
+            version.quality_report_json = quality_report
+            update_run_lane_state(
+                db,
+                run_lane_id=run_lane.id,
+                status="failed",
+                run_state="failed",
+                current_phase="character_identity_gate",
+                progress=100.0,
+                message="角色身份字段门禁未通过",
+                error="identity fields missing",
+                error_code="GATE_IDENTITY_REQUIRED",
+                error_category="policy",
+                gate_report_json=quality_report,
+            )
+            db.commit()
+            _refresh_run_after_lane(db, run.id)
+            if creation_task_id is not None:
+                _finalize_creation(
+                    creation_task_id,
+                    final_status="failed",
+                    progress=100.0,
+                    phase="character_identity_gate",
+                    message="角色身份字段门禁未通过",
+                    error_code="GATE_IDENTITY_REQUIRED",
+                    error_category="policy",
+                )
+            return
+
+        persist_character_cards(
+            db,
+            project_id=project.id,
+            version_id=version.id,
+            lane=lane,
+            cards=cards,
+        )
+        version.status = "completed"
+        version.quality_report_json = {
+            **quality_report,
+            "character_cards_count": len(cards),
+            "shot_count": int(shot_count),
+        }
+        update_run_lane_state(
+            db,
+            run_lane_id=run_lane.id,
+            status="completed",
+            run_state="completed",
+            current_phase="completed",
+            progress=100.0,
+            message=f"{lane} 完成",
+            gate_report_json=version.quality_report_json,
+        )
+        db.add(
+            StoryboardGateReport(
+                storyboard_project_id=project.id,
+                storyboard_run_id=run.id,
+                storyboard_version_id=version.id,
+                gate_type="quality",
+                gate_status="passed",
+                missing_count=0,
+                report_json=version.quality_report_json,
+                created_by_user_uuid=run.requested_by_user_uuid,
+            )
+        )
+        db.commit()
+        _refresh_run_after_lane(db, run.id)
+        if creation_task_id is not None:
+            usage = snapshot_usage()
+            _finalize_creation(
+                creation_task_id,
+                final_status="completed",
+                progress=100.0,
+                phase="completed",
+                message=f"{lane} 已完成",
+                result_json={
+                    "shot_count": int(shot_count),
+                    "character_cards_count": len(cards),
+                    "token_usage_input": int(usage.get("input_tokens") or 0),
+                    "token_usage_output": int(usage.get("output_tokens") or 0),
+                    "estimated_cost": float(usage.get("estimated_cost") or 0.0),
+                },
+            )
+    except Exception as exc:
+        err = str(exc)
+        run_lane = db.execute(select(StoryboardRunLane).where(StoryboardRunLane.id == run_lane_id)).scalar_one_or_none()
+        if run_lane:
+            if err == "storyboard_paused":
+                update_run_lane_state(
+                    db,
+                    run_lane_id=run_lane.id,
+                    status="paused",
+                    run_state="paused",
+                    current_phase="paused",
+                    message="Lane 已暂停",
+                )
+            elif err == "storyboard_cancelled":
+                update_run_lane_state(
+                    db,
+                    run_lane_id=run_lane.id,
+                    status="cancelled",
+                    run_state="cancelled",
+                    current_phase="cancelled",
+                    message="Lane 已取消",
+                )
+            else:
+                update_run_lane_state(
+                    db,
+                    run_lane_id=run_lane.id,
+                    status="failed",
+                    run_state="failed",
+                    current_phase="failed",
+                    progress=100.0,
+                    message="Lane 执行失败",
+                    error=err,
+                    error_code="GEN_LANE_FAILED",
+                    error_category="transient",
+                )
+        db.commit()
+        _refresh_run_after_lane(db, run_id)
+        if creation_task_id is not None:
+            _finalize_creation(
+                creation_task_id,
+                final_status="paused" if err == "storyboard_paused" else ("cancelled" if err == "storyboard_cancelled" else "failed"),
+                progress=100.0 if err not in {"storyboard_paused", "storyboard_cancelled"} else 0.0,
+                phase="paused" if err == "storyboard_paused" else ("cancelled" if err == "storyboard_cancelled" else "failed"),
+                message="Lane 已暂停" if err == "storyboard_paused" else ("Lane 已取消" if err == "storyboard_cancelled" else "Lane 执行失败"),
+                error_code=None if err in {"storyboard_paused", "storyboard_cancelled"} else "GEN_LANE_FAILED",
+                error_category=None if err in {"storyboard_paused", "storyboard_cancelled"} else "transient",
+                error_detail=None if err in {"storyboard_paused", "storyboard_cancelled"} else err,
+            )
+        if err not in {"storyboard_paused", "storyboard_cancelled"}:
+            raise
+    finally:
+        hb_ctx.__exit__(None, None, None)
+        db.close()
+        end_usage_session()
+
+
+@app.task(bind=True, acks_late=True, reject_on_worker_lost=True)
+def run_storyboard_export(self, *, export_db_id: int):
+    db = SessionLocal()
+    try:
+        row = db.execute(select(StoryboardExport).where(StoryboardExport.id == export_db_id)).scalar_one_or_none()
+        if not row:
+            return
+        if row.status in {"completed", "running"}:
+            return
+        row.status = "running"
+        row.updated_at = datetime.now(timezone.utc)
+        db.flush()
+        version = db.execute(select(StoryboardVersion).where(StoryboardVersion.id == row.storyboard_version_id)).scalar_one_or_none()
+        if not version:
+            row.status = "failed"
+            row.error_code = "EXPORT_VERSION_NOT_FOUND"
+            row.error = "version not found"
+            row.finished_at = datetime.now(timezone.utc)
+            db.commit()
+            return
+        if int(version.is_final or 0) != 1:
+            row.status = "failed"
+            row.error_code = "EXPORT_REQUIRES_FINAL"
+            row.error = "only finalized version can be exported"
+            row.finished_at = datetime.now(timezone.utc)
+            db.commit()
+            return
+        payload, content_type, ext = render_export_blob(db, version_id=version.id, export_format=row.format)
+        storage_path, size = save_export_blob(export_public_id=row.public_id, extension=ext, content=payload)
+        row.status = "completed"
+        row.content_type = content_type
+        row.file_name = f"storyboard-p{row.storyboard_project_id}-v{version.version_no}-{version.lane}.{ext}"
+        row.storage_path = storage_path
+        row.size_bytes = size
+        row.finished_at = datetime.now(timezone.utc)
+        row.updated_at = datetime.now(timezone.utc)
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        row = db.execute(select(StoryboardExport).where(StoryboardExport.id == export_db_id)).scalar_one_or_none()
+        if row:
+            row.status = "failed"
+            row.error_code = "EXPORT_TASK_FAILED"
+            row.error = str(exc)
+            row.finished_at = datetime.now(timezone.utc)
+            row.updated_at = datetime.now(timezone.utc)
+            db.commit()
+        raise
+    finally:
+        db.close()

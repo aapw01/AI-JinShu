@@ -1,9 +1,11 @@
 """Basic backend tests for health, presets, novels CRUD, export."""
+import io
+import zipfile
 import pytest
 from unittest.mock import patch
 
 from app.core.database import SessionLocal, resolve_novel
-from app.models.novel import GenerationCheckpoint, QualityReport
+from app.models.novel import ChapterVersion, GenerationCheckpoint, NovelVersion, QualityReport
 
 
 @pytest.fixture
@@ -54,13 +56,70 @@ def test_novels_crud(client):
     assert r.status_code == 200
 
 
-def test_export_empty(client):
+def test_export_empty_returns_409(client):
     r = client.post("/api/novels", json={"title": "Export Test", "target_language": "zh"})
     novel_id = r.json()["id"]
     r = client.get(f"/api/novels/{novel_id}/export?format=txt")
-    assert r.status_code == 200
-    assert "Export Test" in r.text
+    assert r.status_code == 409
+    assert "No chapters" in r.text
     client.delete(f"/api/novels/{novel_id}")
+
+
+def test_export_uses_selected_version_content(client):
+    r = client.post("/api/novels", json={"title": "Export Version Test", "target_language": "zh"})
+    assert r.status_code == 200
+    novel_id = r.json()["id"]
+
+    db = SessionLocal()
+    try:
+        novel = resolve_novel(db, novel_id)
+        assert novel is not None
+        v1 = NovelVersion(novel_id=novel.id, version_no=1, status="completed", is_default=1)
+        v2 = NovelVersion(novel_id=novel.id, version_no=2, status="completed", is_default=0)
+        db.add(v1)
+        db.add(v2)
+        db.flush()
+        db.add(
+            ChapterVersion(
+                novel_version_id=v1.id,
+                chapter_num=1,
+                title="旧版标题",
+                content="这是默认版本正文。",
+                status="completed",
+            )
+        )
+        db.add(
+            ChapterVersion(
+                novel_version_id=v2.id,
+                chapter_num=1,
+                title="新版标题",
+                content="这是第二版本正文。",
+                status="completed",
+            )
+        )
+        db.commit()
+        v2_id = int(v2.id)
+    finally:
+        db.close()
+
+    txt = client.get(f"/api/novels/{novel_id}/export?format=txt&version_id={v2_id}")
+    assert txt.status_code == 200
+    assert "这是第二版本正文。" in txt.text
+    assert "这是默认版本正文。" not in txt.text
+
+    md = client.get(f"/api/novels/{novel_id}/export?format=md&version_id={v2_id}")
+    assert md.status_code == 200
+    assert "这是第二版本正文。" in md.text
+
+    zipped = client.get(f"/api/novels/{novel_id}/export?format=zip&version_id={v2_id}")
+    assert zipped.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(zipped.content), "r") as zf:
+        names = zf.namelist()
+        assert "00_版本信息.json" in names
+        chapter_files = [name for name in names if name.endswith(".txt") and name.startswith("001_")]
+        assert chapter_files
+        chapter_text = zf.read(chapter_files[0]).decode("utf-8")
+        assert "这是第二版本正文。" in chapter_text
 
 
 def test_generation_submit_conflict(client):
@@ -85,6 +144,44 @@ def test_generation_status_extended_fields(client):
     assert "current_phase" in body
     assert "current_subtask" in body
     assert "decision_state" in body
+    assert body.get("task_id") == task_id
+
+
+def test_chapter_response_contains_word_count(client):
+    r = client.post("/api/novels", json={"title": "Word Count Test", "target_language": "zh"})
+    assert r.status_code == 200
+    novel_id = r.json()["id"]
+
+    db = SessionLocal()
+    try:
+        novel = resolve_novel(db, novel_id)
+        assert novel is not None
+        version = NovelVersion(
+            novel_id=novel.id,
+            version_no=1,
+            status="completed",
+            is_default=1,
+        )
+        db.add(version)
+        db.flush()
+        db.add(
+            ChapterVersion(
+                novel_version_id=version.id,
+                chapter_num=1,
+                title="第1章 测试",
+                content="测试 文本 123",
+                status="completed",
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    res = client.get(f"/api/novels/{novel_id}/chapters")
+    assert res.status_code == 200
+    payload = res.json()
+    assert payload
+    assert payload[0]["word_count"] == 7
 
 
 def test_longform_quality_and_checkpoints_endpoints(client):

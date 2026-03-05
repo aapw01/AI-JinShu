@@ -79,6 +79,7 @@ class ChapterResponse(BaseModel):
     review_score: float | None
     language_quality_score: float | None
     language_quality_report: str | None = None
+    word_count: int = 0
     created_at: str
 
 
@@ -100,6 +101,7 @@ class RetryGenerationRequest(BaseModel):
 
 
 class GenerationStatusResponse(BaseModel):
+    task_id: str | None = None
     status: str
     trace_id: str | None = None
     run_state: str | None = None

@@ -80,26 +80,30 @@ Client -> FastAPI Route -> Celery delay() -> Redis Broker -> Celery Worker
 
 ## 4.2 导演分镜（Storyboard）
 
-入口 API：
-- `POST /api/storyboards/{project_id}/generate`
-- `POST /api/storyboards/{project_id}/retry`
+入口 API（V2）：
+- `POST /api/storyboards/{project_id}/preflight`
+- `POST /api/storyboards/{project_id}/runs`
+- `POST /api/storyboards/{project_id}/runs/{run_id}/actions`
 
 任务函数：
-- `run_storyboard_pipeline`
+- `run_storyboard_lane`（按 lane 分拆子任务）
+- `run_storyboard_export`（异步导出）
 
 核心机制：
-- 业务状态写入 `storyboard_tasks`，统一调度状态写入 `creation_tasks`
-- Redis 缓存键：`storyboard:task:{task_id}`
-- 按 lane 循环生成（如 `vertical_feed` / `horizontal_cinematic`）
-- 每个 lane 有质量门禁，失败时标记 `failed` 并附带 `error_code/error_category/retryable`
-- 支持 pause/resume/cancel（通过 DB `run_state` 控制）
+- 预检查（preflight）先落 `storyboard_source_snapshots` 和 `storyboard_gate_reports`
+- `storyboard_runs` 代表一次运行，`storyboard_run_lanes` 代表 lane 子状态
+- 每个 lane 子任务同时写统一调度表 `creation_tasks`（`task_type=storyboard_lane`）
+- 运行事件写入 `storyboard_events_outbox`，并发布 Redis 频道 `storyboard:events`
+- 导出走 `storyboard_exports` 异步任务，产物落盘到 `tmp/storyboard_exports/`
+
+状态查询：
+- `GET /api/storyboards/{project_id}/runs`
+- `GET /api/storyboards/{project_id}/runs/{run_id}`
+- 兼容保留：`GET /api/storyboards/{project_id}/status`
 
 控制接口：
-- `GET /api/storyboards/{project_id}/status`
-- `POST /api/storyboards/{project_id}/pause`
-- `POST /api/storyboards/{project_id}/resume`
-- `POST /api/storyboards/{project_id}/cancel`
-- `POST /api/storyboards/{project_id}/retry`
+- `POST /api/storyboards/{project_id}/runs/{run_id}/actions`（`pause|resume|cancel|retry`）
+- 兼容保留：`POST /api/storyboards/{project_id}/pause|resume|cancel|retry`
 
 ## 4.3 章节重写（Rewrite）
 
