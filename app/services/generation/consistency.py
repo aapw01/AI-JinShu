@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import select
 
 from app.core.database import SessionLocal
-from app.models.novel import Chapter
+from app.models.novel import ChapterVersion
 
 logger = logging.getLogger(__name__)
 
@@ -294,16 +294,16 @@ def _check_outline_dependency(
 
 def _check_duplicate_content(
     report: ConsistencyReport,
-    novel_id: int,
+    novel_version_id: int,
     chapter_num: int,
 ) -> None:
     """Duplicate: chapter already exists with completed status."""
     db = SessionLocal()
     try:
-        stmt = select(Chapter).where(
-            Chapter.novel_id == novel_id,
-            Chapter.chapter_num == chapter_num,
-            Chapter.status == "completed",
+        stmt = select(ChapterVersion).where(
+            ChapterVersion.novel_version_id == novel_version_id,
+            ChapterVersion.chapter_num == chapter_num,
+            ChapterVersion.status == "completed",
         )
         existing = db.execute(stmt).scalar_one_or_none()
         if existing:
@@ -311,7 +311,7 @@ def _check_duplicate_content(
                 ConsistencyIssue(
                     "warning",
                     "plot",
-                    f"第{chapter_num}章已存在且状态为completed，将被覆盖",
+                    f"当前版本第{chapter_num}章已存在且状态为completed，将被覆盖",
                     chapter_num,
                 )
             )
@@ -372,6 +372,7 @@ def _check_thread_overload(
 
 def check_consistency(
     novel_id: int,
+    novel_version_id: int,
     chapter_num: int,
     outline: dict,
     context: dict,
@@ -381,6 +382,7 @@ def check_consistency(
 
     Args:
         novel_id: Novel ID
+        novel_version_id: Active novel version ID
         chapter_num: Chapter being written
         outline: Current chapter outline dict
         context: The layered context package
@@ -396,7 +398,7 @@ def check_consistency(
     _check_entity_hard_constraints(report, outline, context, chapter_num)
     _check_foreshadowing_continuity(report, outline, context, prewrite, novel_id, chapter_num)
     _check_outline_dependency(report, context, chapter_num)
-    _check_duplicate_content(report, novel_id, chapter_num)
+    _check_duplicate_content(report, novel_version_id, chapter_num)
     _check_timeline_conflicts(report, outline, context, chapter_num)
     _check_thread_overload(report, outline, prewrite, novel_id, chapter_num)
 

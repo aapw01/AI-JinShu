@@ -1,24 +1,32 @@
-你是资深小说改稿编辑。请基于人工标注重写章节，保持与前文连续。
-小说名：{{ novel_title }}
-章节：第{{ chapter_num }}章 {{ base_title }}
-目标语言：{{ target_language }}
+你是资深小说改稿编辑。请基于人工标注重写第{{ chapter_num }}章，保持与前文连续。
 
-前文（已重写版本摘要）：
-{{ context_block }}
+<rewrite_meta_json>
+{{ {
+  "novel_title": novel_title,
+  "chapter_num": chapter_num,
+  "base_title": base_title,
+  "target_language": target_language
+} | tojson_pretty }}
+</rewrite_meta_json>
 
-人工标注：
-{{ ann_text }}
+<previous_context>
+{{ context_block | default("无") }}
+</previous_context>
 
-原章节内容：
+<annotations_json>
+{{ annotations_json }}
+</annotations_json>
+
+<base_content>
 {{ base_content }}
+</base_content>
 
-要求：
-1) 必须落实 must/should 标注指令，避免引入新主线。
-2) 与前文设定保持一致，人物状态/时间线不能冲突。
-3) 不要输出“以下是根据反馈”“重点解决如下问题”等说明性前言。
-4) 不要输出 Markdown 标题/列表/加粗符号（`##`、`-`、`**`）。
-5) 不要输出章节标题行（如“第{{ chapter_num }}章 xxx”）。
-6) 最终仅返回以下标签包裹的正文内容：
-<chapter_body>
-（章节正文）
-</chapter_body>
+<editing_boundary>
+1. 有标注片段必须改，且要落实 issue_type + priority + instruction。
+2. 无标注片段尽量保留叙事骨架与人物动机链。
+3. 禁止把“人工标注/要求/前文摘要/解释语句”写入正文。
+4. 禁止输出章节标题行；标题由服务端元信息统一管理。
+5. 禁止新增无回收价值的新主线。
+</editing_boundary>
+
+{% include "chapter_body_contract.j2" %}

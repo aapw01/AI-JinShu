@@ -92,7 +92,7 @@ def test_admin_novel_filters(anon_client):
     assert "owner-a-1" not in only_mine_titles
     assert "owner-b-1" not in only_mine_titles
 
-    admin_target = anon_client.get(f"/api/novels?user_uuid=owner-a", headers=admin_headers)
+    admin_target = anon_client.get("/api/novels?user_uuid=owner-a", headers=admin_headers)
     assert admin_target.status_code == 200
     target_titles = {x["title"] for x in admin_target.json()}
     assert "owner-a-1" in target_titles

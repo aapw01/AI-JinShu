@@ -45,7 +45,6 @@ HORIZONTAL_SHOT_PATTERN = [
     ("特写", "仰", "静", "反转强调"),
 ]
 
-
 def expand_shots(
     *,
     episode: EpisodePlan,
@@ -57,11 +56,18 @@ def expand_shots(
     pattern = VERTICAL_SHOT_PATTERN if lane == "vertical_feed" else HORIZONTAL_SHOT_PATTERN
     drafts: list[ShotDraft] = []
     for idx, (shot_size, angle, move, motivation) in enumerate(pattern, start=1):
+        shot_goal = "情绪冲突引爆" if idx == 1 else ("信息揭示推进" if idx == 2 else "结果确认与钩子延续")
         action = render_prompt(
             "storyboard_shot_action",
             scene_purpose=scene.purpose,
             location=scene.location,
             episode_pivot=episode.pivot[:20],
+            shot_goal=shot_goal,
+            spatial_relation="主角居中前压、对手侧向切入" if lane == "vertical_feed" else "主角前景、对手中景、环境压迫后景",
+            opening_action="快速抢位",
+            conflict_action="贴身对峙",
+            release_action="失衡后短暂停顿",
+            transition_reason="情绪峰值延续",
         ).strip()
         dialogue = _dialogue_line(scene, lane, idx)
         continuity_anchor = render_prompt(
@@ -93,11 +99,20 @@ def expand_shots(
                 blocking=render_prompt(
                     "storyboard_shot_blocking",
                     emotion_beat=scene.emotion_beat,
+                    protagonist_blocking="先右后左切线逼近",
+                    opponent_blocking="反向压迫并封堵退路",
+                    foreground_anchor="手部动作",
+                    midground_anchor="对峙主体",
+                    background_anchor="关键环境线索",
                 ).strip(),
                 motivation=motivation,
                 performance_note=render_prompt(
                     "storyboard_shot_performance_note",
                     emotion_beat=scene.emotion_beat,
+                    restraint_mode="克制压抑",
+                    release_trigger="对手关键台词落点",
+                    release_mode="短促爆发",
+                    tail_emotion="未解的紧张余波",
                 ).strip(),
                 continuity_anchor=continuity_anchor,
             )

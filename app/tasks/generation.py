@@ -34,8 +34,21 @@ from app.services.task_runtime.checkpoint_repo import (
 from app.services.task_runtime.cursor_service import resume_from_last_completed
 
 from app.services.task_runtime.lease_service import background_heartbeat
+from app.services.generation.contracts import OutputContractError
+from app.services.system_settings.runtime import get_effective_runtime_setting
+from app.core.llm_contract import get_last_prompt_meta
 
 logger = logging.getLogger(__name__)
+
+
+def _error_meta_from_exc(exc: Exception) -> tuple[str, str, bool]:
+    if isinstance(exc, OutputContractError):
+        if exc.code == "MODEL_OUTPUT_POLICY_VIOLATION":
+            return exc.code, "policy", bool(exc.retryable)
+        if exc.code in {"MODEL_OUTPUT_PARSE_FAILED", "MODEL_OUTPUT_SCHEMA_INVALID", "MODEL_OUTPUT_CONTRACT_EXHAUSTED"}:
+            return exc.code, "transient", bool(exc.retryable)
+        return exc.code, "transient", bool(exc.retryable)
+    return "GENERATION_FAILED", "transient", True
 
 
 SUBTASK_LABELS: dict[str, str] = {
@@ -730,6 +743,7 @@ def submit_book_generation_task(
             is_paused = err == "generation_paused"
             is_cancelled = err == "generation_cancelled"
             status = "paused" if is_paused else ("cancelled" if is_cancelled else "failed")
+            error_code, error_category, retryable = _error_meta_from_exc(e)
             data = {
                 "status": status,
                 "run_state": status,
@@ -744,9 +758,9 @@ def submit_book_generation_task(
                 "total_chapters": num_chapters,
                 "novel_version_id": int(novel_version_id),
                 "error": None if (is_paused or is_cancelled) else str(e),
-                "error_code": None if (is_paused or is_cancelled) else "GENERATION_FAILED",
-                "error_category": None if (is_paused or is_cancelled) else "transient",
-                "retryable": False if (is_paused or is_cancelled) else True,
+                "error_code": None if (is_paused or is_cancelled) else error_code,
+                "error_category": None if (is_paused or is_cancelled) else error_category,
+                "retryable": False if (is_paused or is_cancelled) else retryable,
                 "message": "任务暂停并等待恢复" if is_paused else ("任务已取消" if is_cancelled else "总控任务失败"),
                 "trace_id": trace_id,
             }
@@ -812,12 +826,16 @@ def submit_book_generation_task(
         if creation_task_id is not None:
             try:
                 status = str(data.get("status") or "")
+                prompt_meta = get_last_prompt_meta() or {}
                 usage_summary = {
                     "token_usage_input": int(data.get("token_usage_input") or 0),
                     "token_usage_output": int(data.get("token_usage_output") or 0),
                     "estimated_cost": float(data.get("estimated_cost") or 0.0),
                     "usage_calls": int((usage or {}).get("calls") or 0),
                     "usage_stages": (usage or {}).get("stages") or {},
+                    "prompt_version": str(prompt_meta.get("prompt_version") or "v2"),
+                    "prompt_hash": prompt_meta.get("prompt_hash"),
+                    "prompt_template": prompt_meta.get("prompt_template"),
                 }
                 if status == "completed":
                     _finalize_creation(

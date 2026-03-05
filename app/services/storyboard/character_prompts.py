@@ -8,6 +8,7 @@ import logging
 import re
 from typing import Any
 
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
@@ -30,6 +31,13 @@ def _key_from_name(name: str) -> str:
     raw = (name or "").strip().lower()
     return re.sub(r"[^a-z0-9\u4e00-\u9fa5]+", "-", raw).strip("-")[:120]
 
+
+class CharacterPromptSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    master_prompt_text: str = Field(min_length=1)
+    identity_lock: list[str] = Field(default_factory=list)
+    negative_prompt_text: str = Field(min_length=1)
+    camera_safe_notes: list[str] = Field(default_factory=list)
 
 def _compact_shot_context(shots: list[StoryboardShot], character_name: str) -> str:
     rows: list[str] = []
@@ -93,11 +101,12 @@ def _compose_master_prompt(
     genre: str,
     shot_context: str,
     strategy: str | None,
-) -> str:
+) -> dict[str, Any]:
     provider, model = get_model_for_stage(strategy or "web-novel", "architect")
     llm = get_llm_with_fallback(provider, model)
+    template = "storyboard_character_master_prompt"
     prompt = render_prompt(
-        "storyboard_character_master_prompt",
+        template,
         character_json=json.dumps(
             {
                 "display_name": profile.display_name,
@@ -121,13 +130,82 @@ def _compose_master_prompt(
         genre=genre,
         shot_context=shot_context,
     )
+    default_negative = render_prompt(
+        "storyboard_character_negative_prompt",
+        lane=lane,
+        style_profile=style_profile,
+    ).strip()
+
+    def _fallback_payload(reason: str) -> dict[str, Any]:
+        fallback_master = (
+            f"{profile.display_name}，{lane}镜头语言，{genre}题材，{style_profile}风格；"
+            f"肤色={profile.skin_tone}，族裔={profile.ethnicity}，"
+            f"发型={profile.hair_style or '自然'}，发色={profile.hair_color or '自然黑'}，"
+            f"服装基调={profile.wardrobe_base_style or '贴合职业身份'}。"
+        )
+        return {
+            "master_prompt_text": fallback_master[:1400],
+            "identity_lock": [
+                f"肤色固定：{profile.skin_tone}",
+                f"族裔固定：{profile.ethnicity}",
+                f"发型固定：{profile.hair_style or '自然短发'}",
+            ],
+            "negative_prompt_text": default_negative or "避免脸型漂移、发色漂移、时代错置、服装突变",
+            "camera_safe_notes": ["保持脸部轮廓一致", "镜头切换不得改变发色与服装主廓形"],
+            "metadata": {
+                "prompt_template": template,
+                "prompt_version": "v2",
+                "fallback_reason": reason,
+            },
+        }
     try:
-        resp = llm.invoke(prompt)
-        text = str(getattr(resp, "content", "") or "").strip()
-        return text[:1400] if text else prompt[:1200]
+        last_exc: Exception | None = None
+        for method in ("json_schema", "function_calling", "json_mode"):
+            try:
+                kwargs: dict[str, Any] = {"method": method, "include_raw": True}
+                structured = llm.with_structured_output(CharacterPromptSchema, **kwargs)
+                payload = structured.invoke(prompt)
+                if isinstance(payload, dict) and any(k in payload for k in ("parsed", "raw", "parsing_error")):
+                    if payload.get("parsing_error") is not None:
+                        raise RuntimeError(str(payload.get("parsing_error")))
+                    parsed = payload.get("parsed")
+                else:
+                    parsed = payload
+                if isinstance(parsed, BaseModel):
+                    parsed_data = parsed.model_dump()
+                elif isinstance(parsed, dict):
+                    parsed_data = parsed
+                else:
+                    raise RuntimeError("invalid structured payload")
+                validated = CharacterPromptSchema.model_validate(parsed_data)
+                return {
+                    "master_prompt_text": validated.master_prompt_text[:1400],
+                    "identity_lock": [str(x)[:120] for x in (validated.identity_lock or []) if str(x).strip()][:8],
+                    "negative_prompt_text": validated.negative_prompt_text[:800],
+                    "camera_safe_notes": [str(x)[:120] for x in (validated.camera_safe_notes or []) if str(x).strip()][:8],
+                    "metadata": {
+                        "prompt_template": template,
+                        "prompt_version": "v2",
+                        "method": method,
+                        "source": "llm_structured",
+                    },
+                }
+            except Exception as exc:  # pragma: no cover - multi-provider/model behavior
+                last_exc = exc
+                continue
+        if last_exc:
+            logger.warning(
+                "character master prompt structured fallback name=%s err=%s",
+                profile.display_name,
+                last_exc,
+            )
+        return _fallback_payload("structured_contract_failed")
+    except ValidationError as exc:
+        logger.warning("character master prompt validation fallback name=%s err=%s", profile.display_name, exc)
+        return _fallback_payload("validation_failed")
     except Exception as exc:
         logger.warning("character master prompt compose fallback name=%s err=%s", profile.display_name, exc)
-        return prompt[:1200]
+        return _fallback_payload(type(exc).__name__)
 
 
 def compose_character_prompts_for_version(
@@ -196,7 +274,7 @@ def compose_character_prompts_for_version(
             )
             continue
         shot_context = _compact_shot_context(shots, profile.display_name)
-        master = _compose_master_prompt(
+        prompt_payload = _compose_master_prompt(
             profile=profile,
             lane=version.lane,
             style_profile=project.style_profile or "通用影视",
@@ -204,11 +282,16 @@ def compose_character_prompts_for_version(
             shot_context=shot_context,
             strategy=novel.strategy,
         )
-        negative = render_prompt(
-            "storyboard_character_negative_prompt",
-            lane=version.lane,
-            style_profile=project.style_profile or "通用影视",
-        ).strip()
+        master = str(prompt_payload.get("master_prompt_text") or "").strip()
+        identity_lock = [str(x) for x in (prompt_payload.get("identity_lock") or []) if str(x).strip()]
+        negative = str(prompt_payload.get("negative_prompt_text") or "").strip()
+        camera_safe_notes = [str(x) for x in (prompt_payload.get("camera_safe_notes") or []) if str(x).strip()]
+        if not negative:
+            negative = render_prompt(
+                "storyboard_character_negative_prompt",
+                lane=version.lane,
+                style_profile=project.style_profile or "通用影视",
+            ).strip()
         db.add(
             StoryboardCharacterPrompt(
                 storyboard_project_id=project.id,
@@ -220,8 +303,8 @@ def compose_character_prompts_for_version(
                 ethnicity=profile.ethnicity or "",
                 master_prompt_text=master,
                 negative_prompt_text=negative,
-                style_tags_json=[project.style_profile or "", version.lane, novel.genre or ""],
-                consistency_anchors_json=(profile.visual_do_not_change_json or [])[:10],
+                style_tags_json=[project.style_profile or "", version.lane, novel.genre or ""] + camera_safe_notes[:2],
+                consistency_anchors_json=((profile.visual_do_not_change_json or []) + identity_lock)[:10],
                 quality_score=profile.confidence or 0.0,
             )
         )

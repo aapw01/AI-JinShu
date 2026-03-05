@@ -85,6 +85,13 @@ const CLOSURE_ACTION_LABELS: Record<string, string> = {
 const ACTIVE_GENERATION_STATUSES = new Set(["queued", "dispatching", "running"]);
 const TERMINAL_GENERATION_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
+const ERROR_CODE_HINTS: Record<string, string> = {
+  MODEL_OUTPUT_PARSE_FAILED: "模型输出无法解析为结构化正文，请重试或切换模型。",
+  MODEL_OUTPUT_SCHEMA_INVALID: "模型输出未满足正文结构协议，请重试或切换模型。",
+  MODEL_OUTPUT_POLICY_VIOLATION: "模型输出触发内容门禁（前言/标题污染或正文长度不足）。",
+  MODEL_OUTPUT_CONTRACT_EXHAUSTED: "结构化输出重试与回退均失败，建议切换 Provider/模型后重试。",
+};
+
 export default function ProgressPage() {
   const params = useParams();
   const router = useRouter();
@@ -92,8 +99,12 @@ export default function ProgressPage() {
   const id = String(params.id);
   const taskId = searchParams.get("task_id");
   const rewriteRequestId = searchParams.get("rewrite_request_id");
+  const versionIdFromQuery = searchParams.get("version_id");
 
   const [novel, setNovel] = useState<Novel | null>(null);
+  const [activeVersionId, setActiveVersionId] = useState<number | null>(
+    versionIdFromQuery ? Number(versionIdFromQuery) || null : null
+  );
   const [status, setStatus] = useState<GenerationStatus | null>(null);
   const [rewriteStatus, setRewriteStatus] = useState<RewriteRequest | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
@@ -109,6 +120,28 @@ export default function ProgressPage() {
   useEffect(() => {
     api.getNovel(id).then(setNovel).catch(() => router.push("/novels"));
   }, [id, router]);
+
+  useEffect(() => {
+    const parsed = versionIdFromQuery ? Number(versionIdFromQuery) : NaN;
+    if (Number.isFinite(parsed) && parsed > 0) {
+      setActiveVersionId(parsed);
+      return;
+    }
+    let disposed = false;
+    (async () => {
+      try {
+        const versions = await api.getVersions(id);
+        if (disposed) return;
+        const selected = versions.find((item) => item.is_default) || versions[0] || null;
+        setActiveVersionId(selected?.id ?? null);
+      } catch {
+        if (!disposed) setActiveVersionId(null);
+      }
+    })();
+    return () => {
+      disposed = true;
+    };
+  }, [id, versionIdFromQuery]);
 
   // Polling fallback for status — merge with existing state to avoid overwriting SSE data
   useEffect(() => {
@@ -196,13 +229,13 @@ export default function ProgressPage() {
   }, [id, rewriteRequestId, status?.task_id, taskId]);
 
   useEffect(() => {
-    if (rewriteRequestId) return;
+    if (rewriteRequestId || !activeVersionId) return;
     const timer = setInterval(() => {
-      api.getObservability(id).then(setObservability).catch(() => undefined);
+      api.getObservability(id, activeVersionId).then(setObservability).catch(() => undefined);
     }, 5000);
-    api.getObservability(id).then(setObservability).catch(() => undefined);
+    api.getObservability(id, activeVersionId).then(setObservability).catch(() => undefined);
     return () => clearInterval(timer);
-  }, [id, rewriteRequestId]);
+  }, [activeVersionId, id, rewriteRequestId]);
 
   // SSE connection for real-time updates
   useEffect(() => {
@@ -286,6 +319,11 @@ export default function ProgressPage() {
     ? rewriteStatus?.status === "running" || rewriteStatus?.status === "queued"
     : status?.status === "queued" || status?.status === "dispatching" || status?.status === "running" || runState === "running";
   const isPaused = !isRewriteMode && runState === "paused";
+  const failureCode = isRewriteMode ? rewriteStatus?.error_code : status?.error_code;
+  const failureMessage = isRewriteMode
+    ? (rewriteStatus?.error || rewriteStatus?.message || "发生未知错误")
+    : (status?.error || status?.message || "发生未知错误");
+  const failureHint = failureCode ? ERROR_CODE_HINTS[failureCode] : "";
   const activeSubtaskLabel = isRewriteMode
     ? (rewriteStatus?.message || "章节重写中")
     : status?.current_subtask?.label ||
@@ -334,7 +372,13 @@ export default function ProgressPage() {
             </div>
             <div className="flex-1">
               <p className="font-medium text-[#C4372D]">{isRewriteMode ? "重写失败" : "生成失败"}</p>
-              <p className="text-sm text-[#C4372D]">{isRewriteMode ? (rewriteStatus?.error || "发生未知错误") : (status?.error || status?.message || "发生未知错误")}</p>
+              <p className="text-sm text-[#C4372D]">{failureMessage}</p>
+              {failureCode ? (
+                <p className="text-xs text-[#A52A25] mt-1">
+                  错误码：{failureCode}
+                  {failureHint ? ` · ${failureHint}` : ""}
+                </p>
+              ) : null}
             </div>
             {isRewriteMode ? (
               <Button

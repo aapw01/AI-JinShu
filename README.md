@@ -50,16 +50,25 @@ AI-JinShu/
 - `QUOTA_ADMIN_MONTHLY_TOKEN_LIMIT`：管理员月度 token 限额（默认 `100000000000`）。
 - `SYSTEM_SETTINGS_MASTER_KEY`：可选；配置后管理员在系统设置页保存的 API Key 将加密存储（未配置则明文存储并有风险提示）。
 
+## LLM Output Contract Notes
+
+- 章节生成/重写正文链路固定为严格结构化协议（JSON `chapter_body`），不再支持 legacy/hybrid 兼容分支。
+- 可配置项（系统设置优先于环境变量）：
+  - `LLM_OUTPUT_MAX_SCHEMA_RETRIES`
+  - `LLM_OUTPUT_MAX_PROVIDER_FALLBACKS`
+  - `LLM_OUTPUT_MIN_CHARS`
+- LLM 调用日志会记录 `stage/prompt_template/prompt_version/prompt_hash` 便于聚合诊断。
+
 ## API
 
 - Health: `GET /health`
 - Novels CRUD: `GET/POST /api/novels`, `GET/PUT/DELETE /api/novels/{id}`
 - Generation: `POST /api/novels/{id}/generate`, `GET /api/novels/{id}/generation/status`
-- Longform reports: `GET /api/novels/{id}/quality-reports`, `GET /api/novels/{id}/checkpoints`, `GET /api/novels/{id}/volumes/summary`, `GET /api/novels/{id}/volumes/{volume_no}/gate-report`
+- Longform reports: `GET /api/novels/{id}/quality-reports`, `GET /api/novels/{id}/checkpoints`, `GET /api/novels/{id}/volumes/summary?version_id=...`, `GET /api/novels/{id}/volumes/{volume_no}/gate-report`
 - Feedback loop: `GET/POST /api/novels/{id}/feedback`
-- Observability: `GET /api/novels/{id}/observability`
-- Chapters: `GET /api/novels/{id}/chapters`, `GET /api/novels/{id}/chapters/{num}`
-- Export: `GET /api/novels/{id}/export?format=txt|md|zip`
+- Observability: `GET /api/novels/{id}/observability?version_id=...`
+- Chapters: `GET /api/novels/{id}/chapters?version_id=...`, `GET /api/novels/{id}/chapters/{num}?version_id=...`
+- Export: `GET /api/novels/{id}/export?format=txt|md|zip&version_id=...`
 - Presets: `GET /api/presets`
 - Auth: `POST /api/auth/register|login|logout`, `GET /api/auth/me`, `POST /api/auth/verify-email/*`, `POST /api/auth/password/*`
 - Generation control: `POST /api/novels/{id}/generation/pause|resume|cancel`, `GET /api/novels/{id}/generation/tasks`

@@ -212,9 +212,17 @@ export default function Home() {
       const entries = await Promise.all(
         targets.map(async (novel) => {
           try {
+            const versions = await api.getVersions(novel.id);
+            const defaultVersion = versions.find((v) => v.is_default) || versions[0];
+            if (!defaultVersion) {
+              return [
+                novel.id,
+                { completed: 0, total: 1, percent: 0, words: 0, quality: fallbackQuality(novel.id, novel.status) },
+              ] as const;
+            }
             const [progressRes, chaptersRes] = await Promise.allSettled([
-              api.getChapterProgress(novel.id),
-              api.getChapters(novel.id),
+              api.getChapterProgress(novel.id, defaultVersion.id),
+              api.getChapters(novel.id, defaultVersion.id),
             ]);
 
             const progress = progressRes.status === "fulfilled" ? progressRes.value : [];

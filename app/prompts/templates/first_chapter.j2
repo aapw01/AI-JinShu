@@ -1,50 +1,48 @@
-{# First chapter writing prompt - uses layered context #}
-Write the first chapter of the novel.
+{# v2 first chapter prompt: task semantics + shared contract include #}
+你是长篇网文作者，请创作第1章正文。
 
----
+<global_bible>
+{{ context.global_bible | default("无") }}
+</global_bible>
 
-## 全局设定（Global Bible）
-{{ context.global_bible | default('无') }}
+<outline_json>
+{
+  "chapter_num": 1,
+  "title": {{ (outline.title | default("")) | tojson_pretty }},
+  "outline": {{ (outline.outline | default("")) | tojson_pretty }},
+  "role": {{ (outline.role | default("")) | tojson_pretty }},
+  "purpose": {{ (outline.purpose | default("")) | tojson_pretty }},
+  "foreshadowing": {{ (outline.foreshadowing | default("无")) | tojson_pretty }},
+  "hook": {{ (outline.hook | default("")) | tojson_pretty }}
+}
+</outline_json>
 
-## 本章大纲
-- 标题: {{ outline.title | default('') }}
-- 大纲: {{ outline.outline | default('') }}
-- 角色: {{ outline.role | default('') }}
-- 目的: {{ outline.purpose | default('') }}
-- 埋设伏笔: {{ outline.foreshadowing | default('无') }}
-- 钩子: {{ outline.hook | default('') }}
+<writing_goals>
+- 语言：{{ language or "zh" }}
+- 风格标签：{{ native_style_profile or "默认" }}
+- 开篇必须在动作/冲突中入场，禁止静态背景说明开篇。
+- 在本章明确核心矛盾，并埋下至少 1 个可兑现钩子。
+- 人物行为必须可追溯到动机，不允许“为推动剧情而行动”。
+- 在保持信息密度的同时确保可读性：短句推进 + 关键处句长变化。
+</writing_goals>
 
----
+<continuity_priority>
+1. 角色状态一致（身份、能力、关系、当前目标）
+2. 事件因果闭环（行动 -> 反应 -> 后果）
+3. 文风稳定（语气、节奏、叙事视角）
+</continuity_priority>
 
-**语言**: {{ language or 'zh' }}
-**母语风格**: {{ native_style_profile or '' }}
+<style_metrics>
+- 节奏：每 3~5 段出现一次显著推进（冲突升级/信息揭示/决策转折）。
+- 句式：以短句推进，关键情绪段落允许长句拉伸，但避免整章句长单一。
+- 冲突：本章至少有 1 处显性阻力，不得“平铺直叙到结尾”。
+- 钩子：章末必须留下可在后续章节兑现的行动性问题。
+</style_metrics>
 
-**Anti-AI 写作规则**（严格执行）:
-- 30-50% 单句段落，50-100字/段
-- 禁用: 弥漫着、唯一的、不禁、宛如、仿佛、渐渐地、缓缓地
-- 短句为主（15-25字），长短交替
-- 对话呈现情感，而非叙述情感
+<forbidden_behavior>
+- 参考材料仅用于理解，不得复述标签块原文。
+- 禁止把“设定说明/创作计划/人工指令”写入正文。
+- 禁止输出章节标题行与解释性前言。
+</forbidden_behavior>
 
-**黄金开篇**（必须遵守）:
-- 从动态场景切入（动作/冲突/对话），禁止静态描写开篇
-- 第1章内暴露核心矛盾
-- 禁止信息倾倒：世界观通过角色行动/对话自然展开
-- 开篇最多3个有名字的关键角色
-- 1-3章内展示"核心金手指/信息差"
-
-**网文连载节奏**:
-- 至少一个清晰的章末悬念/钩子
-- 推拉节奏: 压力 → 反应 → 升级 → 钩子
-- 保持场景连贯性和因果链
-
-**输出协议（必须严格遵守）**:
-1) 仅输出章节正文，不要任何前言/后记/解释/总结。
-2) 不要输出“以下是根据反馈”“重点解决如下问题”等说明性句子。
-3) 不要输出 Markdown 标题、列表、加粗符号（如 `##`、`-`、`**`）。
-4) 不要输出章节标题行（如“第1章 xxx”），正文第一行直接进入剧情。
-5) 最终仅返回以下标签包裹的正文内容：
-<chapter_body>
-（章节正文）
-</chapter_body>
-
-用 {{ language or 'zh' }} 写作并返回上述格式。
+{% include "chapter_body_contract.j2" %}

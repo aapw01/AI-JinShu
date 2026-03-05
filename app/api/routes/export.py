@@ -8,6 +8,7 @@ from fastapi.responses import StreamingResponse, PlainTextResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.api_errors import http_error
 from app.core.authz.deps import require_permission
 from app.core.authz.resources import load_novel_resource
 from app.core.authz.types import Permission, Principal
@@ -40,18 +41,7 @@ def _list_outlines_for_version(db: Session, novel_id: int, version_id: int) -> l
         )
         .order_by(ChapterOutline.chapter_num)
     )
-    rows = db.execute(stmt).scalars().all()
-    if rows:
-        return rows
-    fallback = (
-        select(ChapterOutline)
-        .where(
-            ChapterOutline.novel_id == novel_id,
-            ChapterOutline.novel_version_id.is_(None),
-        )
-        .order_by(ChapterOutline.chapter_num)
-    )
-    return db.execute(fallback).scalars().all()
+    return db.execute(stmt).scalars().all()
 
 
 @router.get("/{novel_id}/export")
@@ -63,13 +53,15 @@ def export_novel(
     _: Principal = Depends(require_permission(Permission.NOVEL_READ, resource_loader=load_novel_resource)),
 ):
     """Export novel as txt, md, or zip."""
+    if version_id is None:
+        raise http_error(400, "missing_version_id", "version_id is required")
     novel = resolve_novel(db, novel_id)
     if not novel:
-        raise HTTPException(404, "Novel not found")
+        raise http_error(404, "novel_not_found", "Novel not found")
     try:
-        version = get_version_or_default(db, novel.id, version_id)
+        version = get_version_or_default(db, novel.id, int(version_id))
     except ValueError:
-        raise HTTPException(404, "Version not found")
+        raise http_error(404, "version_not_found", "Version not found")
     chapter_stmt = (
         select(ChapterVersion)
         .where(ChapterVersion.novel_version_id == version.id)
@@ -77,7 +69,7 @@ def export_novel(
     )
     chapters = db.execute(chapter_stmt).scalars().all()
     if not chapters:
-        raise HTTPException(409, "No chapters in target version")
+        raise http_error(409, "no_chapters_in_version", "No chapters in target version")
 
     if format == "txt":
         content = _build_txt(novel, chapters)

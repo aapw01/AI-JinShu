@@ -16,14 +16,12 @@ from app.core.authz.types import Permission, Principal
 from app.core.database import get_db
 from app.core.config import get_settings
 from app.core.logging_config import log_event
-from app.core.time_utils import to_utc_iso_z
 from app.models.creation_task import CreationTask
 from app.models.novel import GenerationTask, GenerationCheckpoint, User
 from app.schemas.novel import GenerateRequest, GenerateResponse, GenerationStatusResponse, RetryGenerationRequest
 from app.services.quota import check_generation_quota
 from app.services.scheduler.scheduler_service import cancel_task, get_task_by_public_id, pause_task, resume_task, submit_task
 from app.services.rewrite.service import get_default_version_id
-from app.tasks.generation import submit_generation_task  # legacy patch target for tests
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -154,6 +152,9 @@ def _to_status_response(payload: dict) -> GenerationStatusResponse:
         eta_label=payload.get("eta_label"),
         message=payload.get("message"),
         error=payload.get("error"),
+        error_code=payload.get("error_code"),
+        error_category=payload.get("error_category"),
+        retryable=payload.get("retryable"),
         last_error=payload.get("last_error"),
     )
 
@@ -961,6 +962,9 @@ def get_generation_status(
             "decision_state": None,
             "message": row.message,
             "error": row.error_detail,
+            "error_code": row.error_code,
+            "error_category": row.error_category,
+            "retryable": bool((row.retry_count or 0) < (row.max_retries or 0)),
             "task_id": row.public_id,
             "trace_id": None,
         }

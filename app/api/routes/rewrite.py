@@ -35,7 +35,6 @@ from app.services.rewrite.service import (
 )
 from app.models.creation_task import CreationTask
 from app.services.scheduler.scheduler_service import get_task_by_public_id, submit_task, resume_task
-from app.tasks.rewrite import submit_rewrite_task  # legacy patch target for tests
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -59,7 +58,14 @@ def _to_version_response(v: NovelVersion, novel_public_id: str) -> NovelVersionR
     )
 
 
-def _to_rewrite_response(r: RewriteRequest, novel_public_id: str) -> RewriteRequestResponse:
+def _to_rewrite_response(
+    r: RewriteRequest,
+    novel_public_id: str,
+    *,
+    error_code: str | None = None,
+    error_category: str | None = None,
+    retryable: bool | None = None,
+) -> RewriteRequestResponse:
     eta_seconds: int | None = None
     eta_label: str | None = None
     if r.status in {"running", "submitted"}:
@@ -91,6 +97,9 @@ def _to_rewrite_response(r: RewriteRequest, novel_public_id: str) -> RewriteRequ
         eta_label=eta_label,
         message=r.message,
         error=r.error,
+        error_code=error_code,
+        error_category=error_category,
+        retryable=retryable,
         created_at=to_utc_iso_z(r.created_at),
         updated_at=to_utc_iso_z(r.updated_at),
     )
@@ -324,6 +333,9 @@ def get_rewrite_status(
     ).scalar_one_or_none()
     if not row:
         raise http_error(404, "rewrite_request_not_found", "Rewrite request not found")
+    error_code: str | None = None
+    error_category: str | None = None
+    retryable: bool | None = None
     if row.task_id:
         task = get_task_by_public_id(db, public_id=row.task_id, user_uuid=principal.user_uuid)
         if task:
@@ -331,7 +343,16 @@ def get_rewrite_status(
             row.progress = float(task.progress or row.progress or 0.0)
             row.message = task.message or row.message
             row.error = task.error_detail or row.error
-    return _to_rewrite_response(row, novel.uuid or str(novel.id))
+            error_code = task.error_code
+            error_category = task.error_category
+            retryable = bool((task.retry_count or 0) < (task.max_retries or 0))
+    return _to_rewrite_response(
+        row,
+        novel.uuid or str(novel.id),
+        error_code=error_code,
+        error_category=error_category,
+        retryable=retryable,
+    )
 
 
 @router.post("/{novel_id}/rewrite-requests/{request_id}/retry", response_model=RewriteRequestResponse)

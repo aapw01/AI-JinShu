@@ -5,18 +5,33 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
+from app.core.api_errors import http_error
 from app.core.authz.deps import require_permission
 from app.core.authz.resources import load_novel_resource
 from app.core.authz.types import Permission, Principal
 from app.core.database import get_db, resolve_novel
 from app.core.time_utils import to_utc_iso_z
-from app.models.novel import QualityReport, GenerationCheckpoint, Chapter, StorySnapshot, NovelFeedback
+from app.models.novel import ChapterVersion, GenerationCheckpoint, NovelFeedback, NovelVersion, QualityReport, StorySnapshot
 from app.services.generation.evaluation_metrics import (
     compute_abrupt_ending_risk,
     compute_closure_action_metrics,
 )
 
 router = APIRouter()
+
+
+def _resolve_version_or_400(db: Session, *, novel_id: int, version_id: int | None) -> NovelVersion:
+    if version_id is None:
+        raise http_error(400, "missing_version_id", "version_id is required")
+    version = db.execute(
+        select(NovelVersion).where(
+            NovelVersion.id == int(version_id),
+            NovelVersion.novel_id == int(novel_id),
+        )
+    ).scalar_one_or_none()
+    if not version:
+        raise http_error(404, "version_not_found", "Version not found")
+    return version
 
 
 @router.get("/{novel_id}/quality-reports")
@@ -89,6 +104,7 @@ def list_generation_checkpoints(
 def get_volume_summary(
     novel_id: str,
     volume_size: int = 30,
+    version_id: int | None = None,
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.NOVEL_READ, resource_loader=load_novel_resource)),
 ):
@@ -96,9 +112,14 @@ def get_volume_summary(
     novel = resolve_novel(db, novel_id)
     if not novel:
         raise HTTPException(404, "Novel not found")
+    version = _resolve_version_or_400(db, novel_id=novel.id, version_id=version_id)
     volume_size = max(1, min(volume_size, 200))
 
-    ch_stmt = select(Chapter.chapter_num).where(Chapter.novel_id == novel.id).order_by(Chapter.chapter_num)
+    ch_stmt = (
+        select(ChapterVersion.chapter_num)
+        .where(ChapterVersion.novel_version_id == version.id)
+        .order_by(ChapterVersion.chapter_num)
+    )
     chapter_nums = [r[0] for r in db.execute(ch_stmt).all()]
     if not chapter_nums:
         return []
@@ -114,7 +135,11 @@ def get_volume_summary(
 
         snap_stmt = (
             select(StorySnapshot)
-            .where(StorySnapshot.novel_id == novel.id, StorySnapshot.volume_no == volume_no)
+            .where(
+                StorySnapshot.novel_id == novel.id,
+                StorySnapshot.novel_version_id == version.id,
+                StorySnapshot.volume_no == volume_no,
+            )
             .order_by(StorySnapshot.id.desc())
         )
         snapshot = db.execute(snap_stmt).scalars().first()
@@ -123,6 +148,7 @@ def get_volume_summary(
             select(QualityReport)
             .where(
                 QualityReport.novel_id == novel.id,
+                QualityReport.novel_version_id == version.id,
                 QualityReport.scope == "volume",
                 QualityReport.scope_id == str(volume_no),
             )
@@ -306,6 +332,7 @@ def create_feedback(
 def get_observability(
     novel_id: str,
     limit: int = 50,
+    version_id: int | None = None,
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.NOVEL_READ, resource_loader=load_novel_resource)),
 ):
@@ -313,11 +340,15 @@ def get_observability(
     novel = resolve_novel(db, novel_id)
     if not novel:
         raise HTTPException(404, "Novel not found")
+    version = _resolve_version_or_400(db, novel_id=novel.id, version_id=version_id)
     max_limit = max(1, min(limit, 500))
 
     q_stmt = (
         select(QualityReport)
-        .where(QualityReport.novel_id == novel.id)
+        .where(
+            QualityReport.novel_id == novel.id,
+            QualityReport.novel_version_id == version.id,
+        )
         .order_by(QualityReport.id.desc())
         .limit(max_limit)
     )
@@ -338,7 +369,10 @@ def get_observability(
     feedback_rows = db.execute(f_stmt).scalars().all()
 
     total_quality_reports = db.execute(
-        select(func.count()).select_from(QualityReport).where(QualityReport.novel_id == novel.id)
+        select(func.count()).select_from(QualityReport).where(
+            QualityReport.novel_id == novel.id,
+            QualityReport.novel_version_id == version.id,
+        )
     ).scalar_one()
     total_checkpoints = db.execute(
         select(func.count()).select_from(GenerationCheckpoint).where(GenerationCheckpoint.novel_id == novel.id)
@@ -351,6 +385,7 @@ def get_observability(
         .select_from(QualityReport)
         .where(
             QualityReport.novel_id == novel.id,
+            QualityReport.novel_version_id == version.id,
             QualityReport.scope == "volume",
             QualityReport.verdict.in_(("warning", "fail")),
         )
@@ -372,9 +407,9 @@ def get_observability(
     latest_closure_state = (closure_rows_asc[-1].state_json or {}) if closure_rows_asc else {}
     tail_chapters = (
         db.execute(
-            select(Chapter.content)
-            .where(Chapter.novel_id == novel.id)
-            .order_by(Chapter.chapter_num.desc())
+            select(ChapterVersion.content)
+            .where(ChapterVersion.novel_version_id == version.id)
+            .order_by(ChapterVersion.chapter_num.desc())
             .limit(3)
         )
         .scalars()

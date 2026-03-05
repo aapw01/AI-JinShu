@@ -1,104 +1,83 @@
-{# Next chapter writing prompt - uses layered context #}
-Write chapter {{ chapter_num }} of the novel.
+{# v2 next chapter prompt: JSON-tagged context + continuity rules #}
+你是长篇网文作者，请创作第{{ chapter_num }}章正文。
 
----
+<global_bible>
+{{ context.global_bible | default("无") }}
+</global_bible>
 
-## 全局设定（Global Bible）
-{{ context.global_bible | default('无') }}
+<outline_json>
+{{ {
+  "chapter_num": chapter_num,
+  "title": outline.title | default(""),
+  "outline": outline.outline | default(""),
+  "role": outline.role | default(""),
+  "purpose": outline.purpose | default(""),
+  "suspense_level": outline.suspense_level | default("中"),
+  "foreshadowing": outline.foreshadowing | default("无"),
+  "payoff": outline.payoff | default("无"),
+  "hook": outline.hook | default(""),
+  "mini_climax": outline.mini_climax | default("none")
+} | tojson_pretty }}
+</outline_json>
 
-## 伏笔与线索追踪（Thread Ledger）
-{{ context.thread_ledger_text | default('无活跃伏笔') }}
+<recent_window>
+{{ context.recent_window | default("无前文摘要") }}
+</recent_window>
 
-## 近期章节摘要（Recent Window）
-{{ context.recent_window | default('无前文摘要') }}
+<thread_ledger>
+{{ context.thread_ledger_text | default("无活跃伏笔") }}
+</thread_ledger>
 
-{% if context.volume_brief | default('') %}
-## 前卷概述（Volume Brief）
+{% if context.volume_brief | default("") %}
+<volume_brief>
 {{ context.volume_brief }}
+</volume_brief>
 {% endif %}
 
-{% if context.consistency_warnings | default('') %}
-## ⚠️ 一致性警告（必须遵守）
+{% if context.consistency_warnings | default("") %}
+<consistency_warnings>
 {{ context.consistency_warnings }}
+</consistency_warnings>
 {% endif %}
 
 {% if context.prompt_contract %}
-## Prompt Contract（结构化写作契约）
-### NarrativeIntent
-{{ context.prompt_contract.NarrativeIntent | default({}) }}
-
-### ClosureIntent
-{{ context.prompt_contract.ClosureIntent | default({}) }}
-
-### PacingIntent
-{{ context.prompt_contract.PacingIntent | default({}) }}
-
-### HardConstraints
-{{ context.prompt_contract.HardConstraints | default({}) }}
+<prompt_contract_json>
+{{ context.prompt_contract | tojson_pretty }}
+</prompt_contract_json>
 {% endif %}
 
-{% if context.closure_state and context.closure_state.phase_mode %}
-## 收官约束（Closure Guardrails）
-- 当前阶段: {{ context.closure_state.phase_mode }}
-- 门禁动作: {{ context.closure_state.action | default('continue') }}
-- 闭环覆盖率: {{ context.closure_state.must_close_coverage | default(0) }}
-- 未闭环数量: {{ context.closure_state.unresolved_count | default(0) }}
-{% if context.closure_state.bridge_budget_left is defined %}
-- 桥接章剩余额度: {{ context.closure_state.bridge_budget_left }}
-{% endif %}
-{% if context.closure_state.must_close_items and context.closure_state.must_close_items|length > 0 %}
-- 本章优先处理（最多3项）:
-{% for item in context.closure_state.must_close_items[:3] %}
-  - {{ item.type | default('item') }}: {{ item.title | default(item.id | default('unknown')) }}
-{% endfor %}
-{% endif %}
+{% if context.closure_state %}
+<closure_state_json>
+{{ context.closure_state | tojson_pretty }}
+</closure_state_json>
 {% endif %}
 
----
+<writing_goals>
+- 目标字数：{{ word_count or 3000 }}
+- 语言：{{ language or "zh" }}
+- 风格标签：{{ native_style_profile or "默认" }}
+- 保持强连续性：上一章结尾的行动后果必须在本章前段得到承接。
+- 本章至少包含：1 个冲突推进点 + 1 个可兑现钩子。
+- 若处于收官阶段，优先回收主线伏笔，禁止发散新主线。
+</writing_goals>
 
-## 本章大纲
-- 章节号: {{ chapter_num }}
-- 标题: {{ outline.title | default('') }}
-- 大纲: {{ outline.outline | default('') }}
-- 角色: {{ outline.role | default('') }}
-- 目的: {{ outline.purpose | default('') }}
-- 悬念等级: {{ outline.suspense_level | default('中') }}
-- 埋设伏笔: {{ outline.foreshadowing | default('无') }}
-- 回收伏笔: {{ outline.payoff | default('无') }}
-- 钩子: {{ outline.hook | default('') }}
-- 小高潮: {{ outline.mini_climax | default('none') }}
+<continuity_priority>
+1. 角色状态一致（身份/关系/目标/能力）
+2. 事件因果一致（时间线、道具线索、行为后果）
+3. 文风一致（叙事人称、语气、节奏）
+</continuity_priority>
 
----
+<style_metrics>
+- 节奏：每 2~4 段必须有推进动作或信息增量。
+- 句式：短句推进为主，关键段允许句长拉伸制造张力。
+- 冲突：对抗必须可感知（外部阻力或内部抉择至少其一）。
+- 角色：关键角色需要行动与反应闭环，避免“只说不做”。
+</style_metrics>
 
-**字数目标**: {{ word_count or 3000 }}
-**语言**: {{ language or 'zh' }}
-**母语风格**: {{ native_style_profile or '' }}
+<forbidden_behavior>
+- 标签块仅作参考，不得复制到正文。
+- 禁止出现“以下是根据反馈/重点解决如下问题”等解释性句子。
+- 禁止输出章节标题行、Markdown 结构、说明性注释。
+</forbidden_behavior>
 
-**Anti-AI 写作规则**（严格执行）:
-- 30-50% 单句段落，50-100字/段
-- 禁用: 弥漫着、唯一的、不禁、宛如、仿佛、渐渐地、缓缓地
-- 短句为主（15-25字），长短交替
-- 对话呈现情感，而非叙述情感
-
-**连载约束**:
-- 严格承接上一章结尾（参见 Recent Window），不能出现断裂
-- 每章结构: 目标 → 障碍 → 升级 → 收获/钩子
-- 非结尾章必须有章末悬念/钩子
-- 遵循长篇节奏: 每3-5章小高潮，每10-15章中高潮
-- 所有角色行为必须与 Global Bible 和 Thread Ledger 一致
-{% if context.closure_state and context.closure_state.phase_mode in ['closing', 'finale'] %}
-- 收官阶段禁止新增无回收价值的新主线；优先回收高优先级伏笔与主线冲突
-- 若本章仍非终章，必须制造可在1-2章内兑现的收束钩子，不可发散
-{% endif %}
-
-**输出协议（必须严格遵守）**:
-1) 仅输出章节正文，不要任何前言/后记/解释/总结。
-2) 不要输出“以下是根据反馈”“重点解决如下问题”等说明性句子。
-3) 不要输出 Markdown 标题、列表、加粗符号（如 `##`、`-`、`**`）。
-4) 不要输出章节标题行（如“第{{ chapter_num }}章 xxx”），正文第一行直接进入剧情。
-5) 最终仅返回以下标签包裹的正文内容：
-<chapter_body>
-（章节正文）
-</chapter_body>
-
-用 {{ language or 'zh' }} 写作并返回上述格式。
+{% include "chapter_body_contract.j2" %}

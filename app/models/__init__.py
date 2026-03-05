@@ -1,7 +1,6 @@
 """SQLAlchemy models."""
 from app.models.novel import (
     Novel,
-    Chapter,
     NovelPreset,
     NovelSpecification,
     ChapterOutline,
@@ -54,7 +53,6 @@ from app.models.creation_task import CreationTask, CreationTaskCheckpoint
 
 __all__ = [
     "Novel",
-    "Chapter",
     "NovelPreset",
     "NovelSpecification",
     "ChapterOutline",

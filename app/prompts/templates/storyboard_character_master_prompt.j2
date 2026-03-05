@@ -1,14 +1,38 @@
-你是导演分镜角色设定师。请输出“可用于视频生成平台创建角色底模”的主提示词。
-要求：
-1) 只描述稳定主形象，不包含阶段性情绪/伤势/关系变化。
-2) 必须体现 lane 与风格。
-3) 输出一段可直接复制的提示词正文，不要解释。
+你是导演分镜角色设定师。请输出“可直接用于图像/视频生成”的结构化角色提示词。
 
-Lane: {{ lane }}
-风格：{{ style_profile }}
-题材：{{ genre }}
-镜头上下文摘要：
+<lane>{{ lane }}</lane>
+<style_profile>{{ style_profile }}</style_profile>
+<genre>{{ genre }}</genre>
+
+<shot_context>
 {{ shot_context }}
+</shot_context>
 
-角色画像(JSON):
+<character_profile_json>
 {{ character_json }}
+</character_profile_json>
+
+<identity_priority>
+不可变锚点优先级：
+1) 脸型/肤色/族裔
+2) 发型/发色/眼部特征
+3) 服装轮廓与标志物
+4) 气质标签与镜头状态
+</identity_priority>
+
+<output_contract>
+仅输出 JSON 对象，字段必须完整：
+{
+  "master_prompt_text": "主提示词正文",
+  "identity_lock": ["不可变锚点1", "不可变锚点2"],
+  "negative_prompt_text": "负面提示词",
+  "camera_safe_notes": ["镜头安全约束1", "镜头安全约束2"]
+}
+
+要求：
+- master_prompt_text 为可直接复制使用的单段提示词。
+- identity_lock 至少 3 条，且必须覆盖肤色/族裔与发型/服装锚点。
+- negative_prompt_text 必须包含避免脸型漂移、发色漂移、时代错置、服装突变。
+- camera_safe_notes 至少 2 条，强调镜头一致性与角色辨识稳定性。
+- 不要输出解释文字或 Markdown。
+</output_contract>

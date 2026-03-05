@@ -158,11 +158,10 @@ def test_update_character_states_from_content_no_character_short_circuit(monkeyp
 
 
 def test_writer_agent_error_includes_provider_model_and_root_cause(monkeypatch):
-    class _FailLLM:
-        def invoke(self, _prompt):
-            raise RuntimeError("upstream timeout")
+    def _raise(*_args, **_kwargs):
+        raise RuntimeError("upstream timeout")
 
-    monkeypatch.setattr("app.services.generation.agents.get_llm_with_fallback", lambda *_: _FailLLM())
+    monkeypatch.setattr("app.services.generation.agents.invoke_chapter_body_structured", _raise)
 
     writer = WriterAgent()
     with pytest.raises(RuntimeError) as exc_info:

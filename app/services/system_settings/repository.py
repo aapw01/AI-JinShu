@@ -30,6 +30,9 @@ RUNTIME_SETTING_KEYS = frozenset(
         "quota_free_monthly_token_limit",
         "quota_admin_monthly_chapter_limit",
         "quota_admin_monthly_token_limit",
+        "llm_output_max_schema_retries",
+        "llm_output_max_provider_fallbacks",
+        "llm_output_min_chars",
     }
 )
 
@@ -44,6 +47,9 @@ RUNTIME_SETTING_RULES: dict[str, dict[str, Any]] = {
     "quota_free_monthly_token_limit": {"kind": "int", "min": 0, "max": 100_000_000_000_000},
     "quota_admin_monthly_chapter_limit": {"kind": "int", "min": 0, "max": 1_000_000_000},
     "quota_admin_monthly_token_limit": {"kind": "int", "min": 0, "max": 100_000_000_000_000},
+    "llm_output_max_schema_retries": {"kind": "int", "min": 0, "max": 10},
+    "llm_output_max_provider_fallbacks": {"kind": "int", "min": 0, "max": 10},
+    "llm_output_min_chars": {"kind": "int", "min": 0, "max": 20_000},
 }
 
 
@@ -83,6 +89,13 @@ def _coerce_runtime_value(key: str, value: Any) -> Any:
             if normalized in {"0", "false", "no", "off"}:
                 return False
         raise SettingsValidationError(f"invalid boolean value for {key}: {value!r}")
+
+    if kind == "enum":
+        normalized = str(value or "").strip().lower()
+        choices = rule.get("choices") if isinstance(rule.get("choices"), set) else set()
+        if normalized in choices:
+            return normalized
+        raise SettingsValidationError(f"invalid enum value for {key}: {value!r}")
 
     if kind != "int":
         raise SettingsValidationError(f"unsupported runtime setting type for key: {key}")

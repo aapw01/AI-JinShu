@@ -4,7 +4,6 @@ import pytest
 from app.services.generation.consistency import ConsistencyReport, ConsistencyIssue
 from app.services.generation.langgraph_pipeline import (
     _node_volume_replan,
-    _node_review,
     _node_writer,
     _route_consistency,
     _route_after_confirmation,

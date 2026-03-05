@@ -133,9 +133,19 @@ export default function NovelPage() {
         console.error(versionErr);
       }
 
+      if (!defaultVersion?.id) {
+        setNovel(novelData);
+        setVersions(versionsData);
+        setActiveVersionId(null);
+        setChapters([]);
+        setChapterProgress([]);
+        setError("未找到可用版本，请先创建版本后再查看章节。");
+        return;
+      }
+
       const [progressData, chaptersData] = await Promise.all([
-        api.getChapterProgress(id),
-        api.getChapters(id, defaultVersion?.id),
+        api.getChapterProgress(id, defaultVersion.id),
+        api.getChapters(id, defaultVersion.id),
       ]);
 
       const nextGenreMap = buildPresetLabelMap(presetsData?.genres);
@@ -471,9 +481,13 @@ export default function NovelPage() {
                     clearSelectionDraft();
                   }
                   try {
-                    const nextChapters = await api.getChapters(id, nextId);
+                    const [nextChapters, nextProgress] = await Promise.all([
+                      api.getChapters(id, nextId),
+                      api.getChapterProgress(id, nextId),
+                    ]);
                     setActiveVersionId(nextId);
                     setChapters(nextChapters);
+                    setChapterProgress(nextProgress);
                   } catch (err) {
                     console.error(err);
                     setError(getErrorMessage(err, "版本切换失败"));
@@ -527,9 +541,14 @@ export default function NovelPage() {
                     {(["txt", "md", "zip"] as const).map((format) => (
                       <a
                         key={format}
-                        href={api.getExportUrl(id, format, activeVersionId ?? undefined)}
+                        href={activeVersionId ? api.getExportUrl(id, format, activeVersionId) : "#"}
                         download
-                        className="block px-4 py-2.5 text-sm text-[#3A3A3C] hover:bg-[#F6F3EF] transition-colors"
+                        className={[
+                          "block px-4 py-2.5 text-sm transition-colors",
+                          activeVersionId
+                            ? "text-[#3A3A3C] hover:bg-[#F6F3EF]"
+                            : "text-[#ACA39A] cursor-not-allowed",
+                        ].join(" ")}
                         onClick={() => setShowExport(false)}
                       >
                         导出为 .{format}
@@ -539,7 +558,7 @@ export default function NovelPage() {
                 </>
               ) : null}
             </div>
-            <Link href={`/novels/${id}/progress`}>
+            <Link href={`/novels/${id}/progress${activeVersionId ? `?version_id=${activeVersionId}` : ""}`}>
               <Button
                 variant="secondary"
                 size="sm"
