@@ -9,7 +9,7 @@ from typing import Any
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from app.models.novel import ChapterVersion, Novel, StoryCharacterProfile
+from app.models.novel import ChapterVersion, StoryCharacterProfile
 from app.models.storyboard import (
     StoryboardAuditLog,
     StoryboardCharacterCard,
@@ -175,16 +175,6 @@ def build_source_snapshot(
         )
         .order_by(StoryCharacterProfile.display_name.asc())
     ).scalars().all()
-    if not profiles:
-        # Backfill for legacy rows created before version-locking.
-        profiles = db.execute(
-            select(StoryCharacterProfile)
-            .where(
-                StoryCharacterProfile.novel_id == project.novel_id,
-                StoryCharacterProfile.novel_version_id.is_(None),
-            )
-            .order_by(StoryCharacterProfile.display_name.asc())
-        ).scalars().all()
     profile_rows = [_serialize_profile(row) for row in profiles]
     digest = _snapshot_hash(chapter_rows, profile_rows)
 

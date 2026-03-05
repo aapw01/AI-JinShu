@@ -3,13 +3,16 @@ import json
 import logging
 import re
 import time
+import hashlib
 from typing import Any
 from pydantic import BaseModel, ValidationError
 from langchain_core.output_parsers import PydanticOutputParser
 
 from app.core.llm import get_llm_with_fallback, response_to_text, _is_retryable
+from app.core.llm_contract import invoke_chapter_body_structured
 from app.prompts import render_prompt
-from app.services.generation.common import extract_chapter_body_from_response, normalize_title_text
+from app.services.generation.common import normalize_title_text
+from app.services.generation.contracts import OutputContractError
 
 logger = logging.getLogger(__name__)
 
@@ -92,8 +95,24 @@ def _extract_json_block(content: str) -> str:
     return match.group(1) if match else text
 
 
-def _invoke_json_with_schema(llm: Any, prompt: str, schema_cls: type[BaseModel], retries: int = 2) -> dict:
-    """Strongly enforce structured output with retry on parse/validation AND transient API errors."""
+def _invoke_json_with_schema(
+    llm: Any,
+    prompt: str,
+    schema_cls: type[BaseModel],
+    retries: int = 2,
+    *,
+    stage: str = "structured",
+    strict: bool = False,
+    provider: str | None = None,
+    model: str | None = None,
+    chapter_num: int | None = None,
+    prompt_template: str | None = None,
+    prompt_version: str = "v2",
+) -> dict:
+    """Enforce structured output with retry on parse/validation and transient API errors."""
+    prompt_hash = hashlib.sha256(str(prompt or "").encode("utf-8")).hexdigest()[:16]
+    template_name = str(prompt_template or stage)
+    version = str(prompt_version or "v2")
     parser = PydanticOutputParser(pydantic_object=schema_cls)
     format_instructions = parser.get_format_instructions()
     prompt = render_prompt(
@@ -102,17 +121,27 @@ def _invoke_json_with_schema(llm: Any, prompt: str, schema_cls: type[BaseModel],
         format_instructions=format_instructions,
     )
     error = ""
+    last_error_code = "MODEL_OUTPUT_PARSE_FAILED"
     for attempt in range(retries + 1):
         try:
             started = time.perf_counter()
             resp = llm.invoke(prompt)
             elapsed = time.perf_counter() - started
             logger.info(
-                "LLM structured invoke success schema=%s attempt=%s elapsed=%.2fs prompt_chars=%s",
+                "LLM structured invoke success stage=%s schema=%s attempt=%s elapsed=%.2fs prompt_chars=%s prompt_hash=%s",
+                stage,
                 schema_cls.__name__,
                 attempt + 1,
                 elapsed,
                 len(prompt),
+                prompt_hash,
+            )
+            logger.info(
+                "LLM structured prompt meta stage=%s template=%s version=%s prompt_hash=%s",
+                stage,
+                template_name,
+                version,
+                prompt_hash,
             )
             content = response_to_text(resp).strip()
             try:
@@ -124,12 +153,15 @@ def _invoke_json_with_schema(llm: Any, prompt: str, schema_cls: type[BaseModel],
                 validated = schema_cls.model_validate(raw)
                 return validated.model_dump()
         except (json.JSONDecodeError, ValidationError) as exc:
+            last_error_code = "MODEL_OUTPUT_SCHEMA_INVALID" if isinstance(exc, ValidationError) else "MODEL_OUTPUT_PARSE_FAILED"
             error = str(exc)
             logger.warning(
-                "LLM structured parse retry schema=%s attempt=%s error=%s",
+                "LLM structured parse retry stage=%s schema=%s attempt=%s error=%s prompt_hash=%s",
+                stage,
                 schema_cls.__name__,
                 attempt + 1,
                 error,
+                prompt_hash,
             )
             prompt = render_prompt(
                 "structured_output_retry_suffix",
@@ -141,16 +173,39 @@ def _invoke_json_with_schema(llm: Any, prompt: str, schema_cls: type[BaseModel],
             if _is_retryable(exc) and attempt < retries:
                 delay = _AGENT_RETRY_BACKOFF[attempt] if attempt < len(_AGENT_RETRY_BACKOFF) else 10.0
                 logger.warning(
-                    "LLM structured invoke transient error schema=%s attempt=%s error=%s delay=%.1fs",
+                    "LLM structured invoke transient error stage=%s schema=%s attempt=%s error=%s delay=%.1fs prompt_hash=%s",
+                    stage,
                     schema_cls.__name__,
                     attempt + 1,
                     type(exc).__name__,
                     delay,
+                    prompt_hash,
                 )
                 time.sleep(delay)
             else:
+                last_error_code = "MODEL_OUTPUT_CONTRACT_EXHAUSTED"
                 break
-    logger.warning(f"Structured output failed after retries: {error}")
+    logger.warning(
+        "Structured output failed after retries stage=%s schema=%s error=%s prompt_hash=%s",
+        stage,
+        schema_cls.__name__,
+        error,
+        prompt_hash,
+    )
+    if strict:
+        raise OutputContractError(
+            code=last_error_code,
+            stage=stage,
+            chapter_num=chapter_num,
+            provider=provider,
+            model=model,
+                detail=(
+                    error
+                    or f"{schema_cls.__name__} structured_output_failed"
+                    + f" template={template_name} version={version} prompt_hash={prompt_hash}"
+                ),
+                retryable=True,
+            )
     return {"raw": "structured_output_fallback", "error": error}
 
 
@@ -423,7 +478,6 @@ class WriterAgent:
         provider: str | None = None,
         model: str | None = None,
     ) -> str:
-        llm = get_llm_with_fallback(provider, model)
         template = "first_chapter" if chapter_num == 1 else "next_chapter"
         prompt = render_prompt(
             template,
@@ -435,15 +489,25 @@ class WriterAgent:
             native_style_profile=native_style_profile,
         )
         try:
-            response = _timed_invoke(
-                llm,
-                prompt,
-                "writer",
-                {"novel_id": novel_id, "chapter_num": chapter_num, "provider": provider, "model": model, "template": template},
+            content = invoke_chapter_body_structured(
+                prompt=prompt,
+                stage="writer",
+                chapter_num=chapter_num,
+                provider=provider,
+                model=model,
+                prompt_template=template,
+                prompt_version="v2",
             )
-            content = extract_chapter_body_from_response(response_to_text(response))
             logger.info(f"WriterAgent completed for novel {novel_id} chapter {chapter_num}, length: {len(content)}")
             return content
+        except OutputContractError:
+            logger.exception(
+                "WriterAgent contract failed chapter=%s provider=%s model=%s",
+                chapter_num,
+                provider,
+                model,
+            )
+            raise
         except Exception as e:
             logger.error(f"WriterAgent failed: {e}")
             root = e
@@ -472,34 +536,34 @@ class ReviewerAgent:
         provider: str | None = None,
         model: str | None = None,
     ) -> dict[str, Any]:
+        template = "reviewer_structured"
         llm = get_llm_with_fallback(provider, model)
         prompt = render_prompt(
-            "reviewer_structured",
+            template,
             chapter_num=chapter_num,
             language=language,
             native_style_profile=(native_style_profile or "默认"),
             draft=(draft[:7000]),
         )
-        try:
-            result = _invoke_json_with_schema(llm, prompt, ReviewScorecardSchema)
-            score = float(result.get("score", 0.8))
-            if score > 1:
-                score = score / 100 if score <= 100 else 0.8
-            result["score"] = max(0.0, min(1.0, score))
-            conf = float(result.get("confidence", 0.75))
-            result["confidence"] = max(0.0, min(1.0, conf))
-            return result
-        except Exception as e:
-            logger.error(f"ReviewerAgent structured review failed: {e}")
-            return {
-                "score": 0.75,
-                "confidence": 0.5,
-                "feedback": "结构化审校降级：返回基础结果",
-                "positives": [],
-                "must_fix": [],
-                "should_fix": [],
-                "risks": ["structured_review_failed"],
-            }
+        result = _invoke_json_with_schema(
+            llm,
+            prompt,
+            ReviewScorecardSchema,
+            strict=True,
+            stage="reviewer.structured",
+            provider=provider,
+            model=model,
+            chapter_num=chapter_num,
+            prompt_template=template,
+            prompt_version="v2",
+        )
+        score = float(result.get("score", 0.8))
+        if score > 1:
+            score = score / 100 if score <= 100 else 0.8
+        result["score"] = max(0.0, min(1.0, score))
+        conf = float(result.get("confidence", 0.75))
+        result["confidence"] = max(0.0, min(1.0, conf))
+        return result
 
     def run(
         self,
@@ -510,22 +574,18 @@ class ReviewerAgent:
         provider: str | None = None,
         model: str | None = None,
     ) -> tuple[float, str]:
-        try:
-            result = self.run_structured(
-                draft=draft,
-                chapter_num=chapter_num,
-                language=language,
-                native_style_profile=native_style_profile,
-                provider=provider,
-                model=model,
-            )
-            score = float(result.get("score", 0.8))
-            feedback = str(result.get("feedback", ""))
-            logger.info(f"ReviewerAgent completed, score: {score}")
-            return score, feedback
-        except Exception as e:
-            logger.error(f"ReviewerAgent failed: {e}")
-            return 0.75, "Auto-review: acceptable quality"
+        result = self.run_structured(
+            draft=draft,
+            chapter_num=chapter_num,
+            language=language,
+            native_style_profile=native_style_profile,
+            provider=provider,
+            model=model,
+        )
+        score = float(result.get("score", 0.8))
+        feedback = str(result.get("feedback", ""))
+        logger.info(f"ReviewerAgent completed, score: {score}")
+        return score, feedback
 
     def run_factual(
         self,
@@ -552,34 +612,34 @@ class ReviewerAgent:
         provider: str | None = None,
         model: str | None = None,
     ) -> dict[str, Any]:
+        template = "reviewer_factual_structured"
         llm = get_llm_with_fallback(provider, model)
         prompt = render_prompt(
-            "reviewer_factual_structured",
+            template,
             chapter_num=chapter_num,
             context_json=(json.dumps(context, ensure_ascii=False)[:3000]),
             draft=(draft[:6000]),
         )
-        try:
-            result = _invoke_json_with_schema(llm, prompt, ReviewScorecardSchema)
-            score = float(result.get("score", 0.8))
-            if score > 1:
-                score = score / 100 if score <= 100 else 0.8
-            result["score"] = max(0.0, min(1.0, score))
-            result["confidence"] = max(0.0, min(1.0, float(result.get("confidence", 0.75) or 0.75)))
-            contradictions = [str(x.get("claim") or "") for x in (result.get("must_fix") or []) if isinstance(x, dict)]
-            result["contradictions"] = [x for x in contradictions if x][:20]
-            return result
-        except Exception as e:
-            logger.error(f"ReviewerAgent factual review failed: {e}")
-            return {
-                "score": 0.75,
-                "confidence": 0.5,
-                "feedback": "事实审校降级：未检测到显著冲突",
-                "contradictions": [],
-                "must_fix": [],
-                "should_fix": [],
-                "risks": ["factual_review_failed"],
-            }
+        result = _invoke_json_with_schema(
+            llm,
+            prompt,
+            ReviewScorecardSchema,
+            strict=True,
+            stage="reviewer.factual",
+            provider=provider,
+            model=model,
+            chapter_num=chapter_num,
+            prompt_template=template,
+            prompt_version="v2",
+        )
+        score = float(result.get("score", 0.8))
+        if score > 1:
+            score = score / 100 if score <= 100 else 0.8
+        result["score"] = max(0.0, min(1.0, score))
+        result["confidence"] = max(0.0, min(1.0, float(result.get("confidence", 0.75) or 0.75)))
+        contradictions = [str(x.get("claim") or "") for x in (result.get("must_fix") or []) if isinstance(x, dict)]
+        result["contradictions"] = [x for x in contradictions if x][:20]
+        return result
 
     def run_aesthetic(
         self,
@@ -604,33 +664,33 @@ class ReviewerAgent:
         provider: str | None = None,
         model: str | None = None,
     ) -> dict[str, Any]:
+        template = "reviewer_aesthetic_structured"
         llm = get_llm_with_fallback(provider, model)
         prompt = render_prompt(
-            "reviewer_aesthetic_structured",
+            template,
             chapter_num=chapter_num,
             draft=(draft[:6000]),
         )
-        try:
-            result = _invoke_json_with_schema(llm, prompt, ReviewScorecardSchema)
-            score = float(result.get("score", 0.8))
-            if score > 1:
-                score = score / 100 if score <= 100 else 0.8
-            result["score"] = max(0.0, min(1.0, score))
-            result["confidence"] = max(0.0, min(1.0, float(result.get("confidence", 0.75) or 0.75)))
-            highlights = [str(x) for x in (result.get("positives") or [])]
-            result["highlights"] = [x for x in highlights if x][:20]
-            return result
-        except Exception as e:
-            logger.error(f"ReviewerAgent aesthetic review failed: {e}")
-            return {
-                "score": 0.75,
-                "confidence": 0.5,
-                "feedback": "审美审校降级：节奏基本可用",
-                "highlights": [],
-                "must_fix": [],
-                "should_fix": [],
-                "risks": ["aesthetic_review_failed"],
-            }
+        result = _invoke_json_with_schema(
+            llm,
+            prompt,
+            ReviewScorecardSchema,
+            strict=True,
+            stage="reviewer.aesthetic",
+            provider=provider,
+            model=model,
+            chapter_num=chapter_num,
+            prompt_template=template,
+            prompt_version="v2",
+        )
+        score = float(result.get("score", 0.8))
+        if score > 1:
+            score = score / 100 if score <= 100 else 0.8
+        result["score"] = max(0.0, min(1.0, score))
+        result["confidence"] = max(0.0, min(1.0, float(result.get("confidence", 0.75) or 0.75)))
+        highlights = [str(x) for x in (result.get("positives") or [])]
+        result["highlights"] = [x for x in highlights if x][:20]
+        return result
 
 
 class FinalizerAgent:
@@ -648,27 +708,46 @@ class FinalizerAgent:
         if not feedback or feedback == "Auto-review: acceptable quality":
             return draft
 
-        llm = get_llm_with_fallback(provider, model)
+        template = "finalizer_polish"
         prompt = render_prompt(
-            "finalizer_polish",
+            template,
             feedback=feedback,
             draft=draft,
             language=language,
         )
 
         try:
-            response = _timed_invoke(
-                llm,
-                prompt,
-                "finalizer",
-                {"provider": provider, "model": model, "language": language},
+            content = invoke_chapter_body_structured(
+                prompt=prompt,
+                stage="finalizer",
+                provider=provider,
+                model=model,
+                prompt_template=template,
+                prompt_version="v2",
             )
-            content = extract_chapter_body_from_response(response_to_text(response))
             logger.info(f"FinalizerAgent completed, length: {len(content)}")
             return content
+        except OutputContractError:
+            logger.exception(
+                "FinalizerAgent contract failed provider=%s model=%s language=%s",
+                provider,
+                model,
+                language,
+            )
+            raise
         except Exception as e:
             logger.error(f"FinalizerAgent failed: {e}")
-            return draft
+            root = e
+            while getattr(root, "__cause__", None) is not None:
+                root = root.__cause__
+            root_type = type(root).__name__
+            root_msg = str(root).strip().replace("\n", " ")
+            if len(root_msg) > 240:
+                root_msg = root_msg[:240]
+            raise RuntimeError(
+                f"finalizer failed provider={provider or '__default__'} model={model or '__default__'} "
+                f"cause={root_type}: {root_msg or 'unknown error'}"
+            ) from e
 
 
 class FinalReviewerAgent:
@@ -689,10 +768,18 @@ class FinalReviewerAgent:
         provider: str | None = None,
         model: str | None = None,
     ) -> dict:
+        template = "final_book_review"
         llm = get_llm_with_fallback(provider, model)
-        prompt = render_prompt("final_book_review", chapters=chapters, language=language)
+        prompt = render_prompt(template, chapters=chapters, language=language)
         try:
-            data = _invoke_json_with_schema(llm, prompt, FinalBookReviewSchema)
+            data = _invoke_json_with_schema(
+                llm,
+                prompt,
+                FinalBookReviewSchema,
+                stage="reviewer.book",
+                prompt_template=template,
+                prompt_version="v2",
+            )
             return data if isinstance(data, dict) else {"score": 0.8, "feedback": "ok"}
         except Exception as e:
             logger.error(f"FinalReviewerAgent full-book review failed: {e}")
@@ -711,17 +798,25 @@ class FactExtractorAgent:
         provider: str | None = None,
         model: str | None = None,
     ) -> dict:
+        template = "fact_extractor_structured"
         llm = get_llm_with_fallback(provider, model)
         prompt = render_prompt(
-            "fact_extractor_structured",
+            template,
             chapter_num=chapter_num,
             language=language,
             outline_json=(json.dumps(outline or {}, ensure_ascii=False)[:1500]),
             content=(content[:7000]),
         )
-        try:
-            data = _invoke_json_with_schema(llm, prompt, FactExtractionSchema)
-            return data if isinstance(data, dict) else {"events": [], "entities": [], "facts": []}
-        except Exception as e:
-            logger.error(f"FactExtractorAgent failed: {e}")
-            return {"events": [], "entities": [], "facts": []}
+        data = _invoke_json_with_schema(
+            llm,
+            prompt,
+            FactExtractionSchema,
+            strict=True,
+            stage="fact_extractor",
+            provider=provider,
+            model=model,
+            chapter_num=chapter_num,
+            prompt_template=template,
+            prompt_version="v2",
+        )
+        return data if isinstance(data, dict) else {"events": [], "entities": [], "facts": []}

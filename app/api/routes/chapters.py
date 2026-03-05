@@ -1,12 +1,13 @@
 """Chapters routes."""
 import json
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 import redis
 
+from app.core.api_errors import http_error
 from app.core.config import get_settings
 from app.core.authz.deps import require_permission
 from app.core.authz.resources import load_novel_resource
@@ -80,6 +81,7 @@ def _to_version_response(
     return ChapterResponse(
         id=c.id,
         novel_id=novel_uuid,
+        version_id=int(c.novel_version_id),
         chapter_num=c.chapter_num,
         title=c.title,
         content=c.content,
@@ -101,16 +103,18 @@ def list_chapters(
     _: Principal = Depends(require_permission(Permission.NOVEL_READ, resource_loader=load_novel_resource)),
 ):
     """List chapters for a novel."""
+    if version_id is None:
+        raise http_error(400, "missing_version_id", "version_id is required")
     novel = resolve_novel(db, novel_id)
     if not novel:
-        raise HTTPException(404, "Novel not found")
+        raise http_error(404, "novel_not_found", "Novel not found")
     uuid_str = novel.uuid or str(novel.id)
     try:
-        version, chapters = list_chapter_versions(db, novel.id, version_id)
+        _, chapters = list_chapter_versions(db, novel.id, int(version_id))
         db.commit()
         return [_to_version_response(c, uuid_str) for c in chapters]
     except ValueError:
-        raise HTTPException(404, "Version not found")
+        raise http_error(404, "version_not_found", "Version not found")
 
 
 @router.get("/{novel_id}/chapters/{chapter_num}", response_model=ChapterResponse)
@@ -122,15 +126,17 @@ def get_chapter(
     _: Principal = Depends(require_permission(Permission.NOVEL_READ, resource_loader=load_novel_resource)),
 ):
     """Get a specific chapter."""
+    if version_id is None:
+        raise http_error(400, "missing_version_id", "version_id is required")
     novel = resolve_novel(db, novel_id)
     if not novel:
-        raise HTTPException(404, "Novel not found")
+        raise http_error(404, "novel_not_found", "Novel not found")
     try:
-        version, chapter = get_chapter_version(db, novel.id, chapter_num, version_id)
+        _, chapter = get_chapter_version(db, novel.id, chapter_num, int(version_id))
     except ValueError:
-        raise HTTPException(404, "Version not found")
+        raise http_error(404, "version_not_found", "Version not found")
     if not chapter:
-        raise HTTPException(404, "Chapter not found")
+        raise http_error(404, "chapter_not_found", "Chapter not found")
     db.commit()
     return _to_version_response(chapter, novel.uuid or str(novel.id))
 
@@ -138,17 +144,27 @@ def get_chapter(
 @router.get("/{novel_id}/chapter-progress", response_model=list[ChapterProgressItem])
 def get_chapter_progress(
     novel_id: str,
+    version_id: int | None = None,
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.NOVEL_READ, resource_loader=load_novel_resource)),
 ):
     """Return full chapter list with generation status for left sidebar."""
+    if version_id is None:
+        raise http_error(400, "missing_version_id", "version_id is required")
     novel = resolve_novel(db, novel_id)
     if not novel:
-        raise HTTPException(404, "Novel not found")
+        raise http_error(404, "novel_not_found", "Novel not found")
 
-    outlines_stmt = select(ChapterOutline).where(ChapterOutline.novel_id == novel.id).order_by(ChapterOutline.chapter_num)
+    outlines_stmt = (
+        select(ChapterOutline)
+        .where(
+            ChapterOutline.novel_id == novel.id,
+            ChapterOutline.novel_version_id == int(version_id),
+        )
+        .order_by(ChapterOutline.chapter_num)
+    )
     outlines = db.execute(outlines_stmt).scalars().all()
-    _, version_chapters = list_chapter_versions(db, novel.id, None)
+    _, version_chapters = list_chapter_versions(db, novel.id, int(version_id))
     generated_map = {c.chapter_num: c for c in version_chapters}
 
     active_stmt = (
@@ -188,7 +204,7 @@ def get_chapter_progress(
             )
         return result
 
-    # Fallback for old novels without outlines: show generated chapters only.
+    # Outlines may be absent for drafts; return generated chapter rows only.
     for c in version_chapters:
         result.append(
             ChapterProgressItem(
@@ -210,15 +226,17 @@ def update_chapter(
     _: Principal = Depends(require_permission(Permission.NOVEL_UPDATE, resource_loader=load_novel_resource)),
 ):
     """Update a chapter's title or content."""
+    if version_id is None:
+        raise http_error(400, "missing_version_id", "version_id is required")
     novel = resolve_novel(db, novel_id)
     if not novel:
-        raise HTTPException(404, "Novel not found")
+        raise http_error(404, "novel_not_found", "Novel not found")
     try:
-        _, chapter = get_chapter_version(db, novel.id, chapter_num, version_id)
+        _, chapter = get_chapter_version(db, novel.id, chapter_num, int(version_id))
     except ValueError:
-        raise HTTPException(404, "Version not found")
+        raise http_error(404, "version_not_found", "Version not found")
     if not chapter:
-        raise HTTPException(404, "Chapter not found")
+        raise http_error(404, "chapter_not_found", "Chapter not found")
     if data.title is not None:
         chapter.title = data.title
     if data.content is not None:

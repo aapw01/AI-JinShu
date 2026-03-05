@@ -7,7 +7,6 @@ from typing import Any
 from sqlalchemy import Select, asc, select
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
 from app.models.creation_task import CreationTask
 from app.services.scheduler.concurrency_service import count_user_running_slots, get_user_concurrency_limit
 from app.services.scheduler.lock_service import acquire_user_dispatch_lock

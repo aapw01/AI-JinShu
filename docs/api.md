@@ -69,7 +69,7 @@
 
 ### `GET /api/novels/{novel_id}/volumes/summary`
 - 作用：按卷查看生成进度摘要。
-- 参数：`volume_size`（默认 30）。
+- 参数：`version_id`（必填）, `volume_size`（默认 30）。
 - 返回：卷列表（`volume_no`, `start_chapter`, `end_chapter`, `completed_chapters`, `target_chapters`, `snapshot_id`, `quality_verdict`）。
 
 ### `GET /api/novels/{novel_id}/volumes/{volume_no}/gate-report`
@@ -88,7 +88,7 @@
 
 ### `GET /api/novels/{novel_id}/observability`
 - 作用：统一返回质量报告、检查点、反馈与风险摘要，供前端监控面板使用。
-- 参数：`limit`（默认 50）。
+- 参数：`version_id`（必填）, `limit`（默认 50）。
 - `summary` 新增治理指标：
   - `closure_action_distribution`
   - `closure_action_oscillation_rate`
@@ -119,6 +119,9 @@
   - `phase`: 当前阶段（细粒度节点信息）
   - `progress`: 0~100
   - `message/error`
+  - `error_code`: 失败错误码（如 `MODEL_OUTPUT_PARSE_FAILED` / `MODEL_OUTPUT_SCHEMA_INVALID` / `MODEL_OUTPUT_POLICY_VIOLATION` / `MODEL_OUTPUT_CONTRACT_EXHAUSTED`）
+  - `error_category`: `transient | policy`
+  - `retryable`: 是否可重试
 
 ### `POST /api/novels/{novel_id}/generation/retry`
 - 作用：失败/取消后一键重试，默认自动选择最新失败任务；也可指定 `task_id`。
@@ -140,6 +143,36 @@
 ### `GET /api/novels/{novel_id}/generation/tasks`
 - 作用：列出任务历史及错误分类信息。
 - 关键字段：`status/error_code/error_category/retryable`。
+
+### `GET /api/novels/{novel_id}/chapters`
+- 作用：列出指定版本章节。
+- 参数：`version_id`（必填）。
+- 错误：缺失 `version_id` 返回 `400 missing_version_id`。
+
+### `GET /api/novels/{novel_id}/chapters/{chapter_num}`
+- 作用：读取指定版本的单章内容。
+- 参数：`version_id`（必填）。
+- 错误：缺失 `version_id` 返回 `400 missing_version_id`。
+
+### `PUT /api/novels/{novel_id}/chapters/{chapter_num}`
+- 作用：更新指定版本的单章内容。
+- 参数：`version_id`（必填）。
+- 错误：缺失 `version_id` 返回 `400 missing_version_id`。
+
+### `GET /api/novels/{novel_id}/export?format=txt|md|zip&version_id=...`
+- 作用：导出指定版本章节（txt/md/zip）。
+- 参数：`format`（必填），`version_id`（必填）。
+- 错误：
+  - 缺失 `version_id`：`400 missing_version_id`
+  - 目标版本无章节：`409 no_chapters_in_version`
+
+### `GET /api/novels/{novel_id}/rewrite-requests/{request_id}/status`
+- 作用：查询章节重写任务状态。
+- 关键字段：
+  - `status/progress/current_chapter/message/error`
+  - `error_code`
+  - `error_category`
+  - `retryable`
 
 ### `GET /api/account/quota`
 - 作用：查看当前账号套餐配额与本月已用量。
@@ -196,6 +229,9 @@
   - `quota_free_monthly_token_limit`
   - `quota_admin_monthly_chapter_limit`
   - `quota_admin_monthly_token_limit`
+  - `llm_output_max_schema_retries`
+  - `llm_output_max_provider_fallbacks`
+  - `llm_output_min_chars`
 
 ### `PUT /api/admin/settings/runtime`
 - 作用：保存运行时配置覆盖项。
@@ -204,6 +240,12 @@
 ### `GET /api/admin/settings/effective`
 - 作用：查看当前进程生效配置快照（调试用途）。
 - 说明：返回聚合后的默认模型、回退顺序、运行时覆盖项；敏感字段均掩码。
+
+### creation_tasks 结果元数据
+- `creation_tasks.result_json` 可能包含以下可选字段（用于观测与回放）：
+  - `prompt_version`
+  - `prompt_hash`
+  - `prompt_template`
 
 ## Novel 辅助端点
 

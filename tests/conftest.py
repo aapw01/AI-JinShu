@@ -1,4 +1,6 @@
 """Pytest fixtures."""
+
+# ruff: noqa: E402
 import os
 import pathlib
 
@@ -30,6 +32,7 @@ def ensure_test_user(user_uuid: str, role: str = "user", status: str = "active")
 
 @pytest.fixture(scope="session", autouse=True)
 def setup_db():
+    Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
     yield
     Base.metadata.drop_all(bind=engine)

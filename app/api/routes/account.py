@@ -12,7 +12,6 @@ from app.core.authn import require_auth
 from app.core.authz.types import Principal
 from app.core.database import get_db
 from app.models.novel import (
-    Chapter,
     ChapterVersion,
     GenerationTask,
     Novel,
@@ -236,97 +235,44 @@ def get_header_stats(
         or 0
     )
 
-    chapter_version_base = (
-        select(ChapterVersion.id)
-        .join(NovelVersion, NovelVersion.id == ChapterVersion.novel_version_id)
-        .join(Novel, Novel.id == NovelVersion.novel_id)
-        .where(
-            NovelVersion.is_default == 1,
-            ChapterVersion.status == "completed",
-            *scope_filters,
-        )
-    )
-    has_version_rows = (
+    week_chapters = (
         db.execute(
-            select(func.count())
-            .select_from(chapter_version_base.subquery())
-        ).scalar_one()
-        or 0
-    ) > 0
-
-    if has_version_rows:
-        week_chapters = (
-            db.execute(
-                select(func.count(ChapterVersion.id))
-                .join(NovelVersion, NovelVersion.id == ChapterVersion.novel_version_id)
-                .join(Novel, Novel.id == NovelVersion.novel_id)
-                .where(
-                    NovelVersion.is_default == 1,
-                    ChapterVersion.status == "completed",
-                    ChapterVersion.updated_at >= week_ago,
-                    *scope_filters,
-                )
-            ).scalar_one()
-            or 0
-        )
-        total_words = (
-            db.execute(
-                select(func.coalesce(func.sum(func.length(func.coalesce(ChapterVersion.content, ""))), 0))
-                .join(NovelVersion, NovelVersion.id == ChapterVersion.novel_version_id)
-                .join(Novel, Novel.id == NovelVersion.novel_id)
-                .where(
-                    NovelVersion.is_default == 1,
-                    ChapterVersion.status == "completed",
-                    *scope_filters,
-                )
-            ).scalar_one()
-            or 0
-        )
-        quality_rows = db.execute(
-            select(ChapterVersion.language_quality_score)
+            select(func.count(ChapterVersion.id))
             .join(NovelVersion, NovelVersion.id == ChapterVersion.novel_version_id)
             .join(Novel, Novel.id == NovelVersion.novel_id)
             .where(
                 NovelVersion.is_default == 1,
                 ChapterVersion.status == "completed",
-                ChapterVersion.language_quality_score.isnot(None),
+                ChapterVersion.updated_at >= week_ago,
                 *scope_filters,
             )
-        ).all()
-    else:
-        # Backward compatibility: legacy novels before version tables were introduced.
-        week_chapters = (
-            db.execute(
-                select(func.count(Chapter.id))
-                .join(Novel, Novel.id == Chapter.novel_id)
-                .where(
-                    Chapter.status == "completed",
-                    Chapter.updated_at >= week_ago,
-                    *scope_filters,
-                )
-            ).scalar_one()
-            or 0
-        )
-        total_words = (
-            db.execute(
-                select(func.coalesce(func.sum(func.length(func.coalesce(Chapter.content, ""))), 0))
-                .join(Novel, Novel.id == Chapter.novel_id)
-                .where(
-                    Chapter.status == "completed",
-                    *scope_filters,
-                )
-            ).scalar_one()
-            or 0
-        )
-        quality_rows = db.execute(
-            select(Chapter.language_quality_score)
-            .join(Novel, Novel.id == Chapter.novel_id)
+        ).scalar_one()
+        or 0
+    )
+    total_words = (
+        db.execute(
+            select(func.coalesce(func.sum(func.length(func.coalesce(ChapterVersion.content, ""))), 0))
+            .join(NovelVersion, NovelVersion.id == ChapterVersion.novel_version_id)
+            .join(Novel, Novel.id == NovelVersion.novel_id)
             .where(
-                Chapter.status == "completed",
-                Chapter.language_quality_score.isnot(None),
+                NovelVersion.is_default == 1,
+                ChapterVersion.status == "completed",
                 *scope_filters,
             )
-        ).all()
+        ).scalar_one()
+        or 0
+    )
+    quality_rows = db.execute(
+        select(ChapterVersion.language_quality_score)
+        .join(NovelVersion, NovelVersion.id == ChapterVersion.novel_version_id)
+        .join(Novel, Novel.id == NovelVersion.novel_id)
+        .where(
+            NovelVersion.is_default == 1,
+            ChapterVersion.status == "completed",
+            ChapterVersion.language_quality_score.isnot(None),
+            *scope_filters,
+        )
+    ).all()
 
     normalized_scores = [_normalize_quality_score(row[0]) for row in quality_rows]
     quality_score = round(

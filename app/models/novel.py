@@ -1,4 +1,4 @@
-"""Novel and Chapter models."""
+"""Novel and versioned chapter models."""
 import uuid
 import os
 from datetime import datetime, timezone
@@ -72,26 +72,6 @@ class ChapterOutline(Base):
     outline = Column(Text, nullable=True)
     metadata_ = Column("metadata", JSON, default=dict)
     created_at = Column(DateTime, default=_utc_now)
-
-
-class Chapter(Base):
-    """Chapter content and metadata."""
-
-    __tablename__ = "chapters"
-
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    novel_id = Column(Integer, ForeignKey("novels.id", ondelete="CASCADE"), nullable=False)
-    chapter_num = Column(Integer, nullable=False)
-    title = Column(String(255), nullable=True)
-    content = Column(Text, nullable=True)
-    summary = Column(Text, nullable=True)
-    status = Column(String(50), default="pending")  # pending/generating/reviewing/finalizing/completed/failed
-    review_score = Column(Float, nullable=True)
-    language_quality_score = Column(Float, nullable=True)
-    language_quality_report = Column(Text, nullable=True)
-    metadata_ = Column("metadata", JSON, default=dict)
-    created_at = Column(DateTime, default=_utc_now)
-    updated_at = Column(DateTime, default=_utc_now, onupdate=_utc_now)
 
 
 class NovelPreset(Base):

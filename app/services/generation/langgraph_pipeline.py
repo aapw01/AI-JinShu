@@ -15,7 +15,6 @@ from app.core.database import SessionLocal
 from app.core.i18n import evaluate_language_quality, get_native_style_profile
 from app.core.logging_config import log_event
 from app.core.strategy import get_model_for_stage
-from app.core.tokens import estimate_tokens
 from app.core.llm_usage import snapshot_usage
 from app.prompts import render_prompt
 from app.models.novel import ChapterVersion, GenerationTask, Novel, GenerationCheckpoint, NovelFeedback, StoryForeshadow
@@ -31,7 +30,6 @@ from app.services.generation.agents import (
 from app.services.generation.common import (
     MAX_RETRIES,
     REVIEW_SCORE_THRESHOLD,
-    detect_chapter_content_contamination,
     generate_chapter_summary,
     logger,
     resolve_chapter_title,
@@ -39,6 +37,7 @@ from app.services.generation.common import (
     save_prewrite_artifacts,
     update_character_states_from_content,
 )
+from app.services.generation.contracts import OutputContractError
 from app.services.generation.character_profiles import update_character_profiles_incremental
 from app.services.generation.policies import (
     ClosurePolicyEngine,
@@ -1382,7 +1381,14 @@ def _node_consistency_check(state: GenerationState) -> GenerationState:
 
     chapter_num = state["current_chapter"]
     _progress(state, "consistency", chapter_num, _chapter_progress(state, 0.15), "一致性检查...", {"current_phase": "consistency_check", "total_chapters": state["num_chapters"]})
-    report = check_consistency(state["novel_id"], chapter_num, state["outline"], state["context"], state["prewrite"])
+    report = check_consistency(
+        state["novel_id"],
+        state["novel_version_id"],
+        chapter_num,
+        state["outline"],
+        state["context"],
+        state["prewrite"],
+    )
     scorecard = _build_consistency_scorecard(report)
     if report.passed:
         return {
@@ -1550,6 +1556,28 @@ def _node_writer(state: GenerationState) -> GenerationState:
             _time.sleep(_NODE_WRITER_ROUND_DELAY)
 
     if not draft_a and not draft_b:
+        contract_errors = [e for e in (err_a, err_b) if isinstance(e, OutputContractError)]
+        if contract_errors:
+            detail = f"A={err_a}; B={err_b}"
+            if all(e.code == "MODEL_OUTPUT_POLICY_VIOLATION" for e in contract_errors):
+                raise OutputContractError(
+                    code="MODEL_OUTPUT_POLICY_VIOLATION",
+                    stage="writer",
+                    chapter_num=chapter_num,
+                    provider=w_provider,
+                    model=w_model,
+                    detail=detail,
+                    retryable=False,
+                )
+            raise OutputContractError(
+                code="MODEL_OUTPUT_CONTRACT_EXHAUSTED",
+                stage="writer",
+                chapter_num=chapter_num,
+                provider=w_provider,
+                model=w_model,
+                detail=detail,
+                retryable=True,
+            )
         raise RuntimeError(f"writer failed for both variants: A={err_a}, B={err_b}")
 
     candidates = [
@@ -1768,33 +1796,28 @@ def _node_finalize(state: GenerationState) -> GenerationState:
         "禁止出现“以下是根据反馈”“重点解决如下问题”等语句。"
     )
     final_content = ""
-    contamination = {"contaminated": False, "reasons": [], "evidence": []}
     feedback_for_attempt = base_feedback
     for attempt in range(2):
-        final_content = state["finalizer"].run(
-            state["draft"],
-            feedback_for_attempt,
-            state["target_language"],
-            f_provider,
-            f_model,
-        ).strip()
-        contamination = detect_chapter_content_contamination(final_content, chapter_num=chapter_num)
-        if not contamination.get("contaminated"):
+        try:
+            final_content = state["finalizer"].run(
+                state["draft"],
+                feedback_for_attempt,
+                state["target_language"],
+                f_provider,
+                f_model,
+            ).strip()
             break
-        logger.warning(
-            "chapter.content.contaminated source=finalizer chapter=%s attempt=%s reasons=%s evidence=%s",
-            chapter_num,
-            attempt + 1,
-            contamination.get("reasons"),
-            contamination.get("evidence"),
-        )
-        feedback_for_attempt = (
-            f"{base_feedback}\n\n{format_guardrail}" if base_feedback else format_guardrail
-        )
-    if contamination.get("contaminated"):
-        raise RuntimeError(
-            f"chapter_content_contaminated chapter={chapter_num} reasons={contamination.get('reasons')}"
-        )
+        except OutputContractError as exc:
+            if exc.code != "MODEL_OUTPUT_POLICY_VIOLATION" or attempt >= 1:
+                raise
+            logger.warning(
+                "finalizer contract violation chapter=%s attempt=%s applying format guardrail",
+                chapter_num,
+                attempt + 1,
+            )
+            feedback_for_attempt = (
+                f"{base_feedback}\n\n{format_guardrail}" if base_feedback else format_guardrail
+            )
     extracted_facts = state["fact_extractor"].run(
         chapter_num=chapter_num,
         content=final_content,

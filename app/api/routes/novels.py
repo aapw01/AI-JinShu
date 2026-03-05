@@ -8,7 +8,7 @@ from app.core.authz.resources import load_novel_resource
 from app.core.authz.types import Permission, Principal
 from app.core.database import get_db, resolve_novel
 from app.core.time_utils import to_utc_iso_z
-from app.models.novel import Novel, StoryCharacterProfile
+from app.models.novel import Novel, NovelVersion, StoryCharacterProfile
 from app.schemas.novel import (
     CharacterProfileResponse,
     IdeaFrameworkRequest,
@@ -107,6 +107,15 @@ def create_novel(
         config=data.config,
     )
     db.add(novel)
+    db.flush()
+    db.add(
+        NovelVersion(
+            novel_id=novel.id,
+            version_no=1,
+            status="draft",
+            is_default=1,
+        )
+    )
     db.commit()
     db.refresh(novel)
     return _to_response(novel)

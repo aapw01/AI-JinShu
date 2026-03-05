@@ -92,6 +92,9 @@ def test_admin_settings_models_and_runtime_crud(client):
                 "creation_scheduler_enabled": True,
                 "creation_default_max_concurrent_tasks": 5,
                 "quota_enforce_concurrency_limit": True,
+                "llm_output_max_schema_retries": 3,
+                "llm_output_max_provider_fallbacks": 2,
+                "llm_output_min_chars": 256,
             }
         },
     )
@@ -99,6 +102,9 @@ def test_admin_settings_models_and_runtime_crud(client):
     runtime_items = {item["key"]: item for item in r_runtime.json()["items"]}
     assert runtime_items["creation_default_max_concurrent_tasks"]["value"] == 5
     assert runtime_items["creation_default_max_concurrent_tasks"]["source"] == "db"
+    assert runtime_items["llm_output_max_schema_retries"]["value"] == 3
+    assert runtime_items["llm_output_max_provider_fallbacks"]["value"] == 2
+    assert runtime_items["llm_output_min_chars"]["value"] == 256
 
     reset_runtime = client.put(
         "/api/admin/settings/runtime",

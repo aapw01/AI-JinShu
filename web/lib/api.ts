@@ -17,6 +17,7 @@ export interface Novel {
 
 export interface Chapter {
   id: number;
+  version_id: number;
   chapter_num: number;
   title?: string;
   content?: string;
@@ -88,6 +89,9 @@ export interface RewriteRequest {
   eta_label?: string;
   message?: string;
   error?: string;
+  error_code?: string;
+  error_category?: string;
+  retryable?: boolean;
   created_at: string;
   updated_at?: string;
 }
@@ -138,6 +142,9 @@ export interface GenerationStatus {
   estimated_cost?: number;
   message?: string;
   error?: string;
+  error_code?: string;
+  error_category?: string;
+  retryable?: boolean;
   last_error?: {
     code?: string;
     category?: string;
@@ -962,20 +969,20 @@ export const api = {
       method: "POST",
     }),
 
-  getChapters: (novelId: string, versionId?: number) =>
-    fetchApi<Chapter[]>(`/api/novels/${novelId}/chapters${versionId ? `?version_id=${encodeURIComponent(versionId)}` : ""}`),
+  getChapters: (novelId: string, versionId: number) =>
+    fetchApi<Chapter[]>(`/api/novels/${novelId}/chapters?version_id=${encodeURIComponent(versionId)}`),
 
-  getChapter: (novelId: string, chapterNum: number, versionId?: number) =>
-    fetchApi<Chapter>(`/api/novels/${novelId}/chapters/${chapterNum}${versionId ? `?version_id=${encodeURIComponent(versionId)}` : ""}`),
+  getChapter: (novelId: string, chapterNum: number, versionId: number) =>
+    fetchApi<Chapter>(`/api/novels/${novelId}/chapters/${chapterNum}?version_id=${encodeURIComponent(versionId)}`),
 
-  getChapterProgress: (novelId: string) =>
-    fetchApi<ChapterProgress[]>(`/api/novels/${novelId}/chapter-progress`),
+  getChapterProgress: (novelId: string, versionId: number) =>
+    fetchApi<ChapterProgress[]>(`/api/novels/${novelId}/chapter-progress?version_id=${encodeURIComponent(versionId)}`),
 
   getCharacterProfiles: (novelId: string) =>
     fetchApi<CharacterProfile[]>(`/api/novels/${novelId}/character-profiles`),
 
-  updateChapter: (novelId: string, chapterNum: number, data: { title?: string; content?: string }, versionId?: number) =>
-    fetchApi<Chapter>(`/api/novels/${novelId}/chapters/${chapterNum}${versionId ? `?version_id=${encodeURIComponent(versionId)}` : ""}`, {
+  updateChapter: (novelId: string, chapterNum: number, data: { title?: string; content?: string }, versionId: number) =>
+    fetchApi<Chapter>(`/api/novels/${novelId}/chapters/${chapterNum}?version_id=${encodeURIComponent(versionId)}`, {
       method: "PUT",
       body: JSON.stringify(data),
     }),
@@ -1060,8 +1067,8 @@ export const api = {
     fetchApi<PresetCategory[string]>(`/api/presets/${category}`),
 
   // Export
-  getExportUrl: (novelId: string, format: 'txt' | 'md' | 'zip', versionId?: number) =>
-    `${BASE}/api/novels/${novelId}/export?format=${format}${typeof versionId === "number" ? `&version_id=${encodeURIComponent(versionId)}` : ""}`,
+  getExportUrl: (novelId: string, format: 'txt' | 'md' | 'zip', versionId: number) =>
+    `${BASE}/api/novels/${novelId}/export?format=${format}&version_id=${encodeURIComponent(versionId)}`,
 
   // SSE Progress stream
   streamProgress: (novelId: string, taskId: string) => {
@@ -1102,8 +1109,8 @@ export const api = {
       body: JSON.stringify(data),
     }),
 
-  getObservability: (novelId: string) =>
-    fetchApi<ObservabilityPayload>(`/api/novels/${novelId}/observability`),
+  getObservability: (novelId: string, versionId: number) =>
+    fetchApi<ObservabilityPayload>(`/api/novels/${novelId}/observability?version_id=${encodeURIComponent(versionId)}`),
 
   // Storyboards
   listStoryboardProjects: () =>

@@ -1,5 +1,5 @@
 """Database session and engine."""
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 from app.core.config import get_settings
@@ -9,6 +9,15 @@ engine_kwargs = {}
 if settings.database_url.startswith("sqlite"):
     engine_kwargs["connect_args"] = {"check_same_thread": False}
 engine = create_engine(settings.database_url, **engine_kwargs)
+
+if settings.database_url.startswith("sqlite"):
+    # Keep sqlite behavior closer to PostgreSQL in tests/dev by enforcing FK cascades.
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragma(dbapi_connection, _connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 

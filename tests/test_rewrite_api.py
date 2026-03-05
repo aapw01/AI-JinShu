@@ -1,7 +1,7 @@
 from sqlalchemy import select
 
 from app.core.database import SessionLocal, resolve_novel
-from app.models.novel import Chapter, RewriteRequest
+from app.models.novel import ChapterVersion, NovelVersion, RewriteRequest
 
 
 def _seed_chapters(novel_public_id: str, count: int = 3):
@@ -9,10 +9,16 @@ def _seed_chapters(novel_public_id: str, count: int = 3):
     try:
         novel = resolve_novel(db, novel_public_id)
         assert novel is not None
+        version = db.execute(
+            select(NovelVersion)
+            .where(NovelVersion.novel_id == novel.id, NovelVersion.is_default == 1)
+            .limit(1)
+        ).scalar_one_or_none()
+        assert version is not None
         for i in range(1, count + 1):
             db.add(
-                Chapter(
-                    novel_id=novel.id,
+                ChapterVersion(
+                    novel_version_id=version.id,
                     chapter_num=i,
                     title=f"第{i}章",
                     content=f"这是第{i}章内容。主角受伤。",
@@ -80,6 +86,10 @@ def test_create_rewrite_request_and_rewrite_from(client):
 
     status = client.get(f"/api/novels/{novel_id}/rewrite-requests/{body['id']}/status")
     assert status.status_code == 200
+    status_body = status.json()
+    assert "error_code" in status_body
+    assert "error_category" in status_body
+    assert "retryable" in status_body
 
 
 def test_rewrite_annotation_selected_text_validation(client):

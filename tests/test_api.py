@@ -3,6 +3,7 @@ import io
 import zipfile
 import pytest
 from unittest.mock import patch
+from sqlalchemy import select
 
 from app.core.database import SessionLocal, resolve_novel
 from app.models.novel import ChapterVersion, GenerationCheckpoint, NovelVersion, QualityReport
@@ -59,7 +60,20 @@ def test_novels_crud(client):
 def test_export_empty_returns_409(client):
     r = client.post("/api/novels", json={"title": "Export Test", "target_language": "zh"})
     novel_id = r.json()["id"]
-    r = client.get(f"/api/novels/{novel_id}/export?format=txt")
+    db = SessionLocal()
+    try:
+        novel = resolve_novel(db, novel_id)
+        assert novel is not None
+        default_version = db.execute(
+            select(NovelVersion).where(
+                NovelVersion.novel_id == novel.id,
+                NovelVersion.is_default == 1,
+            )
+        ).scalar_one()
+        version_id = int(default_version.id)
+    finally:
+        db.close()
+    r = client.get(f"/api/novels/{novel_id}/export?format=txt&version_id={version_id}")
     assert r.status_code == 409
     assert "No chapters" in r.text
     client.delete(f"/api/novels/{novel_id}")
@@ -74,9 +88,13 @@ def test_export_uses_selected_version_content(client):
     try:
         novel = resolve_novel(db, novel_id)
         assert novel is not None
-        v1 = NovelVersion(novel_id=novel.id, version_no=1, status="completed", is_default=1)
+        v1 = db.execute(
+            select(NovelVersion).where(
+                NovelVersion.novel_id == novel.id,
+                NovelVersion.is_default == 1,
+            )
+        ).scalar_one()
         v2 = NovelVersion(novel_id=novel.id, version_no=2, status="completed", is_default=0)
-        db.add(v1)
         db.add(v2)
         db.flush()
         db.add(
@@ -145,28 +163,57 @@ def test_generation_status_extended_fields(client):
     assert "current_subtask" in body
     assert "decision_state" in body
     assert body.get("task_id") == task_id
+    assert "error_code" in body
+    assert "error_category" in body
+    assert "retryable" in body
+
+
+def test_version_scoped_endpoints_require_version_id(client):
+    r = client.post("/api/novels", json={"title": "Version Scope", "target_language": "zh"})
+    assert r.status_code == 200
+    novel_id = r.json()["id"]
+
+    chapters = client.get(f"/api/novels/{novel_id}/chapters")
+    assert chapters.status_code == 400
+    assert chapters.json()["detail"]["error_code"] == "missing_version_id"
+
+    progress = client.get(f"/api/novels/{novel_id}/chapter-progress")
+    assert progress.status_code == 400
+    assert progress.json()["detail"]["error_code"] == "missing_version_id"
+
+    export = client.get(f"/api/novels/{novel_id}/export?format=txt")
+    assert export.status_code == 400
+    assert export.json()["detail"]["error_code"] == "missing_version_id"
+
+    summary = client.get(f"/api/novels/{novel_id}/volumes/summary")
+    assert summary.status_code == 400
+    assert summary.json()["detail"]["error_code"] == "missing_version_id"
+
+    observability = client.get(f"/api/novels/{novel_id}/observability")
+    assert observability.status_code == 400
+    assert observability.json()["detail"]["error_code"] == "missing_version_id"
 
 
 def test_chapter_response_contains_word_count(client):
     r = client.post("/api/novels", json={"title": "Word Count Test", "target_language": "zh"})
     assert r.status_code == 200
     novel_id = r.json()["id"]
+    version_id: int | None = None
 
     db = SessionLocal()
     try:
         novel = resolve_novel(db, novel_id)
         assert novel is not None
-        version = NovelVersion(
-            novel_id=novel.id,
-            version_no=1,
-            status="completed",
-            is_default=1,
-        )
-        db.add(version)
-        db.flush()
+        version = db.execute(
+            select(NovelVersion).where(
+                NovelVersion.novel_id == novel.id,
+                NovelVersion.is_default == 1,
+            )
+        ).scalar_one()
+        version_id = int(version.id)
         db.add(
             ChapterVersion(
-                novel_version_id=version.id,
+                novel_version_id=version_id,
                 chapter_num=1,
                 title="第1章 测试",
                 content="测试 文本 123",
@@ -177,11 +224,13 @@ def test_chapter_response_contains_word_count(client):
     finally:
         db.close()
 
-    res = client.get(f"/api/novels/{novel_id}/chapters")
+    assert version_id is not None
+    res = client.get(f"/api/novels/{novel_id}/chapters?version_id={version_id}")
     assert res.status_code == 200
     payload = res.json()
     assert payload
     assert payload[0]["word_count"] == 7
+    assert payload[0]["version_id"] == version_id
 
 
 def test_longform_quality_and_checkpoints_endpoints(client):
@@ -196,7 +245,21 @@ def test_longform_quality_and_checkpoints_endpoints(client):
     assert cp.status_code == 200
     assert isinstance(cp.json(), list)
 
-    vs = client.get(f"/api/novels/{novel_id}/volumes/summary")
+    db = SessionLocal()
+    try:
+        novel = resolve_novel(db, novel_id)
+        assert novel is not None
+        version = db.execute(
+            select(NovelVersion).where(
+                NovelVersion.novel_id == novel.id,
+                NovelVersion.is_default == 1,
+            )
+        ).scalar_one()
+        version_id = int(version.id)
+    finally:
+        db.close()
+
+    vs = client.get(f"/api/novels/{novel_id}/volumes/summary?version_id={version_id}")
     assert vs.status_code == 200
     assert isinstance(vs.json(), list)
 
@@ -260,9 +323,9 @@ def test_feedback_endpoints(client):
     assert body["volume_no"] == 1
     assert body["tags"]
 
-    l = client.get(f"/api/novels/{novel_id}/feedback")
-    assert l.status_code == 200
-    arr = l.json()
+    list_resp = client.get(f"/api/novels/{novel_id}/feedback")
+    assert list_resp.status_code == 200
+    arr = list_resp.json()
     assert isinstance(arr, list)
     assert len(arr) >= 1
 
@@ -270,7 +333,20 @@ def test_feedback_endpoints(client):
 def test_observability_endpoint(client):
     r = client.post("/api/novels", json={"title": "Observability API Test", "target_language": "zh"})
     novel_id = r.json()["id"]
-    obs = client.get(f"/api/novels/{novel_id}/observability")
+    db = SessionLocal()
+    try:
+        novel = resolve_novel(db, novel_id)
+        assert novel is not None
+        version = db.execute(
+            select(NovelVersion).where(
+                NovelVersion.novel_id == novel.id,
+                NovelVersion.is_default == 1,
+            )
+        ).scalar_one()
+        version_id = int(version.id)
+    finally:
+        db.close()
+    obs = client.get(f"/api/novels/{novel_id}/observability?version_id={version_id}")
     assert obs.status_code == 200
     data = obs.json()
     assert "summary" in data

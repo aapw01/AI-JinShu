@@ -350,6 +350,9 @@ _RUNTIME_KEYS_IN_ORDER = [
     "quota_free_monthly_token_limit",
     "quota_admin_monthly_chapter_limit",
     "quota_admin_monthly_token_limit",
+    "llm_output_max_schema_retries",
+    "llm_output_max_provider_fallbacks",
+    "llm_output_min_chars",
 ]
 
 

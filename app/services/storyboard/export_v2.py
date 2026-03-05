@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.models.storyboard import StoryboardCharacterCard, StoryboardExport, StoryboardShot, StoryboardVersion
+from app.models.storyboard import StoryboardCharacterCard, StoryboardShot, StoryboardVersion
 from app.services.storyboard.exporter import export_shots_to_csv
 
 
@@ -70,7 +70,7 @@ def _minimal_pdf_bytes(lines: list[str]) -> bytes:
 
 def _render_pdf_bytes(payload: dict[str, Any]) -> bytes:
     lines = [
-        f"Storyboard Version Report",
+        "Storyboard Version Report",
         f"Project #{payload.get('storyboard_project_id')}",
         f"Version #{payload.get('version_no')} ({payload.get('lane')})",
         f"Shots: {len(payload.get('shots') or [])}",

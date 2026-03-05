@@ -1,22 +1,23 @@
 """Celery task for chapter rewrite workflow."""
 from __future__ import annotations
 
+import json
 import logging
 
 from sqlalchemy import select
 
 from app.core.database import SessionLocal
-from app.core.llm import get_llm_with_fallback, response_to_text
+from app.core.llm_contract import invoke_chapter_body_structured
+from app.core.llm_contract import get_last_prompt_meta
 from app.core.llm_usage import begin_usage_session, end_usage_session, snapshot_usage
 from app.core.logging_config import bind_log_context, log_event
 from app.core.strategy import get_model_for_stage
 from app.models.novel import ChapterVersion, Novel, NovelVersion, RewriteRequest
 from app.prompts import render_prompt
 from app.services.generation.common import (
-    detect_chapter_content_contamination,
-    extract_chapter_body_from_response,
     resolve_chapter_title,
 )
+from app.services.generation.contracts import OutputContractError
 from app.services.rewrite.service import group_annotations_by_chapter
 from app.services.scheduler.scheduler_service import (
     heartbeat_task as heartbeat_creation_task,
@@ -25,6 +26,7 @@ from app.services.scheduler.scheduler_service import (
     mark_task_running as mark_creation_task_running,
     update_task_progress as update_creation_task_progress,
 )
+from app.services.system_settings.runtime import get_effective_runtime_setting
 from app.services.task_runtime.checkpoint_repo import (
     get_last_completed_unit,
     mark_unit_completed,
@@ -35,6 +37,16 @@ from app.services.task_runtime.lease_service import background_heartbeat
 from app.workers.celery_app import app
 
 logger = logging.getLogger(__name__)
+
+
+def _error_meta_from_exc(exc: Exception) -> tuple[str, str, bool]:
+    if isinstance(exc, OutputContractError):
+        if exc.code == "MODEL_OUTPUT_POLICY_VIOLATION":
+            return exc.code, "policy", bool(exc.retryable)
+        if exc.code in {"MODEL_OUTPUT_PARSE_FAILED", "MODEL_OUTPUT_SCHEMA_INVALID", "MODEL_OUTPUT_CONTRACT_EXHAUSTED"}:
+            return exc.code, "transient", bool(exc.retryable)
+        return exc.code, "transient", bool(exc.retryable)
+    return "REWRITE_TASK_FAILED", "transient", True
 
 
 def _get_creation_task_state(task_db_id: int) -> str | None:
@@ -188,30 +200,45 @@ def _rewrite_prompt(
     previous_context: str,
     annotations: list[dict],
     target_language: str,
-) -> str:
-    ann_lines = []
-    for idx, ann in enumerate(annotations, start=1):
+) -> tuple[str, str]:
+    template = "rewrite_chapter_from_annotations"
+    ann_rows: list[dict[str, object]] = []
+    ann_lines: list[str] = []
+    for ann in annotations:
         snippet = (ann.get("selected_text") or "").strip()
         if len(snippet) > 80:
             snippet = snippet[:80] + "..."
+        ann_rows.append(
+            {
+                "chapter_num": int(ann.get("chapter_num") or chapter_num),
+                "start_offset": ann.get("start_offset"),
+                "end_offset": ann.get("end_offset"),
+                "selected_text": str(ann.get("selected_text") or ""),
+                "issue_type": str(ann.get("issue_type") or "other"),
+                "priority": str(ann.get("priority") or "should"),
+                "instruction": str(ann.get("instruction") or ""),
+            }
+        )
         ann_lines.append(
-            f"{idx}. [优先级:{ann.get('priority','should')}] [类型:{ann.get('issue_type','other')}] "
+            f"[优先级:{ann.get('priority','should')}] [类型:{ann.get('issue_type','other')}] "
             f"片段:{snippet or '未选中片段'} 指令:{ann.get('instruction','')}"
         )
-
-    ann_text = "\n".join(ann_lines) if ann_lines else "无"
     context_block = previous_context or "无"
+    annotations_json = json.dumps(ann_rows, ensure_ascii=False, indent=2)
+    ann_text = "\n".join(ann_lines) if ann_lines else "无"
 
-    return render_prompt(
-        "rewrite_chapter_from_annotations",
+    prompt_text = render_prompt(
+        template,
         novel_title=novel_title,
         chapter_num=chapter_num,
         base_title=(base_title or ""),
         target_language=target_language,
         context_block=context_block,
+        annotations_json=annotations_json,
         ann_text=ann_text,
         base_content=base_content,
     )
+    return prompt_text, template
 
 
 def _collect_previous_context(db, target_version_id: int, chapter_num: int) -> str:
@@ -247,7 +274,6 @@ def submit_rewrite_task(
     creation_task_id: int | None = None,
 ):
     begin_usage_session(f"rewrite:{self.request.id}")
-    from app.services.system_settings.runtime import get_effective_runtime_setting
     hb_interval = max(5, int(get_effective_runtime_setting("creation_worker_heartbeat_seconds", int, 30) or 30))
     hb_ctx = background_heartbeat(creation_task_id, heartbeat_fn=_heartbeat_creation, interval_seconds=hb_interval)
     hb_ctx.__enter__()
@@ -302,7 +328,6 @@ def submit_rewrite_task(
 
         strategy = novel.strategy or "web-novel"
         provider, model = get_model_for_stage(strategy, "writer")
-        llm = get_llm_with_fallback(provider, model)
         annotations_by_chapter = group_annotations_by_chapter(db, rewrite_request_id)
 
         total = max(1, rewrite_to - rewrite_from + 1)
@@ -348,7 +373,7 @@ def submit_rewrite_task(
                 for x in ann_rows
             ]
             prev_context = _collect_previous_context(db, target_version_id, chapter_num)
-            prompt = _rewrite_prompt(
+            prompt, prompt_template = _rewrite_prompt(
                 novel_title=novel.title,
                 chapter_num=chapter_num,
                 base_title=base_chapter.title,
@@ -358,7 +383,28 @@ def submit_rewrite_task(
                 target_language=novel.target_language or "zh",
             )
             try:
-                rewritten = extract_chapter_body_from_response(response_to_text(llm.invoke(prompt)))
+                rewritten = invoke_chapter_body_structured(
+                    prompt=prompt,
+                    stage="rewrite",
+                    chapter_num=chapter_num,
+                    provider=provider,
+                    model=model,
+                    prompt_template=prompt_template,
+                    prompt_version="v2",
+                )
+            except OutputContractError as e:
+                log_event(
+                    logger,
+                    "rewrite.chapter.contract_error",
+                    level=logging.ERROR,
+                    task_id=self.request.id,
+                    novel_id=novel_id,
+                    chapter_num=chapter_num,
+                    error_code=e.code,
+                    error_category="policy" if e.code == "MODEL_OUTPUT_POLICY_VIOLATION" else "transient",
+                    error_class=type(e).__name__,
+                )
+                raise
             except Exception as e:
                 log_event(
                     logger,
@@ -374,31 +420,6 @@ def submit_rewrite_task(
 
             if not rewritten:
                 rewritten = (base_chapter.content or "").strip()
-            contamination = detect_chapter_content_contamination(rewritten, chapter_num=chapter_num)
-            if contamination.get("contaminated"):
-                logger.warning(
-                    "chapter.content.contaminated source=rewrite chapter=%s reasons=%s evidence=%s",
-                    chapter_num,
-                    contamination.get("reasons"),
-                    contamination.get("evidence"),
-                )
-                retry_prompt = (
-                    f"{prompt}\n\n"
-                    "【系统纠偏】你上次输出包含说明性前言或标题污染。"
-                    "现在必须仅输出章节正文，不要任何解释/总结/标题/Markdown，"
-                    "禁止出现“以下是根据反馈”“重点解决如下问题”等语句。"
-                )
-                try:
-                    rewritten_retry = extract_chapter_body_from_response(response_to_text(llm.invoke(retry_prompt)))
-                except Exception as e:
-                    raise RuntimeError(f"重写第{chapter_num}章纠偏重试失败: {type(e).__name__}: {e}") from e
-                if rewritten_retry:
-                    rewritten = rewritten_retry
-                contamination_retry = detect_chapter_content_contamination(rewritten, chapter_num=chapter_num)
-                if contamination_retry.get("contaminated"):
-                    raise RuntimeError(
-                        f"重写第{chapter_num}章输出污染未消除: reasons={contamination_retry.get('reasons')}"
-                    )
             chapter_title = resolve_chapter_title(
                 chapter_num=chapter_num,
                 title=base_chapter.title,
@@ -481,6 +502,7 @@ def submit_rewrite_task(
         )
         if creation_task_id is not None:
             usage = snapshot_usage()
+            prompt_meta = get_last_prompt_meta() or {}
             _finalize_creation(
                 creation_task_id,
                 final_status="completed",
@@ -493,6 +515,9 @@ def submit_rewrite_task(
                     "estimated_cost": float(usage.get("estimated_cost") or 0.0),
                     "usage_calls": int(usage.get("calls") or 0),
                     "usage_stages": usage.get("stages") or {},
+                    "prompt_version": str(prompt_meta.get("prompt_version") or "v2"),
+                    "prompt_hash": prompt_meta.get("prompt_hash"),
+                    "prompt_template": prompt_meta.get("prompt_template"),
                 },
             )
     except Exception as exc:
@@ -505,6 +530,7 @@ def submit_rewrite_task(
             db.rollback()
             is_paused = err_text == "rewrite_paused"
             is_cancelled = err_text == "rewrite_cancelled"
+            error_code, error_category, retryable = _error_meta_from_exc(exc)
             log_event(
                 logger,
                 "rewrite.failed" if not (is_paused or is_cancelled) else "rewrite.stopped",
@@ -513,8 +539,9 @@ def submit_rewrite_task(
                 novel_id=novel_id,
                 run_state="failed" if not (is_paused or is_cancelled) else ("paused" if is_paused else "cancelled"),
                 error_class=type(exc).__name__,
-                error_code=None if (is_paused or is_cancelled) else "REWRITE_TASK_FAILED",
-                error_category=None if (is_paused or is_cancelled) else "transient",
+                error_code=None if (is_paused or is_cancelled) else error_code,
+                error_category=None if (is_paused or is_cancelled) else error_category,
+                retryable=retryable if not (is_paused or is_cancelled) else None,
             )
             req = db.execute(select(RewriteRequest).where(RewriteRequest.id == rewrite_request_id)).scalar_one_or_none()
             if req:
@@ -541,14 +568,15 @@ def submit_rewrite_task(
                     logger.warning("Failed to update rewrite resume_cursor on failure", exc_info=True)
                 try:
                     usage = snapshot_usage()
+                    prompt_meta = get_last_prompt_meta() or {}
                     _finalize_creation(
                         creation_task_id,
                         final_status="paused" if is_paused else ("cancelled" if is_cancelled else "failed"),
                         progress=float(req.progress if req else 0.0),
                         message=str(req.message if req else "任务结束"),
                         phase="paused" if is_paused else ("cancelled" if is_cancelled else "failed"),
-                        error_code=None if (is_paused or is_cancelled) else "REWRITE_TASK_FAILED",
-                        error_category=None if (is_paused or is_cancelled) else "transient",
+                        error_code=None if (is_paused or is_cancelled) else error_code,
+                        error_category=None if (is_paused or is_cancelled) else error_category,
                         error_detail=None if (is_paused or is_cancelled) else str(exc),
                         result_json={
                             "token_usage_input": int(usage.get("input_tokens") or 0),
@@ -556,6 +584,9 @@ def submit_rewrite_task(
                             "estimated_cost": float(usage.get("estimated_cost") or 0.0),
                             "usage_calls": int(usage.get("calls") or 0),
                             "usage_stages": usage.get("stages") or {},
+                            "prompt_version": str(prompt_meta.get("prompt_version") or "v2"),
+                            "prompt_hash": prompt_meta.get("prompt_hash"),
+                            "prompt_template": prompt_meta.get("prompt_template"),
                         },
                     )
                 except Exception:

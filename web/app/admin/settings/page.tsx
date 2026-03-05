@@ -29,7 +29,16 @@ const ADAPTER_OPTIONS: Array<{ value: AdminAdapterType; label: string }> = [
   { value: "gemini", label: "Gemini" },
 ];
 
-const RUNTIME_FIELDS: Array<{ key: string; label: string; kind: "bool" | "int"; description: string }> = [
+type RuntimeFieldKind = "bool" | "int" | "enum";
+type RuntimeField = {
+  key: string;
+  label: string;
+  kind: RuntimeFieldKind;
+  description: string;
+  options?: Array<{ value: string; label: string }>;
+};
+
+const RUNTIME_FIELDS: RuntimeField[] = [
   {
     key: "creation_scheduler_enabled",
     label: "启用任务调度",
@@ -89,6 +98,24 @@ const RUNTIME_FIELDS: Array<{ key: string; label: string; kind: "bool" | "int"; 
     label: "管理员月 Token 限额",
     kind: "int",
     description: "管理员账号每月最多可消耗 Token 总量。",
+  },
+  {
+    key: "llm_output_max_schema_retries",
+    label: "结构化解析重试次数",
+    kind: "int",
+    description: "单个 Provider 单种方法下，结构化校验失败后的重试次数。",
+  },
+  {
+    key: "llm_output_max_provider_fallbacks",
+    label: "Provider 最大回退次数",
+    kind: "int",
+    description: "默认 Provider 失败后，最多尝试额外 Provider 的数量。",
+  },
+  {
+    key: "llm_output_min_chars",
+    label: "正文最小字符数",
+    kind: "int",
+    description: "章节正文最小长度门槛，低于该值视为契约失败。",
   },
 ];
 
@@ -274,6 +301,9 @@ export default function AdminSettingsPage() {
             const normalized = Number(value);
             updates[field.key] = Number.isFinite(normalized) ? normalized : null;
           }
+        } else if (field.kind === "enum") {
+          const normalized = String(value ?? "").trim();
+          updates[field.key] = normalized.length > 0 ? normalized : null;
         } else {
           updates[field.key] = Boolean(value);
         }
@@ -699,6 +729,13 @@ export default function AdminSettingsPage() {
                       />
                       启用
                     </label>
+                  ) : field.kind === "enum" ? (
+                    <Select
+                      value={String(currentValue ?? field.options?.[0]?.value ?? "")}
+                      onValueChange={(v) => setRuntimeDraft((prev) => ({ ...prev, [field.key]: v }))}
+                      className="h-9 px-3 py-2 text-sm"
+                      options={field.options || []}
+                    />
                   ) : (
                     <input
                       type="number"

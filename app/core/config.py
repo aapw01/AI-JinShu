@@ -11,6 +11,9 @@ class Settings(BaseSettings):
     default_llm_provider: str = "openai"
     default_llm_model: str = "gpt-4o-mini"
     default_embedding_model: str = "text-embedding-3-small"
+    llm_output_max_schema_retries: int = 2
+    llm_output_max_provider_fallbacks: int = 2
+    llm_output_min_chars: int = 120
     llm_base_url: str | None = None
     llm_api_key: str | None = None
     # Backward-compatible provider-specific fields.

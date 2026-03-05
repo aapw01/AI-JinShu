@@ -148,6 +148,21 @@ Client -> FastAPI Route -> Celery delay() -> Redis Broker -> Celery Worker
 - 优先使用模型真实 usage（`usage_metadata` / `response_metadata.token_usage`），缺失时回退估算。
 - generation/rewrite/storyboard 的累计结果统一回填到 `creation_tasks.result_json`。
 
+## 6.2 LLM 输出契约模式（Generation/Rewrite）
+
+- 正文生成链路固定为 strict 结构化协议（JSON `chapter_body`），不再支持 legacy/hybrid 执行分支。
+- 优先级：系统设置（DB） > `.env`。
+- 运行时配置项：
+  - `llm_output_max_schema_retries`
+  - `llm_output_max_provider_fallbacks`
+  - `llm_output_min_chars`
+- 失败错误码统一收敛为：
+  - `MODEL_OUTPUT_PARSE_FAILED`
+  - `MODEL_OUTPUT_SCHEMA_INVALID`
+  - `MODEL_OUTPUT_POLICY_VIOLATION`
+  - `MODEL_OUTPUT_CONTRACT_EXHAUSTED`
+- 调用日志会按模板维度输出：`stage/prompt_template/prompt_version/prompt_hash`。
+
 ## 7. 运行与运维
 
 本地依赖：

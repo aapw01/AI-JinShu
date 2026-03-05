@@ -5,7 +5,7 @@ from sqlalchemy import select, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.models.novel import Chapter, ChapterVersion, NovelVersion, RewriteAnnotation, RewriteRequest
+from app.models.novel import ChapterVersion, NovelVersion, RewriteAnnotation, RewriteRequest
 
 
 ALLOWED_ISSUE_TYPES = {"bug", "continuity", "style", "pace", "other"}
@@ -13,14 +13,13 @@ ALLOWED_PRIORITY = {"must", "should", "nice"}
 
 
 def ensure_default_version(db: Session, novel_id: int) -> NovelVersion:
-    """Ensure novel has at least one default version. Bootstraps from chapters table once."""
+    """Ensure novel has at least one default version in version table."""
     existing = db.execute(
         select(NovelVersion)
         .where(NovelVersion.novel_id == novel_id, NovelVersion.is_default == 1)
         .order_by(NovelVersion.version_no.desc())
     ).scalar_one_or_none()
     if existing:
-        _sync_from_chapters_if_needed(db, novel_id, existing)
         return existing
 
     latest = db.execute(
@@ -30,68 +29,13 @@ def ensure_default_version(db: Session, novel_id: int) -> NovelVersion:
     ).scalar_one_or_none()
     if latest:
         latest.is_default = 1
-        _sync_from_chapters_if_needed(db, novel_id, latest)
         db.flush()
         return latest
 
-    version = NovelVersion(novel_id=novel_id, version_no=1, status="completed", is_default=1)
+    version = NovelVersion(novel_id=novel_id, version_no=1, status="draft", is_default=1)
     db.add(version)
     db.flush()
-
-    chapters = db.execute(
-        select(Chapter)
-        .where(Chapter.novel_id == novel_id)
-        .order_by(Chapter.chapter_num.asc())
-    ).scalars().all()
-    for chapter in chapters:
-        db.add(
-            ChapterVersion(
-                novel_version_id=version.id,
-                chapter_num=chapter.chapter_num,
-                title=chapter.title,
-                content=chapter.content,
-                summary=chapter.summary,
-                status=chapter.status or "completed",
-                review_score=chapter.review_score,
-                language_quality_score=chapter.language_quality_score,
-                language_quality_report=chapter.language_quality_report,
-                metadata_=chapter.metadata_ or {},
-            )
-        )
-    db.flush()
-    _sync_from_chapters_if_needed(db, novel_id, version)
     return version
-
-
-def _sync_from_chapters_if_needed(db: Session, novel_id: int, version: NovelVersion) -> None:
-    existing_nums = {
-        row[0]
-        for row in db.execute(
-            select(ChapterVersion.chapter_num).where(ChapterVersion.novel_version_id == version.id)
-        ).all()
-    }
-    chapters = db.execute(
-        select(Chapter)
-        .where(Chapter.novel_id == novel_id)
-        .order_by(Chapter.chapter_num.asc())
-    ).scalars().all()
-    for chapter in chapters:
-        if chapter.chapter_num in existing_nums:
-            continue
-        db.add(
-            ChapterVersion(
-                novel_version_id=version.id,
-                chapter_num=chapter.chapter_num,
-                title=chapter.title,
-                content=chapter.content,
-                summary=chapter.summary,
-                status=chapter.status or "completed",
-                review_score=chapter.review_score,
-                language_quality_score=chapter.language_quality_score,
-                language_quality_report=chapter.language_quality_report,
-                metadata_=chapter.metadata_ or {},
-            )
-        )
 
 
 def list_versions(db: Session, novel_id: int) -> list[NovelVersion]:

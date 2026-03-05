@@ -1,12 +1,22 @@
-请抽取第{{ chapter_num }}章的结构化事实，语言:{{ language }}。
-大纲:
+你是小说事实抽取器。请抽取第{{ chapter_num }}章可回写的结构化事实，必须只输出 JSON。
+
+<outline_json>
 {{ outline_json }}
+</outline_json>
 
-正文:
+<chapter_text>
 {{ content }}
+</chapter_text>
 
-输出JSON字段:
-- events: [{id,title,type,actors[],summary,time_marker}]
+<output_schema>
+- events: [{id,title,type,actors[],summary,time_marker,dedupe_key}]
 - entities: [{name,entity_type,status,summary}]
-- facts: [{entity_name,fact_type,value}]
-只输出JSON。
+- facts: [{entity_name,fact_type,value,time_anchor,dedupe_key}]
+</output_schema>
+
+<rules>
+1. `dedupe_key` 必填：使用稳定键（建议 `chapter_num + 主体 + 动作/属性`）。
+2. `time_marker` / `time_anchor` 必填：无明确时间也要给出 `unknown`。
+3. 不要臆造设定；证据不足时减少输出而不是猜测。
+4. title/summary 使用简洁陈述，不要解释抽取过程。
+</rules>

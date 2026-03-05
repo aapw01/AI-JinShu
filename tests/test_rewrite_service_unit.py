@@ -2,43 +2,49 @@ import pytest
 from sqlalchemy import select
 
 from app.core.database import SessionLocal
-from app.models.novel import Chapter, ChapterVersion, Novel, NovelVersion, RewriteRequest, RewriteAnnotation
+from app.models.novel import ChapterVersion, Novel, NovelVersion, RewriteAnnotation, RewriteRequest
 from app.services.rewrite import service
 
 
-def _seed_novel_with_chapters(title: str = "rewrite-unit") -> tuple[int, list[int]]:
+def _seed_novel_with_chapters(title: str = "rewrite-unit") -> tuple[int, int]:
     db = SessionLocal()
     try:
         novel = Novel(title=title, target_language="zh")
         db.add(novel)
-        db.commit()
-        db.refresh(novel)
-        chapter_ids: list[int] = []
+        db.flush()
+        version = NovelVersion(novel_id=novel.id, version_no=1, status="completed", is_default=1)
+        db.add(version)
+        db.flush()
         for idx in range(1, 4):
-            c = Chapter(novel_id=novel.id, chapter_num=idx, title=f"第{idx}章 标题", content=f"正文{idx}", status="completed")
+            c = ChapterVersion(
+                novel_version_id=version.id,
+                chapter_num=idx,
+                title=f"第{idx}章 标题",
+                content=f"正文{idx}",
+                status="completed",
+            )
             db.add(c)
-            db.flush()
-            chapter_ids.append(c.id)
         db.commit()
-        return novel.id, chapter_ids
+        return novel.id, version.id
     finally:
         db.close()
 
 
 def test_ensure_default_version_bootstrap_and_sync():
-    novel_id, _ = _seed_novel_with_chapters("rewrite-bootstrap")
+    novel_id, version_id = _seed_novel_with_chapters("rewrite-bootstrap")
     db = SessionLocal()
     try:
         version = service.ensure_default_version(db, novel_id)
         db.commit()
+        assert version.id == version_id
         assert version.is_default == 1
         chapters = db.execute(
             select(ChapterVersion).where(ChapterVersion.novel_version_id == version.id).order_by(ChapterVersion.chapter_num.asc())
         ).scalars().all()
         assert len(chapters) == 3
 
-        # Add new chapter and ensure sync appends it.
-        db.add(Chapter(novel_id=novel_id, chapter_num=4, title="第4章", content="正文4", status="completed"))
+        # Add new chapter directly in version table and ensure read path is stable.
+        db.add(ChapterVersion(novel_version_id=version.id, chapter_num=4, title="第4章", content="正文4", status="completed"))
         db.commit()
         version2 = service.ensure_default_version(db, novel_id)
         db.commit()

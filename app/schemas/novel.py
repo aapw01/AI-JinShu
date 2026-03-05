@@ -71,6 +71,7 @@ class ChapterResponse(BaseModel):
 
     id: int
     novel_id: str
+    version_id: int
     chapter_num: int
     title: str | None
     content: str | None
@@ -127,6 +128,9 @@ class GenerationStatusResponse(BaseModel):
     eta_label: str | None = None
     message: str | None = None
     error: str | None = None
+    error_code: str | None = None
+    error_category: str | None = None
+    retryable: bool | None = None
     last_error: dict | None = None
 
 
@@ -172,6 +176,9 @@ class RewriteRequestResponse(BaseModel):
     eta_label: str | None = None
     message: str | None = None
     error: str | None = None
+    error_code: str | None = None
+    error_category: str | None = None
+    retryable: bool | None = None
     created_at: str
     updated_at: str | None = None
 
