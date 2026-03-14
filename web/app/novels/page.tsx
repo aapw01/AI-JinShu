@@ -14,7 +14,7 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { Spinner } from "@/components/ui/Spinner";
 import { formatNovelStatus } from "@/lib/display";
 
-type FilterStatus = "all" | "draft" | "generating" | "completed" | "failed";
+type FilterStatus = "all" | "draft" | "generating" | "completed" | "failed" | "cancelled";
 
 type AdminUserOption = {
   value: string;
@@ -25,6 +25,7 @@ const STATUS_MAP: Record<string, { label: string; variant: "default" | "success"
   draft: { label: "草稿", variant: "default" },
   generating: { label: "生成中", variant: "warning" },
   completed: { label: "已完成", variant: "success" },
+  cancelled: { label: "已取消", variant: "info" },
   failed: { label: "失败", variant: "error" },
 };
 
@@ -235,7 +236,7 @@ export default function NovelsPage() {
             <div className="shrink-0 px-2 text-[#7E756D]">
               <Filter className="w-4 h-4" />
             </div>
-            {(["all", "draft", "generating", "completed", "failed"] as FilterStatus[]).map((status) => (
+            {(["all", "draft", "generating", "completed", "failed", "cancelled"] as FilterStatus[]).map((status) => (
               <button
                 key={status}
                 onClick={() => setFilter(status)}

@@ -3,18 +3,17 @@ name: Literary Strategy
 description: Literary writing strategy focused on depth, consistency, and style.
 stages:
   architect:
-    provider: openai
+    provider: __default__
     model: __default__
   outliner:
-    provider: openai
+    provider: __default__
     model: __default__
   writer:
-    provider: openai
+    provider: __default__
     model: __default__
   reviewer:
-    provider: openai
+    provider: __default__
     model: __default__
   finalizer:
-    provider: openai
+    provider: __default__
     model: __default__
-

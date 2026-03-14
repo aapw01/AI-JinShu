@@ -8,20 +8,9 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.core.database import Base
-from app.models.novel import (
-    Novel,
-    Chapter,
-    NovelPreset,
-    ChapterSummary,
-    KnowledgeChunk,
-    StoryEntity,
-    StoryFact,
-    StoryEvent,
-    StoryForeshadow,
-    StorySnapshot,
-    GenerationCheckpoint,
-    QualityReport,
-)
+import app.models.novel  # noqa: F401 – register all novel/auth/system models
+import app.models.creation_task  # noqa: F401 – register creation task models
+import app.models.storyboard  # noqa: F401 – register storyboard models
 from app.core.config import get_settings
 
 config = context.config

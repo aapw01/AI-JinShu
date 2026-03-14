@@ -505,7 +505,7 @@ def refresh_run_status(db: Session, *, run_id: int) -> StoryboardRun | None:
         run.finished_at = run.finished_at or _utc_now()
         project = get_project_or_404(db, run.storyboard_project_id)
         if project:
-            project.status = "failed"
+            project.status = "cancelled"
     elif statuses.intersection({"paused"}) and not statuses.intersection({"running", "submitted", "queued", "dispatching", "retrying"}):
         run.status = "paused"
         run.run_state = "paused"
@@ -537,6 +537,8 @@ def run_action(
     action: str,
     actor_user_uuid: str,
 ) -> StoryboardRun:
+    if run.run_state in {"completed", "failed", "cancelled"} and action != "cancel":
+        raise ValueError("run_already_terminal")
     lanes = list_run_lanes(db, run_id=run.id)
     if action == "pause":
         if run.run_state == "paused":
@@ -561,6 +563,7 @@ def run_action(
         run.current_phase = "paused"
         run.message = "分镜运行已暂停"
     elif action == "resume":
+        resumed_count = 0
         for row in lanes:
             if not row.creation_task_public_id:
                 continue
@@ -568,18 +571,21 @@ def run_action(
                 resume_creation_task(db, public_id=row.creation_task_public_id, user_uuid=actor_user_uuid)
             except Exception:
                 continue
+            resumed_count += 1
             update_run_lane_state(
                 db,
                 run_lane_id=row.id,
-                status="running",
-                run_state="running",
-                current_phase="resume",
-                message=f"{_lane_label(row.lane)}已恢复",
+                status="queued",
+                run_state="queued",
+                current_phase="queued",
+                message=f"{_lane_label(row.lane)}已恢复，等待调度",
             )
+        if resumed_count == 0:
+            raise ValueError("no_lanes_resumed")
         run.status = "running"
-        run.run_state = "running"
-        run.current_phase = "resume"
-        run.message = "分镜运行已恢复"
+        run.run_state = "queued"
+        run.current_phase = "queued"
+        run.message = "分镜运行已恢复，等待调度"
     elif action == "cancel":
         if run.run_state == "cancelled":
             return run
@@ -605,7 +611,7 @@ def run_action(
         run.finished_at = run.finished_at or _utc_now()
         project = get_project_or_404(db, run.storyboard_project_id)
         if project:
-            project.status = "failed"
+            project.status = "cancelled"
     else:
         raise ValueError("unsupported_action")
 

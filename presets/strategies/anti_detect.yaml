@@ -5,8 +5,8 @@ key_metrics:
   paragraph_length: 50-100
   banned_words: strict
 stages:
-  architect: { provider: openai, model: gpt-4o-mini }
-  outliner: { provider: openai, model: gpt-4o-mini }
-  writer: { provider: openai, model: gpt-4o }
-  reviewer: { provider: openai, model: gpt-4o-mini }
-  finalizer: { provider: openai, model: gpt-4o-mini }
+  architect: { provider: __default__, model: __default__ }
+  outliner: { provider: __default__, model: __default__ }
+  writer: { provider: __default__, model: __default__ }
+  reviewer: { provider: __default__, model: __default__ }
+  finalizer: { provider: __default__, model: __default__ }

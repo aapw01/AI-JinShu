@@ -4,8 +4,11 @@ from __future__ import annotations
 import json
 import logging
 import re
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
+import yaml
 from pydantic import BaseModel
 
 from app.core.llm import get_llm_with_fallback, response_to_text
@@ -14,6 +17,26 @@ from app.prompts import render_prompt
 
 logger = logging.getLogger(__name__)
 
+_PRESETS_DIR = Path(__file__).resolve().parents[3] / "presets"
+
+
+@lru_cache(maxsize=1)
+def _load_genre_options() -> list[dict[str, str]]:
+    p = _PRESETS_DIR / "genres.yaml"
+    if not p.exists():
+        return []
+    with open(p, encoding="utf-8") as f:
+        return yaml.safe_load(f) or []
+
+
+@lru_cache(maxsize=1)
+def _load_style_options() -> list[dict[str, str]]:
+    p = _PRESETS_DIR / "styles.yaml"
+    if not p.exists():
+        return []
+    with open(p, encoding="utf-8") as f:
+        return yaml.safe_load(f) or []
+
 
 class IdeaFrameworkSchema(BaseModel):
     one_liner: str
@@ -21,6 +44,8 @@ class IdeaFrameworkSchema(BaseModel):
     conflict: str
     hook: str
     selling_point: str
+    recommended_genre: str | None = None
+    recommended_style: str | None = None
 
 
 def detect_title_language(title: str) -> str:
@@ -40,7 +65,7 @@ def detect_title_language(title: str) -> str:
     return "zh"
 
 
-def _extract_json(text: str) -> dict[str, Any]:
+def _extract_json(text: str) -> dict[str, Any] | str:
     raw = (text or "").strip()
     if raw.startswith("```"):
         lines = raw.splitlines()
@@ -48,11 +73,33 @@ def _extract_json(text: str) -> dict[str, Any]:
         if lines and lines[-1].strip() == "```":
             lines = lines[:-1]
         raw = "\n".join(lines).strip()
-    if not raw.startswith("{"):
-        match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
-        if match:
-            raw = match.group(0)
-    return json.loads(raw)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        if not raw.startswith("{"):
+            match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+            if match:
+                raw = match.group(0)
+        return json.loads(raw)
+
+
+def _coerce_framework_payload(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, IdeaFrameworkSchema):
+        return raw.model_dump()
+    if isinstance(raw, BaseModel):
+        dumped = raw.model_dump()
+        if isinstance(dumped, dict):
+            return dumped
+        raise TypeError("idea framework structured output must dump to a dictionary")
+    if isinstance(raw, dict):
+        return raw
+
+    payload = _extract_json(response_to_text(raw))
+    if isinstance(payload, str):
+        payload = _extract_json(payload)
+    if isinstance(payload, dict):
+        return payload
+    raise TypeError("idea framework response must be a JSON object")
 
 
 def _fallback_framework(title: str) -> dict[str, str]:
@@ -79,6 +126,11 @@ def generate_idea_framework(
         raise ValueError("title is required")
     resolved_language = (language or "").strip() or detect_title_language(clean_title)
 
+    genre_options = _load_genre_options()
+    style_options = _load_style_options()
+    valid_genre_ids = {g["id"] for g in genre_options}
+    valid_style_ids = {s["id"] for s in style_options}
+
     provider, model = get_model_for_stage(strategy or "web-novel", "architect")
     llm = get_llm_with_fallback(provider, model)
     prompt = render_prompt(
@@ -87,12 +139,23 @@ def generate_idea_framework(
         language=resolved_language,
         genre=genre or "",
         style=style or "",
+        genre_options=genre_options,
+        style_options=style_options,
     )
     try:
         resp = llm.invoke(prompt)
-        payload = _extract_json(response_to_text(resp))
+        payload = _coerce_framework_payload(resp)
         parsed = IdeaFrameworkSchema.model_validate(payload)
-        return parsed.model_dump()
+        result = parsed.model_dump()
+        if genre:
+            result["recommended_genre"] = genre
+        elif result.get("recommended_genre") not in valid_genre_ids:
+            result["recommended_genre"] = None
+        if style:
+            result["recommended_style"] = style
+        elif result.get("recommended_style") not in valid_style_ids:
+            result["recommended_style"] = None
+        return result
     except Exception as exc:
         logger.warning("idea framework generation fallback: %s", exc)
         return _fallback_framework(clean_title)

@@ -8,8 +8,8 @@ rules:
 chapters: 3
 max_chars_first_chapter: 4000
 stages:
-  architect: { provider: openai, model: gpt-4o-mini }
-  outliner: { provider: openai, model: gpt-4o }
-  writer: { provider: openai, model: gpt-4o }
-  reviewer: { provider: openai, model: gpt-4o-mini }
-  finalizer: { provider: openai, model: gpt-4o-mini }
+  architect: { provider: __default__, model: __default__ }
+  outliner: { provider: __default__, model: __default__ }
+  writer: { provider: __default__, model: __default__ }
+  reviewer: { provider: __default__, model: __default__ }
+  finalizer: { provider: __default__, model: __default__ }

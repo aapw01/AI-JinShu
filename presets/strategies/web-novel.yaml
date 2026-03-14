@@ -3,18 +3,17 @@ name: Web Novel Strategy
 description: Fast-paced web novel strategy with strong hooks and satisfaction loops.
 stages:
   architect:
-    provider: openai
+    provider: __default__
     model: __default__
   outliner:
-    provider: openai
+    provider: __default__
     model: __default__
   writer:
-    provider: openai
+    provider: __default__
     model: __default__
   reviewer:
-    provider: openai
+    provider: __default__
     model: __default__
   finalizer:
-    provider: openai
+    provider: __default__
     model: __default__
-

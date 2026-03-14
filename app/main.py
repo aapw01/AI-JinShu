@@ -16,6 +16,61 @@ logger = logging.getLogger(__name__)
 
 validate_settings_for_production()
 
+
+def _log_llm_config():
+    """Log the effective LLM configuration at startup for troubleshooting.
+
+    Only reads env-level settings (no DB) so this never fails at startup.
+    """
+    s = get_settings()
+    provider = (s.llm_provider or "openai").strip().lower()
+    model = s.llm_model or "gpt-4o-mini"
+    base_url = (s.llm_base_url or "").rstrip("/") or "(provider default)"
+    api_key = s.llm_api_key or ""
+    masked_key = f"{api_key[:4]}...{api_key[-4:]}" if len(api_key) > 8 else ("(empty)" if not api_key else "****")
+
+    protocol_override = (s.llm_protocol_override or "").strip().lower() or None
+    if protocol_override and protocol_override not in ("openai_compatible", "gemini", "anthropic"):
+        protocol_override = None
+
+    if protocol_override:
+        adapter, adapter_source = protocol_override, "env_override"
+    elif s.llm_base_url:
+        adapter, adapter_source = "openai_compatible", "auto_infer"
+    elif provider == "gemini":
+        adapter, adapter_source = "gemini", "auto_native"
+    elif provider == "anthropic":
+        adapter, adapter_source = "anthropic", "auto_native"
+    else:
+        adapter, adapter_source = "openai_compatible", "auto_native"
+
+    embedding_warning = None
+    if s.embedding_enabled and s.embedding_reuse_primary_connection and adapter != "openai_compatible":
+        embedding_warning = (
+            f"embedding_reuse_primary_connection=true but primary adapter is '{adapter}'; "
+            "embedding will fail at runtime — set EMBEDDING_REUSE_PRIMARY_CONNECTION=false "
+            "or switch adapter to openai_compatible"
+        )
+
+    log_event(
+        logger,
+        "llm.config.startup",
+        provider=provider,
+        model=model,
+        adapter=adapter,
+        adapter_source=adapter_source,
+        protocol_override=protocol_override or "(auto)",
+        base_url=base_url,
+        api_key=masked_key,
+        embedding_enabled=bool(s.embedding_enabled),
+        embedding_model=s.embedding_model or "(not set)",
+        embedding_reuse_primary_connection=bool(s.embedding_reuse_primary_connection),
+        embedding_warning=embedding_warning,
+    )
+
+
+_log_llm_config()
+
 app = FastAPI(title="AI-JinShu API", version="0.1.0")
 
 _settings = get_settings()

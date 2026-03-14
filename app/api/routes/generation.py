@@ -599,7 +599,6 @@ def cancel_generation(
 ):
     """Cancel unified creation task by task_id."""
     from app.core.database import resolve_novel
-    from app.workers.celery_app import app as celery_app
 
     novel = resolve_novel(db, novel_id)
     if not novel:
@@ -608,31 +607,26 @@ def cancel_generation(
     ctask = get_task_by_public_id(db, public_id=task_id, user_uuid=_.user_uuid or "")
     if not ctask:
         raise http_error(404, "task_not_found", "Task not found")
-    if ctask.worker_task_id:
-        try:
-            celery_app.control.revoke(ctask.worker_task_id, terminate=True)
-        except Exception:
-            logger.warning("Failed to revoke worker task %s, proceeding with cancel", ctask.worker_task_id)
-    cancel_task(db, public_id=task_id, user_uuid=_.user_uuid or "")
-    if ctask.resource_id == novel.id:
-        novel.status = "draft"
+    if ctask.status in {"completed", "failed", "cancelled"}:
+        return {"ok": True, "message": f"Task already {ctask.status}"}
+    try:
+        cancel_task(db, public_id=task_id, user_uuid=_.user_uuid or "")
+    except ValueError:
+        raise http_error(409, "task_not_cancellable", "当前任务不可取消")
+    novel.status = "cancelled"
     db.commit()
 
-    # Update Redis (both task key and novel key)
     data = {
         "status": "cancelled",
         "run_state": "cancelled",
         "step": "cancelled",
         "current_phase": "cancelled",
-        "current_subtask": {"key": "cancelled", "label": "任务已取消", "progress": ctask.progress or 0},
-        "subtask_key": "cancelled",
-        "subtask_label": "任务已取消",
-        "subtask_progress": ctask.progress or 0,
         "progress": ctask.progress or 0,
         "message": "任务已取消",
+        "task_id": ctask.public_id,
     }
-    _redis_set_json(_redis_key(task_id), data)
-    if ctask.worker_task_id and ctask.worker_task_id != task_id:
+    _redis_set_json(_redis_key(ctask.public_id), data)
+    if ctask.worker_task_id:
         _redis_set_json(_redis_key(ctask.worker_task_id), data)
     _redis_set_json(_novel_key(str(novel.id)), data)
     log_event(logger, "generation.cancel", novel_id=novel.id, task_id=task_id, run_state="cancelled")
@@ -729,6 +723,7 @@ def resume_generation(
         ).scalar_one_or_none()
     if not row:
         raise http_error(404, "no_paused_task", "No paused task")
+    old_worker_task_id = row.worker_task_id
     try:
         resume_task(db, public_id=row.public_id, user_uuid=principal.user_uuid or "")
     except ValueError as exc:
@@ -739,7 +734,7 @@ def resume_generation(
             raise http_error(409, "task_not_resumable", "当前任务不可恢复")
         raise http_error(409, "task_not_resumable", "当前任务不可恢复")
     db.commit()
-    existing = _redis_get_json(_redis_key(row.worker_task_id or row.public_id)) or {}
+    existing = _redis_get_json(_redis_key(old_worker_task_id or row.public_id)) or {}
     payload = {
         "status": "queued",
         "run_state": "queued",
@@ -752,8 +747,8 @@ def resume_generation(
         "task_id": row.public_id,
     }
     _redis_set_json(_redis_key(row.public_id), payload)
-    if row.worker_task_id:
-        _redis_set_json(_redis_key(row.worker_task_id), payload)
+    if old_worker_task_id:
+        _redis_set_json(_redis_key(old_worker_task_id), payload)
     _redis_set_json(_novel_key(str(novel.id)), payload)
     log_event(logger, "generation.resume", novel_id=novel.id, task_id=row.public_id, run_state="queued")
     return {"ok": True, "task_id": row.public_id, "run_state": "queued"}
@@ -767,7 +762,6 @@ def cancel_generation_by_novel(
     principal: Principal = Depends(require_permission(Permission.NOVEL_GENERATE, resource_loader=load_novel_resource)),
 ):
     from app.core.database import resolve_novel
-    from app.workers.celery_app import app as celery_app
 
     novel = resolve_novel(db, novel_id)
     if not novel:
@@ -789,6 +783,8 @@ def cancel_generation_by_novel(
         ).scalar_one_or_none()
     if not row:
         raise http_error(404, "no_active_task", "No active task")
+    if row.status in {"completed", "failed", "cancelled"}:
+        return {"ok": True, "task_id": row.public_id, "run_state": row.status}
     try:
         cancel_task(db, public_id=row.public_id, user_uuid=principal.user_uuid or "")
     except ValueError as exc:
@@ -796,12 +792,7 @@ def cancel_generation_by_novel(
         if code == "task_not_found":
             raise http_error(404, "task_not_found", "Task not found")
         raise http_error(409, "task_not_cancellable", "当前任务不可取消")
-    if row.worker_task_id:
-        try:
-            celery_app.control.revoke(row.worker_task_id, terminate=True)
-        except Exception:
-            logger.warning("Failed to revoke worker task %s, proceeding with cancel", row.worker_task_id)
-    novel.status = "draft"
+    novel.status = "cancelled"
     db.commit()
     payload = {
         "status": "cancelled",
@@ -815,6 +806,8 @@ def cancel_generation_by_novel(
         "task_id": row.public_id,
     }
     _redis_set_json(_redis_key(row.public_id), payload)
+    if row.worker_task_id:
+        _redis_set_json(_redis_key(row.worker_task_id), payload)
     _redis_set_json(_novel_key(str(novel.id)), payload)
     log_event(logger, "generation.cancel", novel_id=novel.id, task_id=row.public_id, run_state="cancelled")
     return {"ok": True, "task_id": row.public_id, "run_state": "cancelled"}
@@ -968,10 +961,22 @@ def get_generation_status(
             "task_id": row.public_id,
             "trace_id": None,
         }
+        db_status = row.status
         if isinstance(redis_payload, dict):
             for k, v in redis_payload.items():
                 if k in payload:
                     payload[k] = v
+        if db_status in ("cancelled", "failed", "completed", "paused"):
+            payload["status"] = db_status
+            payload["run_state"] = db_status
+            payload["message"] = row.message or payload.get("message")
+            if row.error_detail:
+                payload["error"] = row.error_detail
+            if row.error_code:
+                payload["error_code"] = row.error_code
+            if row.error_category:
+                payload["error_category"] = row.error_category
+            payload["retryable"] = bool((row.retry_count or 0) < (row.max_retries or 0))
         payload = _estimate_eta_payload(db, novel.id, redis_key_id, payload)
         return _to_status_response(payload)
     return GenerationStatusResponse(status="unknown", progress=0, current_chapter=0)
@@ -1014,11 +1019,15 @@ def stream_generation_progress(
 ):
     """SSE endpoint for real-time generation progress."""
 
+    _TERMINAL = {"completed", "failed", "cancelled", "paused"}
+
     async def event_stream():
         last = None
         no_data_count = 0
         while True:
+            db.expire_all()
             ctask = get_task_by_public_id(db, public_id=task_id, user_uuid=_.user_uuid or "")
+            db_status = ctask.status if ctask else None
             key_id = (ctask.worker_task_id if ctask and ctask.worker_task_id else task_id)
             key = _redis_key(key_id)
             data = None
@@ -1029,11 +1038,18 @@ def stream_generation_progress(
             if data:
                 no_data_count = 0
                 d = json.loads(data)
+                if db_status in _TERMINAL:
+                    d["status"] = db_status
+                    d["run_state"] = db_status
+                    if ctask:
+                        d["message"] = ctask.message or d.get("message")
+                        if ctask.error_detail:
+                            d["error"] = ctask.error_detail
                 payload = json.dumps(d)
                 if payload != last:
                     last = payload
                     yield _sse_status_event(d)
-                if d.get("status") in ("completed", "failed", "cancelled", "paused"):
+                if d.get("status") in _TERMINAL:
                     break
             else:
                 no_data_count += 1
@@ -1047,9 +1063,9 @@ def stream_generation_progress(
                             "error": ctask.error_detail,
                         }
                     )
-                    if ctask.status in {"completed", "failed", "cancelled", "paused"}:
+                    if db_status in _TERMINAL:
                         break
-                if no_data_count >= 60:  # 30 seconds without data
+                if no_data_count >= 60:
                     yield _sse_status_event({"status": "unknown", "error": "Task not found or expired"})
                     break
             await asyncio.sleep(0.5)

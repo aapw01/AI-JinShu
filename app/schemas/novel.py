@@ -64,6 +64,8 @@ class IdeaFrameworkResponse(BaseModel):
     hook: str
     selling_point: str
     editable_framework: str
+    recommended_genre: str | None = None
+    recommended_style: str | None = None
 
 
 class ChapterResponse(BaseModel):
@@ -82,6 +84,14 @@ class ChapterResponse(BaseModel):
     language_quality_report: str | None = None
     word_count: int = 0
     created_at: str
+
+
+class ChapterProgressResponse(BaseModel):
+    chapter_num: int
+    title: str | None = None
+    status: str  # pending | generating | completed
+    volume_no: int
+    volume_size: int
 
 
 class GenerateRequest(BaseModel):

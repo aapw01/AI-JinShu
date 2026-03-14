@@ -2,7 +2,7 @@
 import uuid
 import os
 from datetime import datetime, timezone
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, JSON, Float, Index
+from sqlalchemy import BigInteger, Column, Integer, String, Text, DateTime, ForeignKey, JSON, Float, Index
 from pgvector.sqlalchemy import Vector
 
 from app.core.database import Base
@@ -388,8 +388,8 @@ class UserQuota(Base):
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, unique=True)
     plan_key = Column(String(32), nullable=False, default="free")  # free, pro, team
     max_concurrent_tasks = Column(Integer, nullable=False, default=1)
-    monthly_chapter_limit = Column(Integer, nullable=False, default=1_000_000)
-    monthly_token_limit = Column(Integer, nullable=False, default=10_000_000_000)
+    monthly_chapter_limit = Column(BigInteger, nullable=False, default=1_000_000)
+    monthly_token_limit = Column(BigInteger, nullable=False, default=10_000_000_000)
     status = Column(String(32), nullable=False, default="active")  # active, suspended
     created_at = Column(DateTime, default=_utc_now)
     updated_at = Column(DateTime, default=_utc_now, onupdate=_utc_now)

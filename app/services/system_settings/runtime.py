@@ -10,7 +10,11 @@ from typing import Any, Callable
 from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.services.system_settings.crypto import decrypt_api_key, get_security_mode, mask_secret
-from app.services.system_settings.repository import MODEL_TYPES, RUNTIME_SETTING_KEYS, list_model_settings_db, list_runtime_overrides
+from app.services.system_settings.repository import (
+    RUNTIME_SETTING_KEYS,
+    load_model_settings_db,
+    list_runtime_overrides,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,43 +44,16 @@ def _to_bool(value: Any) -> bool:
     return False
 
 
-def _resolve_env_api_key(provider: str) -> str:
-    s = get_settings()
-    selected_provider = (s.default_llm_provider or "openai").strip().lower()
-    if s.llm_api_key:
-        if provider == selected_provider:
-            return s.llm_api_key
-    if provider == "openai":
-        return s.openai_api_key or ""
-    if provider == "anthropic":
-        return s.anthropic_api_key or ""
-    if provider == "gemini":
-        return s.gemini_api_key or ""
-    return ""
+def _clean_text(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
 
 
-def _resolve_env_base_url(provider: str) -> str | None:
-    s = get_settings()
-    selected_provider = (s.default_llm_provider or "openai").strip().lower()
-    if s.llm_base_url:
-        if provider == selected_provider:
-            base = s.llm_base_url.rstrip("/")
-            if provider == "anthropic" and base.endswith("/v1"):
-                base = base[:-3].rstrip("/")
-            return base
-    if provider == "openai":
-        return s.openai_base_url
-    if provider == "anthropic":
-        base = s.anthropic_base_url.rstrip("/")
-        if base.endswith("/v1"):
-            base = base[:-3].rstrip("/")
-        return base
-    if provider == "gemini":
-        return s.gemini_base_url
-    return None
-
-
-def _adapter_for_provider(provider: str) -> str:
+def _infer_primary_protocol(provider: str, base_url: str | None, protocol_override: str | None) -> str:
+    if protocol_override:
+        return protocol_override
+    if base_url:
+        return "openai_compatible"
     if provider == "anthropic":
         return "anthropic"
     if provider == "gemini":
@@ -84,144 +61,115 @@ def _adapter_for_provider(provider: str) -> str:
     return "openai_compatible"
 
 
-def _env_provider_rows() -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
+def _infer_embedding_protocol(base_url: str | None, protocol_override: str | None) -> str:
+    if protocol_override:
+        return protocol_override
+    if base_url:
+        return "openai_compatible"
+    return "openai_compatible"
+
+
+def _env_primary_chat() -> dict[str, Any]:
     settings = get_settings()
-    selected_provider = (settings.default_llm_provider or "openai").strip().lower()
-    for idx, provider_key in enumerate(("openai", "anthropic", "gemini"), start=1):
-        api_key = _resolve_env_api_key(provider_key)
-        base_url = _resolve_env_base_url(provider_key)
-        # Show env providers only when explicitly selected or actually configured with a key.
-        # This avoids "phantom" providers in admin UI when only one unified env provider is used.
-        if not api_key and provider_key != selected_provider:
-            continue
-        rows.append(
-            {
-                "provider_key": provider_key,
-                "display_name": provider_key,
-                "adapter_type": _adapter_for_provider(provider_key),
-                "base_url": base_url,
-                "api_key": api_key,
-                "api_key_source": "env" if api_key else "none",
-                "is_enabled": True,
-                "priority": 1000 + idx,
-                "models": [],
-                "source": "env",
-            }
-        )
-    return rows
+    provider = str(settings.llm_provider or "openai").strip().lower() or "openai"
+    model = str(settings.llm_model or "gpt-4o-mini").strip() or "gpt-4o-mini"
+    base_url = _clean_text(settings.llm_base_url)
+    api_key = str(settings.llm_api_key or "").strip()
+    protocol_override = _clean_text(settings.llm_protocol_override)
+    if protocol_override and protocol_override not in ("openai_compatible", "gemini", "anthropic"):
+        protocol_override = None
+    protocol = _infer_primary_protocol(provider, base_url, protocol_override)
+    return {
+        "provider": provider,
+        "model": model,
+        "base_url": base_url,
+        "protocol_override": protocol_override,
+        "resolved_protocol": protocol,
+        "api_key": api_key,
+        "api_key_source": "env" if api_key else "none",
+        "api_key_is_encrypted": False,
+        "source": "env",
+    }
+
+
+def _env_embedding() -> dict[str, Any]:
+    settings = get_settings()
+    base_url = _clean_text(settings.embedding_base_url)
+    api_key = str(settings.embedding_api_key or "").strip()
+    protocol = _infer_embedding_protocol(base_url, None)
+    return {
+        "enabled": bool(settings.embedding_enabled),
+        "model": _clean_text(settings.embedding_model),
+        "reuse_primary_connection": bool(settings.embedding_reuse_primary_connection),
+        "base_url": base_url,
+        "protocol_override": None,
+        "resolved_protocol": protocol,
+        "api_key": api_key,
+        "api_key_source": "env" if api_key else "none",
+        "api_key_is_encrypted": False,
+        "source": "env",
+    }
+
+
+def _hydrate_primary(raw: dict[str, Any], source: str) -> dict[str, Any]:
+    provider = str(raw.get("provider") or "openai").strip().lower() or "openai"
+    model = str(raw.get("model") or "gpt-4o-mini").strip() or "gpt-4o-mini"
+    base_url = _clean_text(raw.get("base_url"))
+    protocol_override = _clean_text(raw.get("protocol_override"))
+    api_key = decrypt_api_key(raw.get("api_key_ciphertext"), _to_bool(raw.get("api_key_is_encrypted")))
+    protocol = _infer_primary_protocol(provider, base_url, protocol_override)
+    return {
+        "provider": provider,
+        "model": model,
+        "base_url": base_url,
+        "protocol_override": protocol_override,
+        "resolved_protocol": protocol,
+        "api_key": api_key,
+        "api_key_source": source if api_key else "none",
+        "api_key_is_encrypted": _to_bool(raw.get("api_key_is_encrypted")),
+        "source": source,
+    }
+
+
+def _hydrate_embedding(raw: dict[str, Any], source: str) -> dict[str, Any]:
+    base_url = _clean_text(raw.get("base_url"))
+    protocol_override = _clean_text(raw.get("protocol_override"))
+    api_key = decrypt_api_key(raw.get("api_key_ciphertext"), _to_bool(raw.get("api_key_is_encrypted")))
+    protocol = _infer_embedding_protocol(base_url, protocol_override)
+    return {
+        "enabled": _to_bool(raw.get("enabled", False)),
+        "model": _clean_text(raw.get("model")),
+        "reuse_primary_connection": _to_bool(raw.get("reuse_primary_connection", True)),
+        "base_url": base_url,
+        "protocol_override": protocol_override,
+        "resolved_protocol": protocol,
+        "api_key": api_key,
+        "api_key_source": source if api_key else "none",
+        "api_key_is_encrypted": _to_bool(raw.get("api_key_is_encrypted")),
+        "source": source,
+    }
 
 
 def _load_model_cache_value() -> dict[str, Any]:
-    settings = get_settings()
     db = SessionLocal()
     try:
-        db_rows = list_model_settings_db(db)
+        db_values = load_model_settings_db(db)
     finally:
         db.close()
 
-    env_rows = _env_provider_rows()
-    env_by_key = {row["provider_key"]: row for row in env_rows}
+    if db_values.get("primary_chat"):
+        primary = _hydrate_primary(db_values["primary_chat"], "db")
+    else:
+        primary = _env_primary_chat()
 
-    providers: list[dict[str, Any]] = []
-    for row in db_rows:
-        provider_key = str(row.get("provider_key") or "").strip().lower()
-        env_row = env_by_key.get(provider_key)
-        db_api_key = decrypt_api_key(row.get("api_key_ciphertext"), bool(row.get("api_key_is_encrypted")))
-        merged = {
-            "provider_key": provider_key,
-            "display_name": row.get("display_name") or provider_key,
-            "adapter_type": row.get("adapter_type") or (env_row.get("adapter_type") if env_row else "openai_compatible"),
-            "base_url": (row.get("base_url") or (env_row.get("base_url") if env_row else None)),
-            "api_key": db_api_key or (env_row.get("api_key") if env_row else ""),
-            "api_key_source": "db" if db_api_key else (("env" if (env_row and env_row.get("api_key")) else "none")),
-            "api_key_is_encrypted": bool(row.get("api_key_is_encrypted")),
-            "is_enabled": _to_bool(row.get("is_enabled", True)),
-            "priority": int(row.get("priority") or 100),
-            "models": [],
-            "source": "db",
-        }
-        for m in (row.get("models") if isinstance(row.get("models"), list) else []):
-            merged["models"].append(
-                {
-                    "model_name": str(m.get("model_name") or "").strip(),
-                    "model_type": str(m.get("model_type") or "chat").strip().lower(),
-                    "is_default": _to_bool(m.get("is_default")),
-                    "is_enabled": _to_bool(m.get("is_enabled", True)),
-                    "metadata": m.get("metadata") if isinstance(m.get("metadata"), dict) else {},
-                    "source": "db",
-                }
-            )
-        providers.append(merged)
-
-    existing_keys = {p["provider_key"] for p in providers}
-    for env_row in env_rows:
-        if env_row["provider_key"] not in existing_keys:
-            providers.append(env_row)
-
-    providers.sort(key=lambda x: (int(x.get("priority") or 1000), str(x.get("provider_key") or "")))
-
-    # Build model defaults from db first.
-    default_models: dict[str, dict[str, Any]] = {}
-    for model_type in MODEL_TYPES:
-        for provider in providers:
-            if not _to_bool(provider.get("is_enabled", True)):
-                continue
-            for model in provider.get("models", []):
-                if not _to_bool(model.get("is_enabled", True)):
-                    continue
-                if str(model.get("model_type")) != model_type:
-                    continue
-                if _to_bool(model.get("is_default")):
-                    default_models[model_type] = {
-                        "provider_key": provider["provider_key"],
-                        "model_name": model["model_name"],
-                        "source": "db",
-                    }
-                    break
-            if model_type in default_models:
-                break
-
-    # Env fallback defaults.
-    fallback_chat_provider = settings.default_llm_provider or "openai"
-    fallback_chat_model = settings.default_llm_model or "gpt-4o-mini"
-    if "chat" not in default_models:
-        default_models["chat"] = {
-            "provider_key": fallback_chat_provider,
-            "model_name": fallback_chat_model,
-            "source": "env",
-        }
-
-    if "embedding" not in default_models:
-        fallback_embedding_provider = "openai"
-        default_models["embedding"] = {
-            "provider_key": fallback_embedding_provider,
-            "model_name": settings.default_embedding_model or "text-embedding-3-small",
-            "source": "env",
-        }
-
-    # Keep image/video nullable when no DB setting exists.
-    default_models.setdefault("image", {"provider_key": None, "model_name": None, "source": "none"})
-    default_models.setdefault("video", {"provider_key": None, "model_name": None, "source": "none"})
-
-    enabled_order = [p["provider_key"] for p in providers if _to_bool(p.get("is_enabled", True))]
-    if not enabled_order:
-        enabled_order = [fallback_chat_provider, "openai", "anthropic", "gemini"]
-
-    # Unique, keep order.
-    seen: set[str] = set()
-    fallback_order: list[str] = []
-    for item in enabled_order + ["openai", "anthropic", "gemini"]:
-        key = str(item or "").strip().lower()
-        if not key or key in seen:
-            continue
-        fallback_order.append(key)
-        seen.add(key)
+    if db_values.get("embedding"):
+        embedding = _hydrate_embedding(db_values["embedding"], "db")
+    else:
+        embedding = _env_embedding()
 
     return {
-        "providers": providers,
-        "default_models": default_models,
-        "fallback_order": fallback_order,
+        "primary_chat": primary,
+        "embedding": embedding,
         "security_mode": get_security_mode(),
     }
 
@@ -235,39 +183,34 @@ def get_effective_model_config() -> dict[str, Any]:
     return copy.deepcopy(value)
 
 
-def get_provider_runtime(provider_key: str) -> dict[str, Any] | None:
-    key = (provider_key or "").strip().lower()
-    if not key:
-        return None
-    config = get_effective_model_config()
-    for provider in config.get("providers", []):
-        if provider.get("provider_key") == key:
-            return provider
-    return None
+def get_primary_chat_runtime() -> dict[str, Any]:
+    return get_effective_model_config().get("primary_chat", {})
+
+
+def get_embedding_runtime() -> dict[str, Any]:
+    return get_effective_model_config().get("embedding", {})
 
 
 def get_default_model_for_type(model_type: str) -> dict[str, Any] | None:
     model_type = (model_type or "").strip().lower()
     config = get_effective_model_config()
-    return config.get("default_models", {}).get(model_type)
-
-
-def get_provider_default_model(provider_key: str, model_type: str = "chat") -> str | None:
-    provider = get_provider_runtime(provider_key)
-    if not provider:
-        return None
-    mtype = (model_type or "chat").strip().lower()
-    for model in provider.get("models", []):
-        if str(model.get("model_type") or "").strip().lower() != mtype:
-            continue
-        if _to_bool(model.get("is_default")) and _to_bool(model.get("is_enabled", True)):
-            return str(model.get("model_name") or "").strip() or None
+    if model_type == "chat":
+        primary = config.get("primary_chat") or {}
+        return {
+            "provider_key": primary.get("provider"),
+            "model_name": primary.get("model"),
+            "source": primary.get("source", "env"),
+        }
+    if model_type == "embedding":
+        embedding = config.get("embedding") or {}
+        if not embedding.get("enabled"):
+            return None
+        return {
+            "provider_key": "primary" if embedding.get("reuse_primary_connection") else "openai",
+            "model_name": embedding.get("model"),
+            "source": embedding.get("source", "env"),
+        }
     return None
-
-
-def get_enabled_provider_order() -> list[str]:
-    config = get_effective_model_config()
-    return list(config.get("fallback_order") or [])
 
 
 def _load_runtime_cache_value() -> dict[str, Any]:
@@ -336,27 +279,33 @@ def get_runtime_overrides() -> dict[str, Any]:
 
 def get_model_settings_for_admin(*, include_secrets: bool = False) -> dict[str, Any]:
     config = get_effective_model_config()
-    providers = []
-    for provider in config.get("providers", []):
-        providers.append(
-            {
-                "provider_key": provider.get("provider_key"),
-                "display_name": provider.get("display_name"),
-                "adapter_type": provider.get("adapter_type"),
-                "base_url": provider.get("base_url"),
-                "api_key_value": (provider.get("api_key") if include_secrets else None),
-                "api_key_masked": mask_secret(provider.get("api_key")),
-                "api_key_source": provider.get("api_key_source"),
-                "api_key_is_encrypted": bool(provider.get("api_key_is_encrypted")),
-                "is_enabled": bool(provider.get("is_enabled", True)),
-                "priority": int(provider.get("priority") or 100),
-                "models": provider.get("models", []),
-                "source": provider.get("source", "env"),
-            }
-        )
+    primary = config.get("primary_chat") or {}
+    embedding = config.get("embedding") or {}
     return {
-        "providers": providers,
-        "default_models": config.get("default_models", {}),
-        "fallback_order": config.get("fallback_order", []),
+        "primary_chat": {
+            "provider": primary.get("provider"),
+            "model": primary.get("model"),
+            "base_url": primary.get("base_url"),
+            "protocol_override": primary.get("protocol_override"),
+            "resolved_protocol": primary.get("resolved_protocol"),
+            "api_key_value": primary.get("api_key") if include_secrets else None,
+            "api_key_masked": mask_secret(primary.get("api_key")),
+            "api_key_source": primary.get("api_key_source", "none"),
+            "api_key_is_encrypted": bool(primary.get("api_key_is_encrypted", False)),
+            "source": primary.get("source", "env"),
+        },
+        "embedding": {
+            "enabled": bool(embedding.get("enabled", False)),
+            "model": embedding.get("model"),
+            "reuse_primary_connection": bool(embedding.get("reuse_primary_connection", True)),
+            "base_url": embedding.get("base_url"),
+            "protocol_override": embedding.get("protocol_override"),
+            "resolved_protocol": embedding.get("resolved_protocol"),
+            "api_key_value": embedding.get("api_key") if include_secrets else None,
+            "api_key_masked": mask_secret(embedding.get("api_key")),
+            "api_key_source": embedding.get("api_key_source", "none"),
+            "api_key_is_encrypted": bool(embedding.get("api_key_is_encrypted", False)),
+            "source": embedding.get("source", "env"),
+        },
         "security_mode": config.get("security_mode", "plaintext"),
     }

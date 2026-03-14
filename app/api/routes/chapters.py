@@ -15,7 +15,7 @@ from app.core.authz.types import Permission, Principal
 from app.core.database import get_db, resolve_novel
 from app.core.time_utils import to_utc_iso_z
 from app.models.novel import ChapterOutline, GenerationTask, ChapterVersion
-from app.schemas.novel import ChapterResponse
+from app.schemas.novel import ChapterProgressResponse, ChapterResponse
 from app.services.generation.common import is_effective_title, resolve_chapter_title
 from app.services.rewrite.service import get_chapter_version, list_chapter_versions
 
@@ -27,10 +27,17 @@ class ChapterUpdate(BaseModel):
     content: str | None = None
 
 
-class ChapterProgressItem(BaseModel):
-    chapter_num: int
-    title: str | None = None
-    status: str  # pending | generating | completed
+def _resolve_volume_size(config: dict | None) -> int:
+    raw = (config or {}).get("volume_size", 30) if isinstance(config, dict) else 30
+    try:
+        size = int(raw)
+    except (TypeError, ValueError):
+        size = 30
+    return max(1, min(size, 200))
+
+
+def _resolve_volume_no(chapter_num: int, volume_size: int) -> int:
+    return ((max(chapter_num, 1) - 1) // volume_size) + 1
 
 
 def _count_content_words(content: str | None) -> int:
@@ -141,7 +148,7 @@ def get_chapter(
     return _to_version_response(chapter, novel.uuid or str(novel.id))
 
 
-@router.get("/{novel_id}/chapter-progress", response_model=list[ChapterProgressItem])
+@router.get("/{novel_id}/chapter-progress", response_model=list[ChapterProgressResponse])
 def get_chapter_progress(
     novel_id: str,
     version_id: int | None = None,
@@ -180,19 +187,20 @@ def get_chapter_progress(
     generating_chapter = _get_generating_chapter_from_redis(novel.id)
     if generating_chapter is None:
         generating_chapter = active_task.current_chapter if active_task else None
+    volume_size = _resolve_volume_size(novel.config if isinstance(novel.config, dict) else None)
 
-    result: list[ChapterProgressItem] = []
+    result: list[ChapterProgressResponse] = []
     if outlines:
         for o in outlines:
             status = "pending"
             chapter_row = generated_map.get(o.chapter_num)
             if o.chapter_num in generated_map:
                 raw = chapter_row.status or "completed"
-                status = "completed" if raw == "completed" else "generating"
+                status = "completed" if raw in ("completed", "quality_blocked") else "generating"
             elif generating_chapter is not None and o.chapter_num == generating_chapter:
                 status = "generating"
             result.append(
-                ChapterProgressItem(
+                ChapterProgressResponse(
                     chapter_num=o.chapter_num,
                     title=_resolve_progress_title(
                         chapter_num=o.chapter_num,
@@ -200,6 +208,8 @@ def get_chapter_progress(
                         chapter_title=chapter_row.title if chapter_row else None,
                     ),
                     status=status,
+                    volume_no=_resolve_volume_no(o.chapter_num, volume_size),
+                    volume_size=volume_size,
                 )
             )
         return result
@@ -207,10 +217,12 @@ def get_chapter_progress(
     # Outlines may be absent for drafts; return generated chapter rows only.
     for c in version_chapters:
         result.append(
-            ChapterProgressItem(
+            ChapterProgressResponse(
                 chapter_num=c.chapter_num,
                 title=_resolve_progress_title(chapter_num=c.chapter_num, outline_title=None, chapter_title=c.title),
                 status="completed",
+                volume_no=_resolve_volume_no(c.chapter_num, volume_size),
+                volume_size=volume_size,
             )
         )
     return result

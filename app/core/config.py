@@ -1,5 +1,20 @@
 """Application configuration."""
+import os
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+_DEPRECATED_MODEL_ENV_KEYS = (
+    "DEFAULT_LLM_PROVIDER",
+    "DEFAULT_LLM_MODEL",
+    "LLM_ADAPTER_TYPE",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "GEMINI_API_KEY",
+    "GEMINI_BASE_URL",
+)
 
 
 class Settings(BaseSettings):
@@ -8,21 +23,18 @@ class Settings(BaseSettings):
     database_url: str = "postgresql://novel:novel_secret@localhost:5432/novel_db"
     redis_url: str = "redis://localhost:6379/0"
     celery_broker_url: str = "redis://localhost:6379/1"
-    default_llm_provider: str = "openai"
-    default_llm_model: str = "gpt-4o-mini"
-    default_embedding_model: str = "text-embedding-3-small"
-    llm_output_max_schema_retries: int = 2
-    llm_output_max_provider_fallbacks: int = 2
-    llm_output_min_chars: int = 120
+    llm_provider: str = "openai"
+    llm_model: str = "gpt-4o-mini"
     llm_base_url: str | None = None
     llm_api_key: str | None = None
-    # Backward-compatible provider-specific fields.
-    openai_base_url: str = "https://api.openai.com/v1"
-    openai_api_key: str | None = None
-    anthropic_base_url: str = "https://api.anthropic.com/v1"
-    anthropic_api_key: str | None = None
-    gemini_base_url: str = "https://generativelanguage.googleapis.com/v1beta"
-    gemini_api_key: str | None = None
+    # Force a specific wire protocol: openai_compatible | gemini | anthropic
+    # Leave empty for auto-inference (custom base_url → openai_compatible, else provider native).
+    llm_protocol_override: str | None = None
+    embedding_enabled: bool = True
+    embedding_model: str = "text-embedding-3-small"
+    embedding_reuse_primary_connection: bool = True
+    embedding_base_url: str | None = None
+    embedding_api_key: str | None = None
     auth_jwt_secret: str = "change-me-in-production-and-must-be-at-least-32-bytes"
     auth_jwt_issuer: str = "ai-jinshu"
     auth_access_token_minutes: int = 15
@@ -36,18 +48,8 @@ class Settings(BaseSettings):
     auth_frontend_base_url: str = "http://localhost:3000"
     sendgrid_api_key: str | None = None
     sendgrid_from_email: str | None = None
-    quota_enforce_concurrency_limit: bool = False
     creation_scheduler_enabled: bool = True
     creation_default_max_concurrent_tasks: int = 1
-    creation_dispatch_poll_seconds: int = 2
-    creation_max_dispatch_batch: int = 5
-    creation_worker_lease_ttl_seconds: int = 300
-    creation_worker_heartbeat_seconds: int = 30
-    creation_recovery_poll_seconds: int = 5
-    quota_free_monthly_chapter_limit: int = 1_000_000
-    quota_free_monthly_token_limit: int = 10_000_000_000
-    quota_admin_monthly_chapter_limit: int = 10_000_000
-    quota_admin_monthly_token_limit: int = 100_000_000_000
     log_format: str = "json"
     log_level: str = "INFO"
     log_slow_threshold_ms: int = 1500
@@ -72,6 +74,15 @@ def get_settings() -> Settings:
     """Get cached settings instance."""
     global _settings
     if _settings is None:
+        bad = [key for key in _DEPRECATED_MODEL_ENV_KEYS if os.getenv(key)]
+        if bad:
+            raise RuntimeError(
+                "Deprecated model environment variable(s) detected: "
+                f"{', '.join(sorted(bad))}. "
+                "Use only: LLM_PROVIDER, LLM_MODEL, LLM_BASE_URL, LLM_API_KEY, "
+                "EMBEDDING_ENABLED, EMBEDDING_MODEL, EMBEDDING_REUSE_PRIMARY_CONNECTION, "
+                "EMBEDDING_BASE_URL, EMBEDDING_API_KEY."
+            )
         _settings = Settings()
     return _settings
 

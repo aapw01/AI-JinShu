@@ -9,6 +9,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.core.constants import (
+    QUOTA_ADMIN_MONTHLY_CHAPTER_LIMIT,
+    QUOTA_ADMIN_MONTHLY_TOKEN_LIMIT,
+    QUOTA_ENFORCE_CONCURRENCY_LIMIT,
+    QUOTA_FREE_MONTHLY_CHAPTER_LIMIT,
+    QUOTA_FREE_MONTHLY_TOKEN_LIMIT,
+)
 from app.models.novel import GenerationTask, Novel, UsageLedger, User, UserQuota
 from app.services.system_settings.runtime import get_effective_runtime_setting
 
@@ -52,23 +59,15 @@ def ensure_user_quota(db: Session, user: User) -> UserQuota:
         return quota
     is_admin = user.role == "admin"
     default_concurrency = max(1, int(get_effective_runtime_setting("creation_default_max_concurrent_tasks", int, 1) or 1))
-    free_chapter_limit = int(get_effective_runtime_setting("quota_free_monthly_chapter_limit", int, 1_000_000) or 1_000_000)
-    free_token_limit = int(get_effective_runtime_setting("quota_free_monthly_token_limit", int, 10_000_000_000) or 10_000_000_000)
-    admin_chapter_limit = int(get_effective_runtime_setting("quota_admin_monthly_chapter_limit", int, 10_000_000) or 10_000_000)
-    admin_token_limit = int(get_effective_runtime_setting("quota_admin_monthly_token_limit", int, 100_000_000_000) or 100_000_000_000)
     quota = UserQuota(
         user_id=user.id,
         plan_key="team" if is_admin else "free",
         max_concurrent_tasks=default_concurrency,
         monthly_chapter_limit=(
-            admin_chapter_limit
-            if is_admin
-            else free_chapter_limit
+            QUOTA_ADMIN_MONTHLY_CHAPTER_LIMIT if is_admin else QUOTA_FREE_MONTHLY_CHAPTER_LIMIT
         ),
         monthly_token_limit=(
-            admin_token_limit
-            if is_admin
-            else free_token_limit
+            QUOTA_ADMIN_MONTHLY_TOKEN_LIMIT if is_admin else QUOTA_FREE_MONTHLY_TOKEN_LIMIT
         ),
     )
     if user.role == "admin":
@@ -96,7 +95,7 @@ def check_generation_quota(
     if quota.status != "active":
         return QuotaCheckResult(False, QuotaReason.QUOTA_SUSPENDED, _quota_user_message(QuotaReason.QUOTA_SUSPENDED))
 
-    if bool(get_effective_runtime_setting("quota_enforce_concurrency_limit", bool, False)):
+    if QUOTA_ENFORCE_CONCURRENCY_LIMIT:
         active_count = (
             db.execute(
                 select(func.count())

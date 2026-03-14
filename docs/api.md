@@ -205,15 +205,20 @@
   - `node_latency_seconds.{node}.p50/p95/max`
 
 ### `GET /api/admin/settings/models`
-- 作用：读取系统模型配置（Provider 列表、默认模型、回退顺序）。
-- 说明：返回中会标记每个 Provider 的来源（`db|env`）和密钥来源；API Key 仅返回掩码。
+- 作用：读取系统模型配置（仅包含 `primary_chat` 主模型和 `embedding` 向量模型）。
+- 说明：
+  - 页面配置优先于环境变量。
+  - `include_secrets=true` 时返回管理员可见的 API Key 明文；默认仅返回掩码。
+  - 自定义 `base_url` 默认按 OpenAI-compatible 协议处理。
 
 ### `PUT /api/admin/settings/models`
-- 作用：全量保存模型配置（多 Provider、多模型、按类型默认模型）。
-- 请求体：`providers[]`，字段包含 `provider_key/display_name/adapter_type/base_url/api_key/is_enabled/priority/models[]`。
+- 作用：全量保存系统模型配置。
+- 请求体：
+  - `primary_chat`: `provider/model/base_url/api_key/protocol_override`
+  - `embedding`: `enabled/model/reuse_primary_connection/base_url/api_key/protocol_override`
 - 规则：
-  - 默认模型按类型唯一（`chat|embedding|image|video`）。
-  - `api_key` 传 `null` 表示保留原值，传空字符串表示清空。
+  - 系统不支持 fallback/备用模型链。
+  - `api_key` 传空字符串表示清空；传已有值则覆盖保存。
   - 若配置 `SYSTEM_SETTINGS_MASTER_KEY`，密钥加密入库；否则按明文入库并在 UI 风险提示。
 
 ### `GET /api/admin/settings/runtime`
@@ -221,17 +226,6 @@
 - 首期可配：
   - `creation_scheduler_enabled`
   - `creation_default_max_concurrent_tasks`
-  - `creation_max_dispatch_batch`
-  - `creation_worker_lease_ttl_seconds`
-  - `creation_worker_heartbeat_seconds`
-  - `quota_enforce_concurrency_limit`
-  - `quota_free_monthly_chapter_limit`
-  - `quota_free_monthly_token_limit`
-  - `quota_admin_monthly_chapter_limit`
-  - `quota_admin_monthly_token_limit`
-  - `llm_output_max_schema_retries`
-  - `llm_output_max_provider_fallbacks`
-  - `llm_output_min_chars`
 
 ### `PUT /api/admin/settings/runtime`
 - 作用：保存运行时配置覆盖项。
@@ -239,7 +233,7 @@
 
 ### `GET /api/admin/settings/effective`
 - 作用：查看当前进程生效配置快照（调试用途）。
-- 说明：返回聚合后的默认模型、回退顺序、运行时覆盖项；敏感字段均掩码。
+- 说明：返回聚合后的 `primary_chat`、`embedding` 与运行时覆盖项；敏感字段均掩码。
 
 ### creation_tasks 结果元数据
 - `creation_tasks.result_json` 可能包含以下可选字段（用于观测与回放）：

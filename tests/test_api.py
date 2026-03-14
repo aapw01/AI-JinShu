@@ -233,6 +233,104 @@ def test_chapter_response_contains_word_count(client):
     assert payload[0]["version_id"] == version_id
 
 
+def test_chapter_progress_includes_volume_fields_with_configured_volume_size(client):
+    r = client.post(
+        "/api/novels",
+        json={"title": "Volume Progress Configured", "target_language": "zh", "config": {"volume_size": 12}},
+    )
+    assert r.status_code == 200
+    novel_id = r.json()["id"]
+    version_id: int | None = None
+
+    db = SessionLocal()
+    try:
+        novel = resolve_novel(db, novel_id)
+        assert novel is not None
+        version = db.execute(
+            select(NovelVersion).where(
+                NovelVersion.novel_id == novel.id,
+                NovelVersion.is_default == 1,
+            )
+        ).scalar_one()
+        version_id = int(version.id)
+        db.add(
+            ChapterVersion(
+                novel_version_id=version_id,
+                chapter_num=1,
+                title="第1章",
+                content="正文",
+                status="completed",
+            )
+        )
+        db.add(
+            ChapterVersion(
+                novel_version_id=version_id,
+                chapter_num=13,
+                title="第13章",
+                content="正文",
+                status="completed",
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    assert version_id is not None
+    resp = client.get(f"/api/novels/{novel_id}/chapter-progress?version_id={version_id}")
+    assert resp.status_code == 200
+    items = resp.json()
+    assert len(items) == 2
+    by_num = {int(item["chapter_num"]): item for item in items}
+    assert by_num[1]["volume_size"] == 12
+    assert by_num[1]["volume_no"] == 1
+    assert by_num[13]["volume_size"] == 12
+    assert by_num[13]["volume_no"] == 2
+
+
+def test_chapter_progress_defaults_to_volume_size_30_when_not_configured(client):
+    r = client.post(
+        "/api/novels",
+        json={"title": "Volume Progress Default", "target_language": "zh"},
+    )
+    assert r.status_code == 200
+    novel_id = r.json()["id"]
+    version_id: int | None = None
+
+    db = SessionLocal()
+    try:
+        novel = resolve_novel(db, novel_id)
+        assert novel is not None
+        version = db.execute(
+            select(NovelVersion).where(
+                NovelVersion.novel_id == novel.id,
+                NovelVersion.is_default == 1,
+            )
+        ).scalar_one()
+        version_id = int(version.id)
+        db.add(
+            ChapterVersion(
+                novel_version_id=version_id,
+                chapter_num=31,
+                title="第31章",
+                content="正文",
+                status="completed",
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    assert version_id is not None
+    resp = client.get(f"/api/novels/{novel_id}/chapter-progress?version_id={version_id}")
+    assert resp.status_code == 200
+    items = resp.json()
+    assert len(items) == 1
+    item = items[0]
+    assert item["chapter_num"] == 31
+    assert item["volume_size"] == 30
+    assert item["volume_no"] == 2
+
+
 def test_longform_quality_and_checkpoints_endpoints(client):
     r = client.post("/api/novels", json={"title": "Longform API Test", "target_language": "zh"})
     novel_id = r.json()["id"]
