@@ -50,14 +50,19 @@ AI-JinShu/
 - `QUOTA_ADMIN_MONTHLY_TOKEN_LIMIT`：管理员月度 token 限额（默认 `100000000000`）。
 - `SYSTEM_SETTINGS_MASTER_KEY`：可选；配置后管理员在系统设置页保存的 API Key 将加密存储（未配置则明文存储并有风险提示）。
 
+## Model Config Notes
+
+- 模型配置只保留两个对象：`primary_chat`（主聊天模型）和 `embedding`（向量模型）。
+- 环境变量只接受：`LLM_PROVIDER / LLM_MODEL / LLM_BASE_URL / LLM_API_KEY / EMBEDDING_ENABLED / EMBEDDING_MODEL / EMBEDDING_REUSE_PRIMARY_CONNECTION / EMBEDDING_BASE_URL / EMBEDDING_API_KEY`。
+- 页面配置优先于环境变量；采用对象级覆盖，不再按字段拼装。
+- 自定义 `LLM_BASE_URL` 或 `EMBEDDING_BASE_URL` 时，系统默认按 OpenAI-compatible 协议处理。
+- 不支持 fallback/备用模型链；主模型失败时直接报错。
+- `EMBEDDING_REUSE_PRIMARY_CONNECTION=true` 时，仅当主模型为 OpenAI-compatible 连接时可用。
+
 ## LLM Output Contract Notes
 
 - 章节生成/重写正文链路固定为严格结构化协议（JSON `chapter_body`），不再支持 legacy/hybrid 兼容分支。
-- 可配置项（系统设置优先于环境变量）：
-  - `LLM_OUTPUT_MAX_SCHEMA_RETRIES`
-  - `LLM_OUTPUT_MAX_PROVIDER_FALLBACKS`
-  - `LLM_OUTPUT_MIN_CHARS`
-- LLM 调用日志会记录 `stage/prompt_template/prompt_version/prompt_hash` 便于聚合诊断。
+- 结构化调用失败会在日志中记录 `stage/prompt_template/prompt_version/prompt_hash`，便于聚合诊断。
 
 ## API
 

@@ -21,6 +21,7 @@ const STATUS_MAP: Record<string, { label: string; variant: "default" | "success"
   generating: { label: "生成中", variant: "warning" },
   completed: { label: "已完成", variant: "success" },
   failed: { label: "失败", variant: "error" },
+  cancelled: { label: "已取消", variant: "info" },
 };
 
 const STEPS = [
@@ -124,7 +125,7 @@ export default function Home() {
     idea: "",
     language: "zh",
     genre: "",
-    style: "tomato-hot",
+    style: "",
     audience: "general",
     length: "medium",
     chapterTarget: 50,
@@ -258,18 +259,6 @@ export default function Home() {
     };
   }, [novels]);
 
-  useEffect(() => {
-    const text = form.idea.trim();
-    if (text.length < 8) return;
-    if (!form.genre) {
-      if (/星际|未来|宇宙|科技|AI|人工智能/i.test(text)) setForm((prev) => ({ ...prev, genre: "kehuan" }));
-      if (/江湖|武林|侠|门派/i.test(text)) setForm((prev) => ({ ...prev, genre: "wuxia" }));
-      if (/宫廷|朝堂|帝王|古代|史/i.test(text)) setForm((prev) => ({ ...prev, genre: "lishi" }));
-      if (/都市|职场|现实|校园/i.test(text)) setForm((prev) => ({ ...prev, genre: "dushi" }));
-    }
-    if (/爽|升级|逆袭|打脸/i.test(text)) setForm((prev) => ({ ...prev, style: "web-power" }));
-    if (/细腻|克制|文笔|诗意/i.test(text)) setForm((prev) => ({ ...prev, style: "literary" }));
-  }, [form.idea, form.genre]);
 
   const canProceed = () => {
     switch (step) {
@@ -300,10 +289,18 @@ export default function Home() {
         style: form.style || undefined,
         strategy: selectedStyle?.strategy || "web-novel",
       });
-      setForm((prev) => ({
-        ...prev,
-        idea: result.editable_framework || result.one_liner,
-      }));
+      setForm((prev) => {
+        const updates: Partial<typeof prev> = {
+          idea: result.editable_framework || result.one_liner,
+        };
+        if (result.recommended_genre && !prev.genre) {
+          updates.genre = result.recommended_genre;
+        }
+        if (result.recommended_style) {
+          updates.style = result.recommended_style;
+        }
+        return { ...prev, ...updates };
+      });
     } catch (err) {
       setIdeaError(getErrorMessage(err, "AI 创意生成失败"));
     } finally {
@@ -413,12 +410,19 @@ export default function Home() {
                       />
                       <div className="flex items-center justify-between text-xs">
                         <span className="text-[#8E8379]">{form.idea.length}/600</span>
-                        {form.idea.trim().length >= 8 ? (
-                          <span className="inline-flex items-center gap-1.5 text-[#A52A25]">
-                            <WandSparkles className="w-3.5 h-3.5" />
-                            智能建议：{genres.find((g) => g.id === form.genre)?.label || "待推荐"} · {styles.find((s) => s.id === form.style)?.label || "待推荐"}
-                          </span>
-                        ) : null}
+                        {(() => {
+                          if (form.idea.trim().length < 8) return null;
+                          const genreLabel = genres.find((g) => g.id === form.genre)?.label;
+                          const styleLabel = styles.find((s) => s.id === form.style)?.label;
+                          if (!genreLabel && !styleLabel) return null;
+                          const parts = [genreLabel, styleLabel].filter(Boolean).join(" · ");
+                          return (
+                            <span className="inline-flex items-center gap-1.5 text-[#A52A25]">
+                              <WandSparkles className="w-3.5 h-3.5" />
+                              智能建议：{parts}
+                            </span>
+                          );
+                        })()}
                       </div>
                       {ideaError ? <p className="text-xs text-[#B22F2A]">{ideaError}</p> : null}
                     </div>

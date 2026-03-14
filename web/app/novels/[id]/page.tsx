@@ -4,7 +4,7 @@ import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { motion } from "framer-motion";
-import { ArrowLeft, BarChart3, Clapperboard, Copy, Download, Wand2 } from "lucide-react";
+import { ArrowLeft, BarChart3, ChevronDown, ChevronRight, Clapperboard, Copy, Download, Wand2 } from "lucide-react";
 import {
   api,
   Novel,
@@ -28,6 +28,7 @@ const STATUS_MAP: Record<string, { label: string; variant: "default" | "success"
   generating: { label: "生成中", variant: "warning" },
   completed: { label: "已完成", variant: "success" },
   failed: { label: "失败", variant: "error" },
+  cancelled: { label: "已取消", variant: "default" },
 };
 
 const CHAPTER_STATUS_MAP: Record<ChapterProgress["status"], { label: string; variant: "default" | "success" | "warning" | "error" }> = {
@@ -85,6 +86,7 @@ export default function NovelPage() {
   const [versions, setVersions] = useState<NovelVersion[]>([]);
   const [activeVersionId, setActiveVersionId] = useState<number | null>(null);
   const [selectedChapterNum, setSelectedChapterNum] = useState<number | null>(null);
+  const [expandedVolumeNos, setExpandedVolumeNos] = useState<Set<number>>(new Set());
   const [loading, setLoading] = useState(true);
   const [submittingRewrite, setSubmittingRewrite] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -175,6 +177,46 @@ export default function NovelPage() {
   const selectedChapterMeta = selectedChapterNum !== null
     ? chapterProgress.find((c) => c.chapter_num === selectedChapterNum) || null
     : null;
+  const groupedVolumes = useMemo(() => {
+    const groups = new Map<number, {
+      volumeNo: number;
+      startChapter: number;
+      endChapter: number;
+      total: number;
+      completed: number;
+      chapters: ChapterProgress[];
+    }>();
+    const sortedChapters = [...chapterProgress].sort((a, b) => a.chapter_num - b.chapter_num);
+    for (const chapter of sortedChapters) {
+      const volumeNo = Number.isFinite(chapter.volume_no) ? chapter.volume_no : 1;
+      const existing = groups.get(volumeNo);
+      if (!existing) {
+        groups.set(volumeNo, {
+          volumeNo,
+          startChapter: chapter.chapter_num,
+          endChapter: chapter.chapter_num,
+          total: 1,
+          completed: chapter.status === "completed" ? 1 : 0,
+          chapters: [chapter],
+        });
+        continue;
+      }
+      existing.startChapter = Math.min(existing.startChapter, chapter.chapter_num);
+      existing.endChapter = Math.max(existing.endChapter, chapter.chapter_num);
+      existing.total += 1;
+      if (chapter.status === "completed") {
+        existing.completed += 1;
+      }
+      existing.chapters.push(chapter);
+    }
+
+    return Array.from(groups.values())
+      .sort((a, b) => a.volumeNo - b.volumeNo)
+      .map((group) => ({
+        ...group,
+        chapters: [...group.chapters].sort((a, b) => a.chapter_num - b.chapter_num),
+      }));
+  }, [chapterProgress]);
 
   const novelTitle = novel?.title || "未命名小说";
   const selectedChapterTitleDisplay = selectedChapter
@@ -291,6 +333,44 @@ export default function NovelPage() {
   }, [selectedChapterNum, activeVersionId]);
 
   useEffect(() => {
+    if (chapterProgress.length === 0) {
+      setSelectedChapterNum(null);
+      return;
+    }
+    if (selectedChapterNum === null || !chapterProgress.some((item) => item.chapter_num === selectedChapterNum)) {
+      setSelectedChapterNum(chapterProgress[0].chapter_num);
+    }
+  }, [chapterProgress, selectedChapterNum]);
+
+  useEffect(() => {
+    if (groupedVolumes.length === 0) {
+      setExpandedVolumeNos(new Set());
+      return;
+    }
+    const selectedVolume = selectedChapterNum === null
+      ? null
+      : groupedVolumes.find((group) => group.chapters.some((chapter) => chapter.chapter_num === selectedChapterNum));
+    const defaultVolume = selectedVolume || groupedVolumes[0];
+    setExpandedVolumeNos(new Set([defaultVolume.volumeNo]));
+  }, [activeVersionId, groupedVolumes]);
+
+  useEffect(() => {
+    if (selectedChapterNum === null || groupedVolumes.length === 0) return;
+    const selectedVolume = groupedVolumes.find((group) =>
+      group.chapters.some((chapter) => chapter.chapter_num === selectedChapterNum)
+    );
+    if (!selectedVolume) return;
+    setExpandedVolumeNos((prev) => {
+      if (prev.has(selectedVolume.volumeNo)) {
+        return prev;
+      }
+      const next = new Set(prev);
+      next.add(selectedVolume.volumeNo);
+      return next;
+    });
+  }, [selectedChapterNum, groupedVolumes]);
+
+  useEffect(() => {
     if (!selectionDraft) return;
 
     const onMouseDown = (event: MouseEvent) => {
@@ -371,6 +451,18 @@ export default function NovelPage() {
 
   const removeAnnotation = (index: number) => {
     setAnnotations((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const toggleVolumeExpand = (volumeNo: number) => {
+    setExpandedVolumeNos((prev) => {
+      const next = new Set(prev);
+      if (next.has(volumeNo)) {
+        next.delete(volumeNo);
+      } else {
+        next.add(volumeNo);
+      }
+      return next;
+    });
   };
 
   const renderSelectedChapterContent = (): ReactNode => {
@@ -610,36 +702,63 @@ export default function NovelPage() {
             <aside className="lg:col-span-1">
               <Card className="p-4 sticky top-24">
                 <h3 className="text-sm font-medium text-[#7E756D] mb-4">章节目录</h3>
-                <div className="space-y-1 max-h-[60vh] overflow-y-auto">
-                  {chapterProgress.map((chapter) => (
-                    <button
-                      key={chapter.chapter_num}
-                      onClick={() => setSelectedChapterNum(chapter.chapter_num)}
-                      className={[
-                        "w-full text-left px-3 py-2 rounded-lg text-sm transition-all",
-                        selectedChapterNum === chapter.chapter_num
-                          ? "bg-[#F8ECEA] text-[#A52A25] border border-[#EED1CC]"
-                          : "text-[#7E756D] hover:bg-[#F6F3EF] hover:text-[#1F1B18]",
-                      ].join(" ")}
-                    >
-                      <div className="font-medium flex items-center justify-between gap-2">
-                        <span className="inline-flex items-center gap-2">
-                          <span>第 {chapter.chapter_num} 章</span>
-                          {(annotationCountByChapter.get(chapter.chapter_num) || 0) > 0 ? (
-                            <span className="inline-flex min-w-5 h-5 items-center justify-center rounded-full bg-[#C8211B] px-1 text-[11px] font-semibold text-white">
-                              {annotationCountByChapter.get(chapter.chapter_num)}
+                <div className="space-y-2 max-h-[60vh] overflow-y-auto pr-1">
+                  {groupedVolumes.map((volume) => {
+                    const expanded = expandedVolumeNos.has(volume.volumeNo);
+                    const panelId = `volume-${volume.volumeNo}-chapters`;
+                    return (
+                      <div key={volume.volumeNo} className="rounded-[10px] border border-[#E7DDD4] bg-[#FFFCFA]">
+                        <button
+                          type="button"
+                          className="w-full px-3 py-2.5 flex items-center justify-between gap-3 text-left rounded-[10px] hover:bg-[#F8F4EF]"
+                          onClick={() => toggleVolumeExpand(volume.volumeNo)}
+                          aria-expanded={expanded}
+                          aria-controls={panelId}
+                        >
+                          <span className="min-w-0 inline-flex items-center gap-1.5 text-sm font-medium text-[#3A3A3C]">
+                            {expanded ? <ChevronDown className="w-4 h-4 text-[#8E8379]" /> : <ChevronRight className="w-4 h-4 text-[#8E8379]" />}
+                            <span className="truncate">
+                              第{volume.volumeNo}卷（{volume.startChapter}-{volume.endChapter}章）
                             </span>
-                          ) : null}
-                        </span>
-                        <Badge variant={CHAPTER_STATUS_MAP[chapter.status].variant}>
-                          {CHAPTER_STATUS_MAP[chapter.status].label}
-                        </Badge>
+                          </span>
+                          <span className="shrink-0 text-xs text-[#8E8379]">{volume.completed}/{volume.total}</span>
+                        </button>
+                        {expanded ? (
+                          <div id={panelId} className="space-y-1 border-t border-[#EFE7E0] px-2 pb-2 pt-1.5">
+                            {volume.chapters.map((chapter) => (
+                              <button
+                                key={chapter.chapter_num}
+                                onClick={() => setSelectedChapterNum(chapter.chapter_num)}
+                                className={[
+                                  "w-full text-left px-3 py-2 rounded-lg text-sm transition-all",
+                                  selectedChapterNum === chapter.chapter_num
+                                    ? "bg-[#F8ECEA] text-[#A52A25] border border-[#EED1CC]"
+                                    : "text-[#7E756D] hover:bg-[#F6F3EF] hover:text-[#1F1B18]",
+                                ].join(" ")}
+                              >
+                                <div className="font-medium flex items-center justify-between gap-2">
+                                  <span className="inline-flex items-center gap-2">
+                                    <span>第 {chapter.chapter_num} 章</span>
+                                    {(annotationCountByChapter.get(chapter.chapter_num) || 0) > 0 ? (
+                                      <span className="inline-flex min-w-5 h-5 items-center justify-center rounded-full bg-[#C8211B] px-1 text-[11px] font-semibold text-white">
+                                        {annotationCountByChapter.get(chapter.chapter_num)}
+                                      </span>
+                                    ) : null}
+                                  </span>
+                                  <Badge variant={CHAPTER_STATUS_MAP[chapter.status].variant}>
+                                    {CHAPTER_STATUS_MAP[chapter.status].label}
+                                  </Badge>
+                                </div>
+                                <div className="text-xs opacity-70 truncate">
+                                  {getDisplayChapterTitle(chapter.chapter_num, chapter.title)}
+                                </div>
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
                       </div>
-                      <div className="text-xs opacity-70 truncate">
-                        {getDisplayChapterTitle(chapter.chapter_num, chapter.title)}
-                      </div>
-                    </button>
-                  ))}
+                    );
+                  })}
                 </div>
               </Card>
             </aside>

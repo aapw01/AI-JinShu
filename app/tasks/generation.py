@@ -34,8 +34,8 @@ from app.services.task_runtime.checkpoint_repo import (
 from app.services.task_runtime.cursor_service import resume_from_last_completed
 
 from app.services.task_runtime.lease_service import background_heartbeat
+from app.core.constants import CREATION_WORKER_HEARTBEAT_SECONDS
 from app.services.generation.contracts import OutputContractError
-from app.services.system_settings.runtime import get_effective_runtime_setting
 from app.core.llm_contract import get_last_prompt_meta
 
 logger = logging.getLogger(__name__)
@@ -601,10 +601,8 @@ def submit_book_generation_task(
                 return task_id
 
         from app.models.novel import GenerationTask
-        from app.services.system_settings.runtime import get_effective_runtime_setting
 
-        hb_interval = max(5, int(get_effective_runtime_setting("creation_worker_heartbeat_seconds", int, 30) or 30))
-        hb_ctx = background_heartbeat(creation_task_id, heartbeat_fn=_heartbeat_creation, interval_seconds=hb_interval)
+        hb_ctx = background_heartbeat(creation_task_id, heartbeat_fn=_heartbeat_creation, interval_seconds=CREATION_WORKER_HEARTBEAT_SECONDS)
         hb_ctx.__enter__()
 
         db = SessionLocal()
@@ -767,7 +765,7 @@ def submit_book_generation_task(
             db = SessionLocal()
             try:
                 novel = db.execute(select(Novel).where(Novel.id == novel_id)).scalar_one_or_none()
-                if novel and not is_paused:
+                if novel and not is_paused and not is_cancelled:
                     novel.status = "failed"
                     db.commit()
             finally:

@@ -8,30 +8,13 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from app.core.llm import get_llm
+from app.core.constants import LLM_OUTPUT_MAX_SCHEMA_RETRIES, LLM_OUTPUT_MIN_CHARS
+from app.core.llm import get_llm, resolve_effective_adapter
 from app.core.llm_usage import record_usage_from_response
 from app.services.generation.contracts import ChapterBodySchema, OutputContractError, validate_chapter_body
-from app.services.system_settings.runtime import (
-    get_effective_runtime_setting,
-    get_enabled_provider_order,
-    get_provider_runtime,
-)
 
 logger = logging.getLogger(__name__)
 _LAST_PROMPT_META: ContextVar[dict[str, Any] | None] = ContextVar("llm_contract_last_prompt_meta", default=None)
-
-
-def _adapter_for_provider(provider_key: str | None) -> str:
-    key = str(provider_key or "").strip().lower()
-    runtime = get_provider_runtime(key) if key else None
-    adapter = str((runtime or {}).get("adapter_type") or "").strip().lower()
-    if adapter in {"openai_compatible", "anthropic", "gemini"}:
-        return adapter
-    if key == "anthropic":
-        return "anthropic"
-    if key == "gemini":
-        return "gemini"
-    return "openai_compatible"
 
 
 def _method_order(adapter_type: str) -> list[str]:
@@ -59,28 +42,11 @@ def _extract_parsed_body(parsed: Any) -> str:
 def _provider_candidates(
     provider: str | None,
     model: str | None,
-    max_provider_fallbacks: int,
+    _unused: int,
 ) -> list[tuple[str | None, str | None]]:
-    requested = str(provider or "").strip().lower() or None
-    candidates: list[tuple[str | None, str | None]] = []
-    if requested:
-        candidates.append((requested, model))
-    elif provider is not None:
-        candidates.append((provider, model))
-    else:
-        candidates.append((None, model))
-
-    order = get_enabled_provider_order()
-    appended = 0
-    for item in order:
-        key = str(item or "").strip().lower()
-        if not key or key == requested:
-            continue
-        if appended >= max(0, int(max_provider_fallbacks)):
-            break
-        candidates.append((key, None))
-        appended += 1
-    return candidates
+    if provider is not None:
+        return [(provider, model)]
+    return [(None, model)]
 
 
 def prompt_hash(prompt: str) -> str:
@@ -109,32 +75,17 @@ def invoke_chapter_body_structured(
 ) -> str:
     """Invoke LLM with strict chapter-body structured contract."""
 
-    schema_retries = int(
-        retries
-        if retries is not None
-        else (get_effective_runtime_setting("llm_output_max_schema_retries", int, 2) or 2)
-    )
-    schema_retries = max(0, schema_retries)
-    min_body_chars = int(
-        min_chars
-        if min_chars is not None
-        else (get_effective_runtime_setting("llm_output_min_chars", int, 120) or 120)
-    )
-    provider_fallbacks = int(
-        max_provider_fallbacks
-        if max_provider_fallbacks is not None
-        else (get_effective_runtime_setting("llm_output_max_provider_fallbacks", int, 2) or 2)
-    )
-    provider_fallbacks = max(0, provider_fallbacks)
+    schema_retries = max(0, int(retries if retries is not None else LLM_OUTPUT_MAX_SCHEMA_RETRIES))
+    min_body_chars = int(min_chars if min_chars is not None else LLM_OUTPUT_MIN_CHARS)
     p_template = str(prompt_template or stage)
     p_version = str(prompt_version or "v2")
     p_hash = prompt_hash(prompt)
 
     failures: list[str] = []
-    candidates = _provider_candidates(provider, model, provider_fallbacks)
+    candidates = _provider_candidates(provider, model, 0)
 
     for candidate_provider, candidate_model in candidates:
-        adapter = _adapter_for_provider(candidate_provider)
+        adapter, _ = resolve_effective_adapter(candidate_provider)
         methods = _method_order(adapter)
         for method in methods:
             for attempt in range(schema_retries + 1):

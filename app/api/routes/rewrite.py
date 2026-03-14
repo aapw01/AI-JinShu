@@ -34,7 +34,7 @@ from app.services.rewrite.service import (
     validate_annotation_payload,
 )
 from app.models.creation_task import CreationTask
-from app.services.scheduler.scheduler_service import get_task_by_public_id, submit_task, resume_task
+from app.services.scheduler.scheduler_service import cancel_task, get_task_by_public_id, pause_task, submit_task, resume_task
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -355,6 +355,62 @@ def get_rewrite_status(
     )
 
 
+@router.post("/{novel_id}/rewrite-requests/{request_id}/pause")
+def pause_rewrite_request(
+    novel_id: str,
+    request_id: int,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(Permission.NOVEL_REWRITE, resource_loader=load_novel_resource)),
+):
+    novel = resolve_novel(db, novel_id)
+    if not novel:
+        raise http_error(404, "novel_not_found", "Novel not found")
+    row = db.execute(
+        select(RewriteRequest).where(RewriteRequest.id == request_id, RewriteRequest.novel_id == novel.id)
+    ).scalar_one_or_none()
+    if not row:
+        raise http_error(404, "rewrite_request_not_found", "Rewrite request not found")
+    if not row.task_id:
+        raise http_error(409, "no_active_task", "No active task to pause")
+    try:
+        pause_task(db, public_id=row.task_id, user_uuid=principal.user_uuid or "")
+    except ValueError as exc:
+        code = str(exc)
+        if code == "task_not_found":
+            raise http_error(404, "task_not_found", "Task not found")
+        raise http_error(409, "task_not_pausable", "当前任务不可暂停")
+    row.status = "paused"
+    db.commit()
+    return {"ok": True, "task_id": row.task_id, "status": "paused"}
+
+
+@router.post("/{novel_id}/rewrite-requests/{request_id}/cancel")
+def cancel_rewrite_request(
+    novel_id: str,
+    request_id: int,
+    db: Session = Depends(get_db),
+    principal: Principal = Depends(require_permission(Permission.NOVEL_REWRITE, resource_loader=load_novel_resource)),
+):
+    novel = resolve_novel(db, novel_id)
+    if not novel:
+        raise http_error(404, "novel_not_found", "Novel not found")
+    row = db.execute(
+        select(RewriteRequest).where(RewriteRequest.id == request_id, RewriteRequest.novel_id == novel.id)
+    ).scalar_one_or_none()
+    if not row:
+        raise http_error(404, "rewrite_request_not_found", "Rewrite request not found")
+    if row.status in {"completed", "cancelled"}:
+        return {"ok": True, "task_id": row.task_id, "status": row.status}
+    if row.task_id:
+        try:
+            cancel_task(db, public_id=row.task_id, user_uuid=principal.user_uuid or "")
+        except ValueError:
+            pass
+    row.status = "cancelled"
+    db.commit()
+    return {"ok": True, "task_id": row.task_id, "status": "cancelled"}
+
+
 @router.post("/{novel_id}/rewrite-requests/{request_id}/retry", response_model=RewriteRequestResponse)
 def retry_rewrite_request(
     novel_id: str,
@@ -371,7 +427,7 @@ def retry_rewrite_request(
     ).scalar_one_or_none()
     if not row:
         raise http_error(404, "rewrite_request_not_found", "Rewrite request not found")
-    if row.status not in {"failed", "cancelled"}:
+    if row.status not in {"failed", "cancelled", "paused"}:
         raise http_error(409, "rewrite_not_retryable", f"当前状态 {row.status} 不支持重试")
 
     existing_creation = db.execute(

@@ -42,48 +42,41 @@ def test_admin_settings_models_and_runtime_crud(client):
     r1 = client.get("/api/admin/settings/models")
     assert r1.status_code == 200
     body1 = r1.json()
-    assert "providers" in body1
-    assert "default_models" in body1
+    assert "primary_chat" in body1
+    assert "embedding" in body1
 
     save_models = client.put(
         "/api/admin/settings/models",
         json={
-            "providers": [
-                {
-                    "provider_key": "local-openai",
-                    "display_name": "本地 OpenAI",
-                    "adapter_type": "openai_compatible",
-                    "base_url": "http://127.0.0.1:1234/v1",
-                    "api_key": "sk-local-1",
-                    "is_enabled": True,
-                    "priority": 1,
-                    "models": [
-                        {
-                            "model_name": "qwen-plus",
-                            "model_type": "chat",
-                            "is_default": True,
-                            "is_enabled": True,
-                        },
-                        {
-                            "model_name": "text-embedding-3-small",
-                            "model_type": "embedding",
-                            "is_default": True,
-                            "is_enabled": True,
-                        },
-                    ],
-                }
-            ]
+            "primary_chat": {
+                "provider": "openai",
+                "model": "qwen-plus",
+                "base_url": "http://127.0.0.1:1234/v1",
+                "api_key": "sk-local-1",
+                "protocol_override": "openai_compatible",
+            },
+            "embedding": {
+                "enabled": True,
+                "model": "text-embedding-3-small",
+                "reuse_primary_connection": False,
+                "base_url": "http://127.0.0.1:1234/v1",
+                "api_key": "sk-embed-1",
+                "protocol_override": "openai_compatible",
+            },
         },
     )
     assert save_models.status_code == 200
     body2 = save_models.json()
-    assert body2["default_models"]["chat"]["provider_key"] == "local-openai"
-    assert body2["providers"][0]["api_key_value"] is None
+    assert body2["primary_chat"]["provider"] == "openai"
+    assert body2["primary_chat"]["model"] == "qwen-plus"
+    assert body2["primary_chat"]["api_key_value"] is None
+    assert body2["embedding"]["model"] == "text-embedding-3-small"
 
     with_secret = client.get("/api/admin/settings/models?include_secrets=true")
     assert with_secret.status_code == 200
-    providers = with_secret.json()["providers"]
-    assert providers[0]["api_key_value"] == "sk-local-1"
+    payload = with_secret.json()
+    assert payload["primary_chat"]["api_key_value"] == "sk-local-1"
+    assert payload["embedding"]["api_key_value"] == "sk-embed-1"
 
     r_runtime = client.put(
         "/api/admin/settings/runtime",
@@ -91,10 +84,6 @@ def test_admin_settings_models_and_runtime_crud(client):
             "updates": {
                 "creation_scheduler_enabled": True,
                 "creation_default_max_concurrent_tasks": 5,
-                "quota_enforce_concurrency_limit": True,
-                "llm_output_max_schema_retries": 3,
-                "llm_output_max_provider_fallbacks": 2,
-                "llm_output_min_chars": 256,
             }
         },
     )
@@ -102,9 +91,6 @@ def test_admin_settings_models_and_runtime_crud(client):
     runtime_items = {item["key"]: item for item in r_runtime.json()["items"]}
     assert runtime_items["creation_default_max_concurrent_tasks"]["value"] == 5
     assert runtime_items["creation_default_max_concurrent_tasks"]["source"] == "db"
-    assert runtime_items["llm_output_max_schema_retries"]["value"] == 3
-    assert runtime_items["llm_output_max_provider_fallbacks"]["value"] == 2
-    assert runtime_items["llm_output_min_chars"]["value"] == 256
 
     reset_runtime = client.put(
         "/api/admin/settings/runtime",

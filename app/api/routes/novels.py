@@ -151,6 +151,8 @@ def generate_idea(
         hook=framework["hook"],
         selling_point=framework["selling_point"],
         editable_framework=editable[:600],
+        recommended_genre=framework.get("recommended_genre"),
+        recommended_style=framework.get("recommended_style"),
     )
 
 

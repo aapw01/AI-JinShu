@@ -44,7 +44,6 @@ def test_invoke_contract_uses_method_fallback_for_openai(monkeypatch):
         }
     )
     monkeypatch.setattr("app.core.llm_contract.get_llm", lambda *_args, **_kwargs: fake)
-    monkeypatch.setattr("app.core.llm_contract.get_enabled_provider_order", lambda: ["openai"])
     out = invoke_chapter_body_structured(
         prompt="x",
         stage="writer",
@@ -62,38 +61,28 @@ def test_invoke_contract_uses_method_fallback_for_openai(monkeypatch):
     assert meta.get("prompt_hash")
 
 
-def test_invoke_contract_fallbacks_to_next_provider(monkeypatch):
-    anthro = _FakeLLM(
+def test_invoke_contract_does_not_switch_provider(monkeypatch):
+    fake = _FakeLLM(
         {
-            "function_calling": {
-                "parsed": {"chapter_body": "这是Anthropic回退成功后的正文输出，长度满足最小门槛。"},
-                "raw": _RawResponse(),
-                "parsing_error": None,
-            }
+            "json_schema": {"parsed": None, "raw": _RawResponse(), "parsing_error": ValueError("bad json")},
+            "function_calling": {"parsed": None, "raw": _RawResponse(), "parsing_error": ValueError("bad json")},
+            "json_mode": {"parsed": None, "raw": _RawResponse(), "parsing_error": ValueError("bad json")},
         }
     )
-
-    def _get_llm(provider=None, model=None):
-        if provider == "openai":
-            raise RuntimeError("openai down")
-        if provider == "anthropic":
-            return anthro
-        raise RuntimeError("unexpected provider")
-
-    monkeypatch.setattr("app.core.llm_contract.get_llm", _get_llm)
-    monkeypatch.setattr("app.core.llm_contract.get_enabled_provider_order", lambda: ["openai", "anthropic"])
-    out = invoke_chapter_body_structured(
-        prompt="x",
-        stage="writer",
-        provider="openai",
-        model="m",
-        chapter_num=1,
-        retries=0,
-        min_chars=5,
-        max_provider_fallbacks=2,
-    )
-    assert "Anthropic回退成功" in out
-    assert anthro.calls[0] == "function_calling"
+    monkeypatch.setattr("app.core.llm_contract.get_llm", lambda *_args, **_kwargs: fake)
+    with pytest.raises(OutputContractError) as exc_info:
+        invoke_chapter_body_structured(
+            prompt="x",
+            stage="writer",
+            provider="openai",
+            model="m",
+            chapter_num=1,
+            retries=0,
+            min_chars=5,
+            max_provider_fallbacks=2,
+        )
+    assert exc_info.value.code == "MODEL_OUTPUT_CONTRACT_EXHAUSTED"
+    assert fake.calls == ["json_schema", "function_calling", "json_mode"]
 
 
 def test_invoke_contract_strict_exhausted_raises(monkeypatch):
@@ -105,7 +94,6 @@ def test_invoke_contract_strict_exhausted_raises(monkeypatch):
         }
     )
     monkeypatch.setattr("app.core.llm_contract.get_llm", lambda *_args, **_kwargs: fake)
-    monkeypatch.setattr("app.core.llm_contract.get_enabled_provider_order", lambda: ["openai"])
     with pytest.raises(OutputContractError) as exc_info:
         invoke_chapter_body_structured(
             prompt="x",

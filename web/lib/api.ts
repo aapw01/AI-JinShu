@@ -100,6 +100,8 @@ export interface ChapterProgress {
   chapter_num: number;
   title?: string;
   status: "pending" | "generating" | "completed";
+  volume_no: number;
+  volume_size: number;
 }
 
 export interface GenerationStatus {
@@ -274,6 +276,8 @@ export interface IdeaFrameworkResponse {
   hook: string;
   selling_point: string;
   editable_framework: string;
+  recommended_genre?: string | null;
+  recommended_style?: string | null;
 }
 
 export interface AuthUser {
@@ -311,38 +315,41 @@ export interface UpdateQuotaData {
   monthly_token_limit?: number;
 }
 
-export type AdminModelType = "chat" | "embedding" | "image" | "video";
-export type AdminAdapterType = "openai_compatible" | "anthropic" | "gemini";
+export type AdminProviderKind = "openai" | "anthropic" | "gemini";
+export type AdminProtocolOverride = "openai_compatible" | "anthropic" | "gemini";
 
-export interface AdminModelDefinition {
-  model_name: string;
-  model_type: AdminModelType;
-  is_default: boolean;
-  is_enabled: boolean;
-  metadata?: Record<string, unknown>;
-  source?: string;
-}
-
-export interface AdminModelProvider {
-  provider_key: string;
-  display_name: string;
-  adapter_type: AdminAdapterType;
+export interface AdminPrimaryChatSettings {
+  provider: AdminProviderKind;
+  model: string;
   base_url?: string | null;
   api_key?: string | null;
   api_key_value?: string | null;
   api_key_masked?: string;
   api_key_source?: string;
   api_key_is_encrypted?: boolean;
-  is_enabled: boolean;
-  priority: number;
-  models: AdminModelDefinition[];
+  protocol_override?: AdminProtocolOverride | null;
+  resolved_protocol?: string;
+  source?: string;
+}
+
+export interface AdminEmbeddingSettings {
+  enabled: boolean;
+  model?: string | null;
+  reuse_primary_connection: boolean;
+  base_url?: string | null;
+  api_key?: string | null;
+  api_key_value?: string | null;
+  api_key_masked?: string;
+  api_key_source?: string;
+  api_key_is_encrypted?: boolean;
+  protocol_override?: AdminProtocolOverride | null;
+  resolved_protocol?: string;
   source?: string;
 }
 
 export interface AdminModelSettingsResponse {
-  providers: AdminModelProvider[];
-  default_models: Record<string, { provider_key?: string | null; model_name?: string | null; source?: string }>;
-  fallback_order: string[];
+  primary_chat: AdminPrimaryChatSettings;
+  embedding: AdminEmbeddingSettings;
   security_mode: "encrypted" | "plaintext" | string;
 }
 
@@ -909,10 +916,10 @@ export const api = {
     return fetchApi<AdminModelSettingsResponse>(`/api/admin/settings/models${suffix}`);
   },
 
-  updateAdminModelSettings: (providers: AdminModelProvider[]) =>
+  updateAdminModelSettings: (payload: { primary_chat: AdminPrimaryChatSettings; embedding: AdminEmbeddingSettings }) =>
     fetchApi<AdminModelSettingsResponse>("/api/admin/settings/models", {
       method: "PUT",
-      body: JSON.stringify({ providers }),
+      body: JSON.stringify(payload),
     }),
 
   getAdminRuntimeSettings: () =>

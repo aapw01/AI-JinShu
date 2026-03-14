@@ -36,7 +36,9 @@ from app.services.system_settings.repository import (
 )
 from app.services.system_settings.runtime import (
     get_effective_model_config,
+    get_embedding_runtime,
     get_model_settings_for_admin,
+    get_primary_chat_runtime,
     get_runtime_overrides,
     get_runtime_settings_with_sources,
     invalidate_caches,
@@ -342,17 +344,6 @@ def observability_summary(
 _RUNTIME_KEYS_IN_ORDER = [
     "creation_scheduler_enabled",
     "creation_default_max_concurrent_tasks",
-    "creation_max_dispatch_batch",
-    "creation_worker_lease_ttl_seconds",
-    "creation_worker_heartbeat_seconds",
-    "quota_enforce_concurrency_limit",
-    "quota_free_monthly_chapter_limit",
-    "quota_free_monthly_token_limit",
-    "quota_admin_monthly_chapter_limit",
-    "quota_admin_monthly_token_limit",
-    "llm_output_max_schema_retries",
-    "llm_output_max_provider_fallbacks",
-    "llm_output_min_chars",
 ]
 
 
@@ -377,15 +368,17 @@ def put_system_model_settings(
     principal: Principal = Depends(require_permission(Permission.SYSTEM_SETTINGS_WRITE)),
 ):
     try:
-        replace_model_settings(
-            db,
-            providers=[p.model_dump() for p in req.providers],
-        )
+        replace_model_settings(db, primary_chat=req.primary_chat.model_dump(), embedding=req.embedding.model_dump())
         _log_settings_audit(
             db=db,
             principal=principal,
             action="update_system_model_settings",
-            metadata={"providers_count": len(req.providers)},
+            metadata={
+                "primary_chat_provider": req.primary_chat.provider,
+                "primary_chat_model": req.primary_chat.model,
+                "embedding_enabled": req.embedding.enabled,
+                "embedding_model": req.embedding.model,
+            },
         )
         db.commit()
     except SettingsValidationError as exc:
@@ -441,14 +434,12 @@ def put_system_runtime_settings(
 def get_effective_system_settings(
     _: Principal = Depends(require_permission(Permission.SYSTEM_SETTINGS_READ)),
 ):
-    model_settings = get_model_settings_for_admin()
-    effective_models = get_effective_model_config()
     return {
-        "models": model_settings,
+        "models": get_model_settings_for_admin(),
         "runtime_overrides": get_runtime_overrides(),
         "effective": {
-            "default_models": effective_models.get("default_models", {}),
-            "fallback_order": effective_models.get("fallback_order", []),
-            "providers": model_settings.get("providers", []),
+            "primary_chat": get_primary_chat_runtime(),
+            "embedding": get_embedding_runtime(),
+            "security_mode": get_effective_model_config().get("security_mode", "plaintext"),
         },
     }

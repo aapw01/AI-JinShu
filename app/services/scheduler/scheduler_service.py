@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.models.creation_task import CreationTask
 from app.services.scheduler.concurrency_service import count_user_running_slots, get_user_concurrency_limit
+from app.core.constants import CREATION_MAX_DISPATCH_BATCH, CREATION_WORKER_LEASE_TTL_SECONDS
 from app.services.scheduler.lock_service import acquire_user_dispatch_lock
 from app.services.system_settings.runtime import get_effective_runtime_setting
 from app.services.task_runtime.lease_service import acquire_or_refresh_lease
@@ -29,7 +30,7 @@ def _utc_now() -> datetime:
 
 
 def _lease_ttl_seconds() -> int:
-    return max(5, int(get_effective_runtime_setting("creation_worker_lease_ttl_seconds", int, 20) or 20))
+    return CREATION_WORKER_LEASE_TTL_SECONDS
 
 
 def submit_task(
@@ -205,7 +206,7 @@ def finalize_task(
         return None
     if task.status in TERMINAL_STATUSES and final_status in TERMINAL_STATUSES:
         return task
-    if task.status == "queued" and final_status in {"paused", "failed"}:
+    if task.status == "queued" and final_status != "queued":
         logger.info(
             "Ignoring stale finalize (status=%s→%s) for task %s — task was already re-queued",
             task.status, final_status, task_id,
@@ -364,6 +365,7 @@ def reclaim_stale_running_tasks(db: Session) -> int:
     reclaimed = 0
     old_worker_ids: list[str] = []
     redis_cleanup: list[tuple[str | None, str | None, str | None]] = []
+    MAX_RECOVERY_COUNT = 10
     for row in all_stale:
         if row.worker_task_id:
             old_worker_ids.append(str(row.worker_task_id))
@@ -372,6 +374,17 @@ def reclaim_stale_running_tasks(db: Session) -> int:
             row.public_id,
             str(row.resource_id) if row.task_type == "generation" and row.resource_type == "novel" else None,
         ))
+        if int(row.recovery_count or 0) >= MAX_RECOVERY_COUNT:
+            row.status = "failed"
+            row.phase = "failed"
+            row.finished_at = _utc_now()
+            row.error_code = "MAX_RECOVERIES_EXCEEDED"
+            row.error_category = "permanent"
+            row.message = f"任务自动恢复次数超限（{MAX_RECOVERY_COUNT}次），已标记失败"
+            row.worker_task_id = None
+            row.worker_lease_expires_at = None
+            reclaimed += 1
+            continue
         row.status = "queued"
         row.phase = "queued"
         row.message = "任务自动恢复：检测到worker中断，已重新入队"
@@ -391,9 +404,6 @@ def reclaim_stale_running_tasks(db: Session) -> int:
         _reclaim_update_redis(redis_cleanup)
     if reclaimed:
         db.flush()
-        users = {str(r.user_uuid) for r in all_stale if r.user_uuid}
-        for user_uuid in users:
-            dispatch_user_queue(db, user_uuid=user_uuid)
     return reclaimed
 
 
@@ -406,7 +416,7 @@ def dispatch_user_queue(db: Session, *, user_uuid: str) -> list[CreationTask]:
     available = max(0, int(limit) - int(running_slots))
     if available <= 0:
         return []
-    batch_max = max(1, int(get_effective_runtime_setting("creation_max_dispatch_batch", int, 5) or 5))
+    batch_max = CREATION_MAX_DISPATCH_BATCH
     to_dispatch_count = min(available, batch_max)
     queued = list(
         db.execute(

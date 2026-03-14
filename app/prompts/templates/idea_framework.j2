@@ -1,4 +1,4 @@
-你是资深网文策划编辑。请根据标题生成“可直接开写”的创意框架。
+你是资深网文策划编辑。请根据标题生成"可直接开写"的创意框架，并推荐最匹配的故事类型和写作风格。
 
 输入信息：
 - 标题：{{ title }}
@@ -6,16 +6,26 @@
 - 类型偏好：{{ genre or "未指定" }}
 - 风格偏好：{{ style or "未指定" }}
 
+可选的故事类型（id → 名称）：
+{% for g in genre_options %}- {{ g.id }}：{{ g.label }}（{{ g.description }}）
+{% endfor %}
+可选的写作风格（id → 名称）：
+{% for s in style_options %}- {{ s.id }}：{{ s.label }}（{{ s.description }}）
+{% endfor %}
 输出要求（必须纯 JSON，不要 Markdown）：
 {
   "one_liner": "一句话创意（40~90字）",
   "premise": "背景设定（30~80字）",
   "conflict": "核心冲突（30~80字）",
   "hook": "开篇钩子（30~80字）",
-  "selling_point": "连载卖点（30~80字）"
+  "selling_point": "连载卖点（30~80字）",
+  "recommended_genre": "从上面可选类型中选出最匹配的 id",
+  "recommended_style": "从上面可选风格中选出最匹配的 id"
 }
 
 约束：
 1) 不要空泛套话，必须围绕标题给出具体冲突与目标。
-2) 不新增“与标题无关”的世界观。
+2) 不新增"与标题无关"的世界观。
 3) 语言自然可读，适合直接给作者继续修改和开写。
+4) recommended_genre 和 recommended_style 必须是上面列出的有效 id 值。
+5) 如果用户已经指定了类型或风格偏好，优先采用用户选择，仅在"未指定"时自行判断。

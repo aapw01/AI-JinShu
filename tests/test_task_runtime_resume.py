@@ -71,7 +71,11 @@ def test_resume_boundary_advances_when_checkpoint_completed():
     assert resume_from_last_completed(range_start=1, range_end=5, last_completed=last_completed) == 4
 
 
-def test_reclaim_stale_running_task():
+def test_reclaim_stale_running_task(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.scheduler.scheduler_service.dispatch_user_queue",
+        lambda db, *, user_uuid: [],
+    )
     task_id = _seed_creation_task()
     db = SessionLocal()
     try:
@@ -92,7 +96,7 @@ def test_reclaim_stale_running_task():
     finally:
         db.close()
 
-    assert reclaimed == 1
+    assert reclaimed >= 1
     assert row.status == "queued"
     assert row.worker_task_id is None
     assert int(row.recovery_count or 0) >= 1

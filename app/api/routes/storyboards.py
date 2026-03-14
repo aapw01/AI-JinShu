@@ -126,6 +126,18 @@ def _redis_key(task_id: str) -> str:
     return f"storyboard:task:{task_id}"
 
 
+def _update_storyboard_redis(task_id: str, status: str, message: str, row: "StoryboardTask | None" = None) -> None:
+    try:
+        import json as _json
+        data: dict = {"status": status, "run_state": status, "message": message}
+        if row:
+            data["progress"] = float(row.progress or 0)
+            data["storyboard_project_id"] = row.storyboard_project_id
+        _get_redis().setex(_redis_key(task_id), 21600, _json.dumps(data, ensure_ascii=False))
+    except Exception:
+        pass
+
+
 def _to_project_response(p: StoryboardProject, novel_public_id: str, novel_title: str | None = None) -> StoryboardProjectResponse:
     lanes = p.output_lanes if isinstance(p.output_lanes, list) else ["vertical_feed", "horizontal_cinematic"]
     cfg = project_config(p)
@@ -795,6 +807,10 @@ def get_storyboard_status(
                 payload.setdefault("character_profiles_count", gate.get("character_profiles_count"))
                 payload.setdefault("missing_identity_fields_count", gate.get("missing_identity_fields_count"))
                 payload.setdefault("failed_identity_characters", gate.get("failed_identity_characters"))
+                if row.status in ("cancelled", "failed", "completed", "paused"):
+                    payload["status"] = row.status
+                    payload["run_state"] = row.run_state or row.status
+                    payload["message"] = row.message or payload.get("message")
                 return StoryboardTaskStatusResponse(**payload)
         except Exception:
             pass
@@ -823,6 +839,7 @@ def pause_storyboard_task(
         raise http_error(409, "task_not_pausable", "当前任务不可暂停")
     update_task_state(db, row, status="paused", run_state="paused", phase="paused", message="分镜任务已暂停")
     db.commit()
+    _update_storyboard_redis(row.task_id, "paused", "分镜任务已暂停", row)
     return StoryboardActionResponse(ok=True, storyboard_project_id=project_id, task_id=row.task_id, run_state=row.run_state)
 
 
@@ -846,8 +863,9 @@ def resume_storyboard_task(
         if code == "task_not_active":
             raise http_error(409, "task_not_active", "Task is not active")
         raise http_error(409, "task_not_resumable", "当前任务不可恢复")
-    update_task_state(db, row, status="running", run_state="running", phase="resume", message="分镜任务已恢复")
+    update_task_state(db, row, status="submitted", run_state="queued", phase="queued", message="分镜任务已恢复，等待调度")
     db.commit()
+    _update_storyboard_redis(row.task_id, "queued", "分镜任务已恢复，等待调度", row)
     return StoryboardActionResponse(ok=True, storyboard_project_id=project_id, task_id=row.task_id, run_state=row.run_state)
 
 
@@ -874,8 +892,9 @@ def cancel_storyboard_task(
     update_task_state(db, row, status="cancelled", run_state="cancelled", phase="cancelled", message="分镜任务已取消")
     project = get_project_or_404(db, project_id)
     if project:
-        project.status = "failed"
+        project.status = "cancelled"
     db.commit()
+    _update_storyboard_redis(row.task_id, "cancelled", "分镜任务已取消", row)
     return StoryboardActionResponse(ok=True, storyboard_project_id=project_id, task_id=row.task_id, run_state=row.run_state)
 
 

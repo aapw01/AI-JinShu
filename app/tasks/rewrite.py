@@ -26,7 +26,7 @@ from app.services.scheduler.scheduler_service import (
     mark_task_running as mark_creation_task_running,
     update_task_progress as update_creation_task_progress,
 )
-from app.services.system_settings.runtime import get_effective_runtime_setting
+from app.core.constants import CREATION_WORKER_HEARTBEAT_SECONDS
 from app.services.task_runtime.checkpoint_repo import (
     get_last_completed_unit,
     mark_unit_completed,
@@ -274,8 +274,7 @@ def submit_rewrite_task(
     creation_task_id: int | None = None,
 ):
     begin_usage_session(f"rewrite:{self.request.id}")
-    hb_interval = max(5, int(get_effective_runtime_setting("creation_worker_heartbeat_seconds", int, 30) or 30))
-    hb_ctx = background_heartbeat(creation_task_id, heartbeat_fn=_heartbeat_creation, interval_seconds=hb_interval)
+    hb_ctx = background_heartbeat(creation_task_id, heartbeat_fn=_heartbeat_creation, interval_seconds=CREATION_WORKER_HEARTBEAT_SECONDS)
     hb_ctx.__enter__()
     _worker_superseded = False
     db = SessionLocal()
@@ -309,10 +308,8 @@ def submit_rewrite_task(
             raise RuntimeError("rewrite target not found")
 
         req.status = "running"
-        req.task_id = self.request.id
         req.error = None
         target_version.status = "generating"
-        target_version.source_task_id = self.request.id
         db.commit()
         with bind_log_context(task_id=self.request.id, novel_id=novel_id):
             log_event(
