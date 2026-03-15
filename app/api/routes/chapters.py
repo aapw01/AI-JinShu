@@ -14,7 +14,8 @@ from app.core.authz.resources import load_novel_resource
 from app.core.authz.types import Permission, Principal
 from app.core.database import get_db, resolve_novel
 from app.core.time_utils import to_utc_iso_z
-from app.models.novel import ChapterOutline, GenerationTask, ChapterVersion
+from app.models.creation_task import CreationTask
+from app.models.novel import ChapterOutline, ChapterVersion
 from app.schemas.novel import ChapterProgressResponse, ChapterResponse
 from app.services.generation.common import is_effective_title, resolve_chapter_title
 from app.services.rewrite.service import get_chapter_version, list_chapter_versions
@@ -79,6 +80,26 @@ def _get_generating_chapter_from_redis(novel_db_id: int) -> int | None:
     except Exception:
         return None
     return None
+
+
+def _get_generating_chapter_from_creation_task(task: CreationTask) -> int | None:
+    payload = task.payload_json if isinstance(task.payload_json, dict) else {}
+    cursor = task.resume_cursor_json if isinstance(task.resume_cursor_json, dict) else {}
+    runtime_state = cursor.get("runtime_state") if isinstance(cursor.get("runtime_state"), dict) else {}
+
+    if bool(payload.get("awaiting_outline_confirmation")) and not bool(payload.get("outline_confirmed")):
+        chapter = int(payload.get("start_chapter") or 0)
+        return chapter or None
+
+    if str(runtime_state.get("node") or "") == "final_book_review":
+        return None
+
+    resume_from = int(runtime_state.get("resume_from_chapter") or cursor.get("next") or 0)
+    if resume_from > 0:
+        return resume_from
+
+    chapter = int(payload.get("start_chapter") or 0)
+    return chapter or None
 
 
 def _to_version_response(
@@ -175,18 +196,20 @@ def get_chapter_progress(
     generated_map = {c.chapter_num: c for c in version_chapters}
 
     active_stmt = (
-        select(GenerationTask)
+        select(CreationTask)
         .where(
-            GenerationTask.novel_id == novel.id,
-            GenerationTask.status.in_(["submitted", "running"]),
+            CreationTask.resource_type == "novel",
+            CreationTask.resource_id == novel.id,
+            CreationTask.task_type == "generation",
+            CreationTask.status.in_(["queued", "dispatching", "running"]),
         )
-        .order_by(GenerationTask.updated_at.desc())
+        .order_by(CreationTask.updated_at.desc())
         .limit(1)
     )
     active_task = db.execute(active_stmt).scalar_one_or_none()
     generating_chapter = _get_generating_chapter_from_redis(novel.id)
-    if generating_chapter is None:
-        generating_chapter = active_task.current_chapter if active_task else None
+    if generating_chapter is None and active_task:
+        generating_chapter = _get_generating_chapter_from_creation_task(active_task)
     volume_size = _resolve_volume_size(novel.config if isinstance(novel.config, dict) else None)
 
     result: list[ChapterProgressResponse] = []

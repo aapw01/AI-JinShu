@@ -1,0 +1,203 @@
+"""Reviewer, revise, and rollback-rerun nodes."""
+from __future__ import annotations
+
+from typing import Any
+
+from app.core.strategy import get_model_for_stage
+from app.prompts import render_prompt
+from app.services.generation.common import logger
+from app.services.generation.heuristics import build_review_gate, normalize_reviewer_payload
+from app.services.generation.progress import chapter_progress, progress
+from app.services.generation.state import GenerationState
+
+
+def node_review(state: GenerationState) -> GenerationState:
+    chapter_num = state["current_chapter"]
+    progress(state, "reviewer", chapter_num, chapter_progress(state, 0.55), "章节审校...", {"current_phase": "chapter_review", "total_chapters": state["num_chapters"]})
+    r_provider, r_model = get_model_for_stage(state["strategy"], "reviewer")
+    candidates = state.get("candidate_drafts") or [{"variant": "A", "draft": state.get("draft", "")}]
+    _REVIEWER_FALLBACK: dict[str, Any] = {
+        "score": 0.75, "confidence": 0.3, "feedback": "审校跳过（模型输出异常）",
+        "must_fix": [], "should_fix": [], "positives": [], "risks": ["reviewer_skipped"],
+        "contradictions": [], "raw": {},
+    }
+
+    best = None
+    for c in candidates:
+        text = str(c.get("draft") or "")
+        try:
+            if hasattr(state["reviewer"], "run_structured"):
+                struct_raw = state["reviewer"].run_structured(
+                    text, chapter_num, state["target_language"],
+                    state["native_style_profile"], r_provider, r_model,
+                )
+            else:
+                struct_raw = state["reviewer"].run(
+                    text, chapter_num, state["target_language"],
+                    state["native_style_profile"], r_provider, r_model,
+                )
+        except Exception as exc:
+            logger.warning("reviewer.structured failed chapter=%s error=%s", chapter_num, exc)
+            struct_raw = dict(_REVIEWER_FALLBACK)
+
+        try:
+            if hasattr(state["reviewer"], "run_factual_structured"):
+                factual_raw = state["reviewer"].run_factual_structured(
+                    text, chapter_num, state.get("context") or {},
+                    state["target_language"], r_provider, r_model,
+                )
+            else:
+                factual_raw = state["reviewer"].run_factual(
+                    text, chapter_num, state.get("context") or {},
+                    state["target_language"], r_provider, r_model,
+                )
+        except Exception as exc:
+            logger.warning("reviewer.factual failed chapter=%s error=%s", chapter_num, exc)
+            factual_raw = dict(_REVIEWER_FALLBACK)
+
+        try:
+            if hasattr(state["reviewer"], "run_aesthetic_structured"):
+                aesthetic_raw = state["reviewer"].run_aesthetic_structured(
+                    text, chapter_num, state["target_language"],
+                    r_provider, r_model,
+                )
+            else:
+                aesthetic_raw = state["reviewer"].run_aesthetic(
+                    text, chapter_num, state["target_language"],
+                    r_provider, r_model,
+                )
+        except Exception as exc:
+            logger.warning("reviewer.aesthetic failed chapter=%s error=%s", chapter_num, exc)
+            aesthetic_raw = dict(_REVIEWER_FALLBACK)
+
+        struct_pack = normalize_reviewer_payload(struct_raw, "结构审校结果")
+        factual_pack = normalize_reviewer_payload(factual_raw, "事实审校结果")
+        aesthetic_pack = normalize_reviewer_payload(aesthetic_raw, "审美审校结果")
+        struct_score = float(struct_pack.get("score", 0.75))
+        factual_score = float(factual_pack.get("score", 0.75))
+        aesthetic_score_val = float(aesthetic_pack.get("score", 0.75))
+        combined = (struct_score * 0.45) + (factual_score * 0.35) + (aesthetic_score_val * 0.20)
+        review_gate = build_review_gate(text, struct_pack, factual_pack, aesthetic_pack)
+        if review_gate.get("over_correction_risk"):
+            combined = min(1.0, combined + 0.05)
+        item = {
+            "variant": c.get("variant"),
+            "draft": text,
+            "combined": combined,
+            "struct_score": struct_score,
+            "factual_score": factual_score,
+            "aesthetic_score": aesthetic_score_val,
+            "feedback": str(struct_pack.get("feedback") or ""),
+            "factual_feedback": str(factual_pack.get("feedback") or ""),
+            "aesthetic_feedback": str(aesthetic_pack.get("feedback") or ""),
+            "contradictions": factual_pack.get("contradictions") or [],
+            "highlights": aesthetic_pack.get("positives") or [],
+            "struct_pack": struct_pack,
+            "factual_pack": factual_pack,
+            "aesthetic_pack": aesthetic_pack,
+            "review_gate": review_gate,
+        }
+        if best is None or item["combined"] > best["combined"]:
+            best = item
+    if best is None:
+        return {"score": 0.0, "feedback": "review failed", "factual_score": 0.0, "aesthetic_review_score": 0.0}
+    suggestions = {
+        "missing_payoff": [],
+        "weak_conflict": [],
+        "timeline_gap": [],
+        "closure_risk": [],
+        "scorecards": {
+            "structure": best.get("struct_pack") or {},
+            "factual": best.get("factual_pack") or {},
+            "aesthetic": best.get("aesthetic_pack") or {},
+        },
+        "review_gate": best.get("review_gate") or {},
+    }
+    for c_item in (best.get("contradictions") or [])[:8]:
+        txt = str(c_item).strip()
+        if txt:
+            suggestions["timeline_gap"].append(txt[:180])
+    factual_fb = str(best.get("factual_feedback") or "")
+    if "伏笔" in factual_fb or "回收" in factual_fb:
+        suggestions["missing_payoff"].append(factual_fb[:180])
+        suggestions["closure_risk"].append("存在伏笔回收风险")
+    aesthetic_fb = str(best.get("aesthetic_feedback") or "")
+    if any(k in aesthetic_fb for k in ["节奏", "平", "张力不足", "冲突弱"]):
+        suggestions["weak_conflict"].append(aesthetic_fb[:180])
+    for issue in ((best.get("review_gate") or {}).get("validated_issues") or [])[:2]:
+        cat = str(issue.get("category") or "")
+        claim = str(issue.get("claim") or "")
+        if not claim:
+            continue
+        if cat in {"timeline", "continuity"}:
+            suggestions["timeline_gap"].append(claim[:180])
+        elif cat in {"closure", "payoff"}:
+            suggestions["missing_payoff"].append(claim[:180])
+        else:
+            suggestions["weak_conflict"].append(claim[:180])
+    combined_feedback = "\n".join(
+        [
+            f"[结构] {best['feedback']}",
+            f"[事实] {best['factual_feedback']}",
+            f"[审美] {best['aesthetic_feedback']}",
+        ]
+    ).strip()
+    return {
+        "draft": best["draft"],
+        "score": best["combined"],
+        "feedback": combined_feedback,
+        "factual_feedback": best["factual_feedback"],
+        "aesthetic_feedback": best["aesthetic_feedback"],
+        "factual_score": best["factual_score"],
+        "aesthetic_review_score": best["aesthetic_score"],
+        "review_suggestions": suggestions,
+        "review_gate": best.get("review_gate") or {},
+    }
+
+
+def node_revise(state: GenerationState) -> GenerationState:
+    review_attempt = state.get("review_attempt", 0) + 1
+    ctx = dict(state["context"])
+    suggestions = state.get("review_suggestions") or {}
+    ctx["review_feedback"] = state["feedback"]
+    ctx["review_suggestions"] = suggestions
+    if suggestions:
+        structured = []
+        for key in ["missing_payoff", "weak_conflict", "timeline_gap", "closure_risk"]:
+            vals = [str(v) for v in (suggestions.get(key) or []) if str(v).strip()]
+            if vals:
+                structured.append(f"{key}: " + "；".join(vals[:2]))
+        gate = suggestions.get("review_gate") or {}
+        validated = [
+            str(x.get("claim") or "")
+            for x in (gate.get("validated_issues") or [])
+            if isinstance(x, dict) and str(x.get("claim") or "").strip()
+        ]
+        if validated:
+            structured.append("validated_issues: " + "；".join(validated[:2]))
+        if gate.get("over_correction_risk"):
+            structured.append("guardrail: 低证据批评较多，保持主线与结构，不要大改无关段落。")
+        if structured:
+            ctx["review_feedback"] = f"{ctx['review_feedback']}\n[结构化修正]\n" + "\n".join(structured)
+    return {"review_attempt": review_attempt, "context": ctx}
+
+
+def node_rollback_rerun(state: GenerationState) -> GenerationState:
+    chapter_num = state["current_chapter"]
+    snap = state.get("chapter_token_snapshot", {})
+    ctx = dict(state["context"])
+    suggestions = state.get("review_suggestions") or {}
+    ctx["review_feedback"] = render_prompt(
+        "review_feedback_force_rewrite",
+        feedback=(state.get("feedback", "") or ""),
+    ).strip()
+    if suggestions:
+        ctx["review_suggestions"] = suggestions
+    progress(state, "rollback_rerun", chapter_num, chapter_progress(state, 0.60), f"第{chapter_num}章审校未通过，回滚并重跑一次...", {"current_phase": "rollback_rerun", "total_chapters": state["num_chapters"]})
+    return {
+        "rerun_count": state.get("rerun_count", 0) + 1,
+        "review_attempt": 0,
+        "context": ctx,
+        "total_input_tokens": snap.get("input", state["total_input_tokens"]),
+        "total_output_tokens": snap.get("output", state["total_output_tokens"]),
+    }

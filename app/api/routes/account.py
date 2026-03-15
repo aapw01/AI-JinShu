@@ -11,9 +11,9 @@ from sqlalchemy.orm import Session
 from app.core.authn import require_auth
 from app.core.authz.types import Principal
 from app.core.database import get_db
+from app.models.creation_task import CreationTask
 from app.models.novel import (
     ChapterVersion,
-    GenerationTask,
     Novel,
     NovelVersion,
     RewriteRequest,
@@ -174,9 +174,13 @@ def list_notifications(
         return []
     tasks = (
         db.execute(
-            select(GenerationTask)
-            .where(GenerationTask.novel_id.in_(novel_ids), GenerationTask.status.in_(["completed", "failed", "cancelled"]))
-            .order_by(GenerationTask.updated_at.desc())
+            select(CreationTask)
+            .where(
+                CreationTask.user_uuid == user.uuid,
+                CreationTask.task_type == "generation",
+                CreationTask.status.in_(["completed", "failed", "cancelled"]),
+            )
+            .order_by(CreationTask.updated_at.desc())
             .limit(max(1, min(limit, 100)))
         )
         .scalars()
@@ -194,14 +198,14 @@ def list_notifications(
     )
     out: list[NotificationItem] = []
     for t in tasks:
-        title = novel_title_map.get(int(t.novel_id), f"novel-{t.novel_id}")
+        title = novel_title_map.get(int(t.resource_id), f"novel-{t.resource_id}")
         status = str(t.status or "unknown")
         out.append(
             NotificationItem(
                 id=f"gen-{t.id}",
                 type="generation",
                 title=f"《{title}》生成{status}",
-                message=str(t.message or (t.error or ""))[:200],
+                message=str(t.message or (t.error_detail or ""))[:200],
                 created_at=(t.updated_at.isoformat() if t.updated_at else ""),
             )
         )

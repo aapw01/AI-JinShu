@@ -20,7 +20,7 @@ from app.models.creation_task import CreationTask
 from app.models.novel import GenerationTask, GenerationCheckpoint, User
 from app.schemas.novel import GenerateRequest, GenerateResponse, GenerationStatusResponse, RetryGenerationRequest
 from app.services.quota import check_generation_quota
-from app.services.scheduler.scheduler_service import cancel_task, get_task_by_public_id, pause_task, resume_task, submit_task
+from app.services.scheduler.scheduler_service import cancel_task, dispatch_user_queue, get_task_by_public_id, pause_task, resume_task, submit_task
 from app.services.rewrite.service import get_default_version_id
 
 router = APIRouter()
@@ -165,14 +165,60 @@ def _creation_task_runtime_state(row: CreationTask) -> dict:
     return dict(runtime_state) if isinstance(runtime_state, dict) else {}
 
 
+def _creation_task_payload(row: CreationTask) -> dict:
+    payload = row.payload_json if isinstance(row.payload_json, dict) else {}
+    return dict(payload)
+
+
+def _creation_task_waiting_outline_confirmation(row: CreationTask) -> bool:
+    payload = _creation_task_payload(row)
+    return bool(payload.get("awaiting_outline_confirmation")) and not bool(payload.get("outline_confirmed"))
+
+
+def _creation_task_effective_status(row: CreationTask) -> str:
+    if row.status in {"queued", "dispatching", "running"} and _creation_task_waiting_outline_confirmation(row):
+        return "awaiting_outline_confirmation"
+    return str(row.status or "unknown")
+
+
+def _creation_task_effective_phase(row: CreationTask) -> str:
+    if row.status in {"queued", "dispatching", "running"} and _creation_task_waiting_outline_confirmation(row):
+        return "outline_ready"
+    return str(row.phase or row.status or "unknown")
+
+
+def _find_generation_creation_task(
+    db: Session,
+    *,
+    task_id: str,
+    user_uuid: str,
+    novel_db_id: int,
+) -> CreationTask | None:
+    row = get_task_by_public_id(db, public_id=task_id, user_uuid=user_uuid)
+    if row and row.task_type == "generation" and row.resource_type == "novel" and int(row.resource_id) == int(novel_db_id):
+        return row
+    return db.execute(
+        select(CreationTask)
+        .where(
+            CreationTask.user_uuid == user_uuid,
+            CreationTask.task_type == "generation",
+            CreationTask.resource_type == "novel",
+            CreationTask.resource_id == int(novel_db_id),
+            CreationTask.worker_task_id == task_id,
+        )
+        .order_by(CreationTask.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+
 def _creation_task_display_totals(row: CreationTask) -> tuple[int, int]:
-    payload_data = row.payload_json if isinstance(row.payload_json, dict) else {}
+    payload_data = _creation_task_payload(row)
     cursor = row.resume_cursor_json if isinstance(row.resume_cursor_json, dict) else {}
     runtime_state = _creation_task_runtime_state(row)
     default_total = int(payload_data.get("original_total_chapters") or payload_data.get("num_chapters") or 0)
     effective_end = int(runtime_state.get("effective_end_chapter") or 0)
     effective_total = max(int(runtime_state.get("effective_total_chapters") or 0), default_total, effective_end)
-    resume_from = int(runtime_state.get("resume_from_chapter") or cursor.get("next") or 0)
+    resume_from = int(runtime_state.get("resume_from_chapter") or cursor.get("next") or payload_data.get("start_chapter") or 0)
     if row.status == "completed":
         current_chapter = max(0, min(effective_total, (resume_from - 1) if resume_from > 0 else effective_total))
     elif row.status in {"failed", "paused", "running", "queued", "dispatching"}:
@@ -180,6 +226,31 @@ def _creation_task_display_totals(row: CreationTask) -> tuple[int, int]:
     else:
         current_chapter = max(0, resume_from)
     return int(current_chapter), int(effective_total)
+
+
+def _resolve_live_chapter_display(
+    *,
+    redis_payload: dict | None,
+    db_current_chapter: int,
+    db_total_chapters: int,
+) -> tuple[int, int]:
+    current = int(db_current_chapter or 0)
+    total = int(db_total_chapters or 0)
+    if not isinstance(redis_payload, dict):
+        return current, total
+
+    redis_current = int(redis_payload.get("current_chapter") or 0)
+    redis_total = int(redis_payload.get("total_chapters") or 0)
+    live_phase = str(redis_payload.get("current_phase") or redis_payload.get("step") or "")
+
+    if live_phase == "chapter_done" and current > redis_current > 0:
+        resolved_current = current
+    else:
+        resolved_current = redis_current or current
+    resolved_total = redis_total or total
+    if total > 0:
+        resolved_total = max(int(resolved_total or 0), total)
+    return int(resolved_current), int(resolved_total)
 
 
 def _format_eta(seconds: int) -> str:
@@ -406,6 +477,7 @@ def retry_generation(
             raise
         novel.status = "generating"
         db.commit()
+        dispatch_user_queue(db, user_uuid=principal.user_uuid or "")
         cursor = resumed.resume_cursor_json if isinstance(resumed.resume_cursor_json, dict) else {}
         next_ch = cursor.get("next")
         payload_data = resumed.payload_json or {}
@@ -762,6 +834,7 @@ def resume_generation(
             raise http_error(409, "task_not_resumable", "当前任务不可恢复")
         raise http_error(409, "task_not_resumable", "当前任务不可恢复")
     db.commit()
+    dispatch_user_queue(db, user_uuid=principal.user_uuid or "")
     existing = _redis_get_json(_redis_key(old_worker_task_id or row.public_id)) or {}
     payload = {
         "status": "queued",
@@ -866,14 +939,21 @@ def list_generation_tasks(
     ).scalars().all()
     results = []
     for r in rows:
-        payload_data = r.payload_json if isinstance(r.payload_json, dict) else {}
+        payload_data = _creation_task_payload(r)
         redis_data = _redis_get_json(_redis_key(r.worker_task_id or r.public_id)) or {}
+        current_chapter, total_chapters = _creation_task_display_totals(r)
+        status = _creation_task_effective_status(r)
+        live_current, live_total = _resolve_live_chapter_display(
+            redis_payload=redis_data if r.status not in {"completed", "failed", "cancelled", "paused"} else None,
+            db_current_chapter=current_chapter,
+            db_total_chapters=total_chapters,
+        )
         results.append({
             "task_id": r.public_id,
-            "status": r.status,
-            "run_state": r.status,
-            "current_chapter": redis_data.get("current_chapter") or 0,
-            "total_chapters": redis_data.get("total_chapters") or int(payload_data.get("num_chapters") or 0),
+            "status": status,
+            "run_state": status,
+            "current_chapter": live_current,
+            "total_chapters": live_total or int(payload_data.get("num_chapters") or 0),
             "progress": r.progress or 0,
             "message": r.message,
             "error": r.error_detail,
@@ -899,6 +979,61 @@ def confirm_outline_generation(
     novel = resolve_novel(db, novel_id)
     if not novel:
         raise http_error(404, "novel_not_found", "Novel not found")
+    row = _find_generation_creation_task(
+        db,
+        task_id=task_id,
+        user_uuid=_.user_uuid or "",
+        novel_db_id=int(novel.id),
+    )
+    if row and row.task_type == "generation" and row.resource_type == "novel" and int(row.resource_id) == int(novel.id):
+        payload_data = _creation_task_payload(row)
+        if not bool(payload_data.get("awaiting_outline_confirmation")) or bool(payload_data.get("outline_confirmed")):
+            return {"ok": True, "message": "无需确认或已确认"}
+        payload_data["awaiting_outline_confirmation"] = False
+        payload_data["outline_confirmed"] = True
+        row.payload_json = payload_data
+        row.phase = "chapter_writing"
+        row.message = "已确认大纲，继续生成章节"
+        novel.status = "generating"
+
+        gt = None
+        if row.worker_task_id:
+            gt = db.execute(
+                select(GenerationTask).where(
+                    GenerationTask.task_id == row.worker_task_id,
+                    GenerationTask.novel_id == novel.id,
+                )
+            ).scalar_one_or_none()
+        if gt:
+            gt.status = "running"
+            gt.run_state = "running"
+            gt.current_phase = "chapter_writing"
+            gt.outline_confirmed = 1
+
+        db.commit()
+        current_chapter, total_chapters = _creation_task_display_totals(row)
+        data = {
+            "status": "running",
+            "run_state": "running",
+            "current_phase": "chapter_writing",
+            "step": "chapter_writing",
+            "current_subtask": {"key": "chapter_writing", "label": "开始章节生成", "progress": row.progress or 20},
+            "subtask_key": "chapter_writing",
+            "subtask_label": "开始章节生成",
+            "subtask_progress": row.progress or 20,
+            "current_chapter": current_chapter or int(payload_data.get("start_chapter") or 1),
+            "total_chapters": total_chapters,
+            "progress": row.progress or 20,
+            "message": "已确认大纲，继续生成章节",
+            "task_id": row.public_id,
+            "trace_id": None,
+        }
+        _redis_set_json(_redis_key(task_id), data)
+        if row.worker_task_id:
+            _redis_set_json(_redis_key(row.worker_task_id), data)
+        _redis_set_json(_novel_key(str(novel.id)), data)
+        return {"ok": True, "message": "已确认大纲，任务继续"}
+
     gt_stmt = select(GenerationTask).where(
         GenerationTask.task_id == task_id,
         GenerationTask.novel_id == novel.id,
@@ -908,9 +1043,29 @@ def confirm_outline_generation(
         raise http_error(404, "task_not_found", "Task not found")
     if gt.status != "awaiting_outline_confirmation":
         return {"ok": True, "message": "无需确认或已确认"}
+    row = db.execute(
+        select(CreationTask)
+        .where(
+            CreationTask.user_uuid == (_.user_uuid or ""),
+            CreationTask.task_type == "generation",
+            CreationTask.resource_type == "novel",
+            CreationTask.resource_id == int(novel.id),
+            CreationTask.worker_task_id == task_id,
+        )
+        .order_by(CreationTask.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if row:
+        payload_data = _creation_task_payload(row)
+        payload_data["awaiting_outline_confirmation"] = False
+        payload_data["outline_confirmed"] = True
+        row.payload_json = payload_data
+        row.phase = "chapter_writing"
+        row.message = "已确认大纲，继续生成章节"
     gt.status = "running"
     gt.run_state = "running"
     gt.outline_confirmed = 1
+    gt.current_phase = "chapter_writing"
     novel.status = "generating"
     db.commit()
     data = {
@@ -929,6 +1084,8 @@ def confirm_outline_generation(
         "trace_id": gt.trace_id,
     }
     _redis_set_json(_redis_key(task_id), data)
+    if row:
+        _redis_set_json(_redis_key(row.public_id), {**data, "task_id": row.public_id})
     _redis_set_json(_novel_key(str(novel.id)), data)
     return {"ok": True, "message": "已确认大纲，任务继续"}
 
@@ -965,11 +1122,13 @@ def get_generation_status(
         redis_payload = _redis_get_json(_redis_key(redis_key_id))
         result_data = row.result_json if isinstance(row.result_json, dict) else {}
         current_chapter, total_chapters = _creation_task_display_totals(row)
+        effective_status = _creation_task_effective_status(row)
+        effective_phase = _creation_task_effective_phase(row)
         payload = {
-            "status": row.status,
-            "run_state": row.status,
-            "step": row.phase or row.status,
-            "current_phase": row.phase or row.status,
+            "status": effective_status,
+            "run_state": effective_status,
+            "step": effective_phase,
+            "current_phase": effective_phase,
             "current_chapter": current_chapter,
             "total_chapters": total_chapters,
             "progress": float(row.progress or (100.0 if row.status == "completed" else 0.0) or 0.0),
@@ -995,6 +1154,13 @@ def get_generation_status(
             for k, v in redis_payload.items():
                 if k in payload:
                     payload[k] = v
+            live_current, live_total = _resolve_live_chapter_display(
+                redis_payload=redis_payload,
+                db_current_chapter=current_chapter,
+                db_total_chapters=total_chapters,
+            )
+            payload["current_chapter"] = live_current
+            payload["total_chapters"] = live_total
         if db_status in ("cancelled", "failed", "completed", "paused"):
             payload["status"] = db_status
             payload["run_state"] = db_status
@@ -1069,6 +1235,15 @@ def stream_generation_progress(
             if data:
                 no_data_count = 0
                 d = json.loads(data)
+                if ctask and db_status not in _TERMINAL:
+                    current_chapter, total_chapters = _creation_task_display_totals(ctask)
+                    live_current, live_total = _resolve_live_chapter_display(
+                        redis_payload=d,
+                        db_current_chapter=current_chapter,
+                        db_total_chapters=total_chapters,
+                    )
+                    d["current_chapter"] = live_current
+                    d["total_chapters"] = live_total
                 if db_status in _TERMINAL:
                     d["status"] = db_status
                     d["run_state"] = db_status
