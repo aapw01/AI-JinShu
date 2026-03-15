@@ -17,7 +17,7 @@ from app.core.logging_config import log_event
 from app.core.strategy import get_model_for_stage
 from app.core.llm_usage import snapshot_usage
 from app.prompts import render_prompt
-from app.models.novel import ChapterVersion, GenerationTask, Novel, GenerationCheckpoint, NovelFeedback, StoryForeshadow
+from app.models.novel import ChapterVersion, GenerationTask, Novel, NovelFeedback, StoryForeshadow
 from app.services.generation.agents import (
     FactExtractorAgent,
     FinalizerAgent,
@@ -51,6 +51,7 @@ from app.services.generation.policies import (
 from app.services.memory.character_state import CharacterStateManager
 from app.services.memory.summary_manager import SummaryManager
 from app.services.memory.story_bible import StoryBibleStore, CheckpointStore, QualityReportStore
+from app.services.task_runtime.checkpoint_repo import update_resume_runtime_state
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +69,7 @@ class GenerationState(TypedDict, total=False):
     current_chapter: int
     end_chapter: int
     task_id: str | None
+    creation_task_id: int | None
     progress_callback: Callable[..., None]
     strategy: str
     target_language: str
@@ -162,6 +164,49 @@ def _progress(state: GenerationState, step: str, chapter: int, pct: float, msg: 
             payload.setdefault("volume_no", _volume_no_for_chapter(state, chapter))
             payload.setdefault("volume_size", int(state.get("volume_size") or 30))
         cb(step, chapter, pct, msg, payload)
+
+
+def _persist_resume_runtime_state(
+    state: GenerationState,
+    *,
+    node: str,
+    resume_from_chapter: int,
+    effective_end_chapter: int,
+    effective_total_chapters: int | None = None,
+    terminal: bool = False,
+    tail_rewrite_attempts: int | None = None,
+    bridge_attempts: int | None = None,
+) -> None:
+    creation_task_id = state.get("creation_task_id")
+    if not creation_task_id:
+        return
+    # Keep runtime totals in absolute chapter-space (1..N), not local range length.
+    total_chapters = max(
+        int(effective_end_chapter),
+        int(effective_total_chapters) if effective_total_chapters is not None else 0,
+    )
+    runtime_state = {
+        "node": str(node),
+        "resume_from_chapter": int(resume_from_chapter),
+        "effective_end_chapter": int(effective_end_chapter),
+        "effective_total_chapters": int(total_chapters),
+        "tail_rewrite_attempts": int(
+            tail_rewrite_attempts if tail_rewrite_attempts is not None else int(state.get("tail_rewrite_attempts") or 0)
+        ),
+        "bridge_attempts": int(
+            bridge_attempts if bridge_attempts is not None else int(state.get("bridge_attempts") or 0)
+        ),
+        "terminal": bool(terminal),
+    }
+    db = SessionLocal()
+    try:
+        update_resume_runtime_state(db, creation_task_id=int(creation_task_id), runtime_state=runtime_state)
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.warning("Failed to persist generation runtime state", exc_info=True)
+    finally:
+        db.close()
 
 
 def _chapter_progress(state: GenerationState, phase_ratio: float) -> float:
@@ -951,6 +996,7 @@ def _node_init(state: GenerationState) -> GenerationState:
             "fact_extractor": FactExtractorAgent(),
             "current_chapter": state["start_chapter"],
             "end_chapter": state["start_chapter"] + state["num_chapters"] - 1,
+            "creation_task_id": state.get("creation_task_id"),
             "target_chapters": target_total,
             "min_total_chapters": min_total,
             "max_total_chapters": max_total,
@@ -2004,7 +2050,7 @@ def _node_finalize(state: GenerationState) -> GenerationState:
         f"第{chapter_num}章完成",
         {
             "current_phase": "chapter_done",
-            "total_chapters": state["num_chapters"],
+            "total_chapters": max(int(state.get("num_chapters") or 0), int(state.get("end_chapter") or chapter_num)),
             "token_usage_input": total_input_tokens,
             "token_usage_output": total_output_tokens,
             "estimated_cost": estimated_cost,
@@ -2014,6 +2060,14 @@ def _node_finalize(state: GenerationState) -> GenerationState:
             "decision_state": decision_state,
         },
     )
+    if chapter_num < int(state.get("end_chapter") or chapter_num):
+        _persist_resume_runtime_state(
+            state,
+            node="chapter_loop",
+            resume_from_chapter=chapter_num + 1,
+            effective_end_chapter=int(state.get("end_chapter") or chapter_num),
+            effective_total_chapters=int(state.get("end_chapter") or chapter_num),
+        )
     factual_score = float(state.get("factual_score", 0.0) or 0.0)
     reviewer_aesthetic = float(state.get("aesthetic_review_score", 0.0) or 0.0)
     quality_passed = bool(
@@ -2084,7 +2138,7 @@ def _node_closure_gate(state: GenerationState) -> GenerationState:
     updates: dict[str, Any] = {"closure_state": closure_state, "decision_state": decision_state}
     progress_meta = {
         "current_phase": "closure_gate",
-        "total_chapters": state["num_chapters"],
+        "total_chapters": max(int(state.get("num_chapters") or 0), int(state.get("end_chapter") or chapter_num)),
         "action": action,
         "reason_codes": closure_state.get("reason_codes") or [],
         "remaining_ratio": closure_state.get("remaining_ratio"),
@@ -2096,7 +2150,7 @@ def _node_closure_gate(state: GenerationState) -> GenerationState:
         updates["end_chapter"] = int(state["end_chapter"]) + 1
         updates["num_chapters"] = int(state["num_chapters"]) + 1
         updates["bridge_attempts"] = int(state.get("bridge_attempts") or 0) + 1
-        progress_meta["total_chapters"] = updates["num_chapters"]
+        progress_meta["total_chapters"] = max(int(updates["num_chapters"]), int(updates["end_chapter"]))
         _progress(
             state,
             "closure_gate",
@@ -2105,12 +2159,20 @@ def _node_closure_gate(state: GenerationState) -> GenerationState:
             "收官检查未通过，自动扩展1章进行补完",
             progress_meta,
         )
+        _persist_resume_runtime_state(
+            state,
+            node="bridge_chapter",
+            resume_from_chapter=chapter_num,
+            effective_end_chapter=int(updates["end_chapter"]),
+            effective_total_chapters=int(updates["end_chapter"]),
+            bridge_attempts=int(updates["bridge_attempts"]),
+        )
     elif action in {"finalize", "force_finalize"}:
         finalized_end = max(int(state.get("start_chapter") or 1), chapter_num - 1)
         updates["end_chapter"] = finalized_end
         updates["num_chapters"] = finalized_end - int(state.get("start_chapter") or 1) + 1
         updates["current_chapter"] = finalized_end + 1
-        progress_meta["total_chapters"] = updates["num_chapters"]
+        progress_meta["total_chapters"] = max(int(updates["num_chapters"]), int(updates["end_chapter"]))
         _progress(
             state,
             "closure_gate",
@@ -2118,6 +2180,13 @@ def _node_closure_gate(state: GenerationState) -> GenerationState:
             min(97.0, _chapter_progress(state, 0.98)),
             "收官门禁通过，进入终审",
             progress_meta,
+        )
+        _persist_resume_runtime_state(
+            state,
+            node="final_book_review",
+            resume_from_chapter=int(updates["current_chapter"]),
+            effective_end_chapter=int(updates["end_chapter"]),
+            effective_total_chapters=int(updates["end_chapter"]),
         )
     elif action == "rewrite_tail":
         _progress(
@@ -2127,6 +2196,13 @@ def _node_closure_gate(state: GenerationState) -> GenerationState:
             min(96.5, _chapter_progress(state, 0.96)),
             "收官检查发现未闭环项，准备回退重写尾部章节",
             progress_meta,
+        )
+        _persist_resume_runtime_state(
+            state,
+            node="tail_rewrite",
+            resume_from_chapter=max(int(state.get("start_chapter") or 1), chapter_num - 2),
+            effective_end_chapter=int(state.get("end_chapter") or chapter_num),
+            effective_total_chapters=int(state.get("end_chapter") or chapter_num),
         )
     else:
         _progress(
@@ -2164,7 +2240,7 @@ def _node_tail_rewrite(state: GenerationState) -> GenerationState:
         f"进入第{attempts}轮尾章重写（回退到第{rewind_to}章）",
         {
             "current_phase": "tail_rewrite",
-            "total_chapters": state["num_chapters"],
+            "total_chapters": max(int(state.get("num_chapters") or 0), int(state.get("end_chapter") or rewind_to)),
             "rewrite_attempts": attempts,
             "remaining_ratio": closure_state.get("remaining_ratio"),
             "unresolved_count": closure_state.get("unresolved_count"),
@@ -2183,6 +2259,14 @@ def _node_tail_rewrite(state: GenerationState) -> GenerationState:
                 "closure_state": closure_state,
             },
         )
+    _persist_resume_runtime_state(
+        state,
+        node="tail_rewrite",
+        resume_from_chapter=rewind_to,
+        effective_end_chapter=int(state.get("end_chapter") or rewind_to),
+        effective_total_chapters=int(state.get("end_chapter") or rewind_to),
+        tail_rewrite_attempts=attempts,
+    )
     return {
         "current_chapter": rewind_to,
         "tail_rewrite_attempts": attempts,
@@ -2207,8 +2291,15 @@ def _node_bridge_chapter(state: GenerationState) -> GenerationState:
         "已追加桥接章节预算，继续推进主线收束",
         {
             "current_phase": "bridge_chapter",
-            "total_chapters": state["num_chapters"],
+            "total_chapters": max(int(state.get("num_chapters") or 0), int(state.get("end_chapter") or chapter_num)),
         },
+    )
+    _persist_resume_runtime_state(
+        state,
+        node="bridge_chapter",
+        resume_from_chapter=chapter_num,
+        effective_end_chapter=int(state.get("end_chapter") or chapter_num),
+        effective_total_chapters=int(state.get("end_chapter") or chapter_num),
     )
     return {
         "closure_state": {**(state.get("closure_state") or {}), "action": "continue"},
@@ -2223,6 +2314,15 @@ def _node_bridge_chapter(state: GenerationState) -> GenerationState:
 
 
 def _node_final_book_review(state: GenerationState) -> GenerationState:
+    effective_end = int(state.get("end_chapter") or state.get("current_chapter") or 0)
+    effective_total = max(int(state.get("num_chapters") or 0), effective_end)
+    _persist_resume_runtime_state(
+        state,
+        node="final_book_review",
+        resume_from_chapter=effective_end + 1,
+        effective_end_chapter=effective_end,
+        effective_total_chapters=effective_total,
+    )
     db = SessionLocal()
     try:
         last_chapter = state["start_chapter"] + state["num_chapters"] - 1
@@ -2245,7 +2345,14 @@ def _node_final_book_review(state: GenerationState) -> GenerationState:
     finally:
         db.close()
 
-    _progress(state, "final_book_review", state["num_chapters"], 97, "全书终审...", {"current_phase": "full_book_review", "total_chapters": state["num_chapters"]})
+    _progress(
+        state,
+        "final_book_review",
+        effective_end,
+        97,
+        "全书终审...",
+        {"current_phase": "full_book_review", "total_chapters": effective_total},
+    )
     fr_provider, fr_model = get_model_for_stage(state["strategy"], "reviewer")
     final_report = state["final_reviewer"].run_full_book(chapter_payload, state["target_language"], fr_provider, fr_model)
     save_prewrite_artifacts(state["novel_id"], {"final_book_review": final_report})
@@ -2269,17 +2376,25 @@ def _node_final_book_review(state: GenerationState) -> GenerationState:
     _progress(
         state,
         "done",
-        state["num_chapters"],
+        effective_end,
         100,
         "全书生成完成",
         {
             "current_phase": "completed",
-            "total_chapters": state["num_chapters"],
+            "total_chapters": effective_total,
             "token_usage_input": state["total_input_tokens"],
             "token_usage_output": state["total_output_tokens"],
             "estimated_cost": state["estimated_cost"],
             "final_report": final_report,
         },
+    )
+    _persist_resume_runtime_state(
+        state,
+        node="final_book_review",
+        resume_from_chapter=effective_end + 1,
+        effective_end_chapter=effective_end,
+        effective_total_chapters=effective_total,
+        terminal=True,
     )
     return {}
 
@@ -2410,35 +2525,8 @@ def run_generation_pipeline_langgraph(
     start_chapter: int,
     progress_callback=None,
     task_id: str | None = None,
+    creation_task_id: int | None = None,
 ) -> None:
-    if task_id:
-        db = SessionLocal()
-        try:
-            cp_stmt = (
-                select(GenerationCheckpoint)
-                .where(GenerationCheckpoint.task_id == task_id, GenerationCheckpoint.novel_id == novel_id)
-                .order_by(GenerationCheckpoint.chapter_num.desc(), GenerationCheckpoint.id.desc())
-                .limit(1)
-            )
-            latest_cp = db.execute(cp_stmt).scalar_one_or_none()
-            if latest_cp:
-                target_end = start_chapter + num_chapters - 1
-                resumed_start = int(latest_cp.chapter_num) + 1
-                if resumed_start <= target_end:
-                    num_chapters = target_end - resumed_start + 1
-                    start_chapter = resumed_start
-                    logger.info(
-                        "Resuming task %s from chapter %s (remaining=%s)",
-                        task_id,
-                        start_chapter,
-                        num_chapters,
-                    )
-                else:
-                    logger.info("Task %s already completed by checkpoint at chapter %s", task_id, latest_cp.chapter_num)
-                    return
-        finally:
-            db.close()
-
     _compiled_graph.invoke(
         {
             "novel_id": novel_id,
@@ -2446,6 +2534,30 @@ def run_generation_pipeline_langgraph(
             "num_chapters": num_chapters,
             "start_chapter": start_chapter,
             "task_id": task_id,
+            "creation_task_id": creation_task_id,
             "progress_callback": progress_callback or (lambda *a, **k: None),
         }
     )
+
+
+def run_final_book_review_only_langgraph(
+    novel_id: int,
+    novel_version_id: int,
+    num_chapters: int,
+    start_chapter: int,
+    progress_callback=None,
+    task_id: str | None = None,
+    creation_task_id: int | None = None,
+) -> None:
+    state = _node_init(
+        {
+            "novel_id": novel_id,
+            "novel_version_id": novel_version_id,
+            "num_chapters": num_chapters,
+            "start_chapter": start_chapter,
+            "task_id": task_id,
+            "creation_task_id": creation_task_id,
+            "progress_callback": progress_callback or (lambda *a, **k: None),
+        }
+    )
+    _node_final_book_review(state)

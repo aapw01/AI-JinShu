@@ -8,12 +8,13 @@ from app.core.database import SessionLocal
 from app.models.creation_task import CreationTask
 from app.models.novel import Novel, NovelVersion
 from app.models.storyboard import StoryboardProject, StoryboardTask, StoryboardVersion
+from app.tasks.generation import _resolve_generation_resume
 from app.services.scheduler.scheduler_service import dispatch_user_queue, reclaim_stale_running_tasks
 from app.services.task_runtime.checkpoint_repo import get_last_completed_unit, mark_unit_completed
 from app.services.task_runtime.cursor_service import resume_from_last_completed
 
 
-def _seed_creation_task() -> int:
+def _seed_creation_task(*, start_chapter: int = 1, num_chapters: int = 5) -> int:
     db = SessionLocal()
     try:
         row = CreationTask(
@@ -22,7 +23,7 @@ def _seed_creation_task() -> int:
             resource_type="novel",
             resource_id=1,
             status="running",
-            payload_json={"novel_id": 1, "start_chapter": 1, "num_chapters": 5},
+            payload_json={"novel_id": 1, "start_chapter": start_chapter, "num_chapters": num_chapters},
         )
         db.add(row)
         db.commit()
@@ -69,6 +70,173 @@ def test_resume_boundary_advances_when_checkpoint_completed():
     finally:
         db.close()
     assert resume_from_last_completed(range_start=1, range_end=5, last_completed=last_completed) == 4
+
+
+def test_resume_plan_prefers_tail_rewrite_runtime_state():
+    task_id = _seed_creation_task(start_chapter=1, num_chapters=15)
+    db = SessionLocal()
+    try:
+        row = db.execute(select(CreationTask).where(CreationTask.id == task_id)).scalar_one()
+        row.resume_cursor_json = {
+            "unit_type": "chapter",
+            "partition": None,
+            "last_completed": 15,
+            "next": 16,
+            "runtime_state": {
+                "node": "tail_rewrite",
+                "resume_from_chapter": 13,
+                "effective_end_chapter": 15,
+                "effective_total_chapters": 15,
+                "tail_rewrite_attempts": 1,
+                "bridge_attempts": 0,
+                "terminal": False,
+            },
+        }
+        db.commit()
+    finally:
+        db.close()
+
+    plan = _resolve_generation_resume(task_id, start_chapter=1, num_chapters=15)
+    assert plan.mode == "chapter_range"
+    assert plan.start_chapter == 13
+    assert plan.num_chapters == 3
+    assert plan.display_total_chapters == 15
+
+
+def test_resume_plan_prefers_bridge_runtime_state():
+    task_id = _seed_creation_task(start_chapter=1, num_chapters=15)
+    db = SessionLocal()
+    try:
+        row = db.execute(select(CreationTask).where(CreationTask.id == task_id)).scalar_one()
+        row.resume_cursor_json = {
+            "unit_type": "chapter",
+            "partition": None,
+            "last_completed": 15,
+            "next": 16,
+            "runtime_state": {
+                "node": "bridge_chapter",
+                "resume_from_chapter": 16,
+                "effective_end_chapter": 16,
+                "effective_total_chapters": 16,
+                "tail_rewrite_attempts": 2,
+                "bridge_attempts": 1,
+                "terminal": False,
+            },
+        }
+        db.commit()
+    finally:
+        db.close()
+
+    plan = _resolve_generation_resume(task_id, start_chapter=1, num_chapters=15)
+    assert plan.mode == "chapter_range"
+    assert plan.start_chapter == 16
+    assert plan.num_chapters == 1
+    assert plan.display_total_chapters == 16
+
+
+def test_resume_plan_prefers_final_book_review_runtime_state():
+    task_id = _seed_creation_task(start_chapter=1, num_chapters=15)
+    db = SessionLocal()
+    try:
+        row = db.execute(select(CreationTask).where(CreationTask.id == task_id)).scalar_one()
+        row.resume_cursor_json = {
+            "unit_type": "chapter",
+            "partition": None,
+            "last_completed": 15,
+            "next": 16,
+            "runtime_state": {
+                "node": "final_book_review",
+                "resume_from_chapter": 16,
+                "effective_end_chapter": 15,
+                "effective_total_chapters": 15,
+                "tail_rewrite_attempts": 2,
+                "bridge_attempts": 0,
+                "terminal": False,
+            },
+        }
+        db.commit()
+    finally:
+        db.close()
+
+    plan = _resolve_generation_resume(task_id, start_chapter=1, num_chapters=15)
+    assert plan.mode == "final_book_review"
+    assert plan.start_chapter == 1
+    assert plan.num_chapters == 15
+    assert plan.display_total_chapters == 15
+
+
+def test_resume_plan_tail_rewrite_with_offset_range_keeps_absolute_total():
+    task_id = _seed_creation_task(start_chapter=18, num_chapters=3)
+    db = SessionLocal()
+    try:
+        row = db.execute(select(CreationTask).where(CreationTask.id == task_id)).scalar_one()
+        row.payload_json = {
+            "novel_id": 1,
+            "start_chapter": 18,
+            "num_chapters": 3,
+            "original_total_chapters": 20,
+        }
+        row.resume_cursor_json = {
+            "unit_type": "chapter",
+            "partition": None,
+            "last_completed": 19,
+            "next": 20,
+            "runtime_state": {
+                "node": "tail_rewrite",
+                "resume_from_chapter": 19,
+                "effective_end_chapter": 20,
+                "effective_total_chapters": 20,
+                "tail_rewrite_attempts": 1,
+                "bridge_attempts": 0,
+                "terminal": False,
+            },
+        }
+        db.commit()
+    finally:
+        db.close()
+
+    plan = _resolve_generation_resume(task_id, start_chapter=18, num_chapters=3)
+    assert plan.mode == "chapter_range"
+    assert plan.start_chapter == 19
+    assert plan.num_chapters == 2
+    assert plan.display_total_chapters == 20
+
+
+def test_resume_plan_final_review_with_offset_range_reconstructs_full_span():
+    task_id = _seed_creation_task(start_chapter=18, num_chapters=3)
+    db = SessionLocal()
+    try:
+        row = db.execute(select(CreationTask).where(CreationTask.id == task_id)).scalar_one()
+        row.payload_json = {
+            "novel_id": 1,
+            "start_chapter": 18,
+            "num_chapters": 3,
+            "original_total_chapters": 20,
+        }
+        row.resume_cursor_json = {
+            "unit_type": "chapter",
+            "partition": None,
+            "last_completed": 20,
+            "next": 21,
+            "runtime_state": {
+                "node": "final_book_review",
+                "resume_from_chapter": 21,
+                "effective_end_chapter": 20,
+                "effective_total_chapters": 20,
+                "tail_rewrite_attempts": 2,
+                "bridge_attempts": 0,
+                "terminal": False,
+            },
+        }
+        db.commit()
+    finally:
+        db.close()
+
+    plan = _resolve_generation_resume(task_id, start_chapter=18, num_chapters=3)
+    assert plan.mode == "final_book_review"
+    assert plan.start_chapter == 1
+    assert plan.num_chapters == 20
+    assert plan.display_total_chapters == 20
 
 
 def test_reclaim_stale_running_task(monkeypatch):

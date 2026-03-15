@@ -16,6 +16,11 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _resume_cursor_dict(row: CreationTask) -> dict[str, Any]:
+    data = row.resume_cursor_json
+    return dict(data) if isinstance(data, dict) else {}
+
+
 def mark_unit_completed(
     db: Session,
     *,
@@ -121,12 +126,45 @@ def update_resume_cursor(
     row = db.execute(select(CreationTask).where(CreationTask.id == creation_task_id)).scalar_one_or_none()
     if not row:
         return
-    row.resume_cursor_json = {
+    payload = _resume_cursor_dict(row)
+    payload.update({
         "unit_type": unit_type,
         "partition": partition,
         "last_completed": int(last_completed_unit_no) if last_completed_unit_no is not None else None,
         "next": int(next_unit_no),
-    }
+    })
+    row.resume_cursor_json = payload
+    db.flush()
+
+
+def get_resume_runtime_state(
+    db: Session,
+    *,
+    creation_task_id: int,
+) -> dict[str, Any]:
+    row = db.execute(select(CreationTask).where(CreationTask.id == creation_task_id)).scalar_one_or_none()
+    if not row:
+        return {}
+    payload = _resume_cursor_dict(row)
+    runtime_state = payload.get("runtime_state")
+    return dict(runtime_state) if isinstance(runtime_state, dict) else {}
+
+
+def update_resume_runtime_state(
+    db: Session,
+    *,
+    creation_task_id: int,
+    runtime_state: dict[str, Any] | None,
+) -> None:
+    row = db.execute(select(CreationTask).where(CreationTask.id == creation_task_id)).scalar_one_or_none()
+    if not row:
+        return
+    payload = _resume_cursor_dict(row)
+    if runtime_state:
+        payload["runtime_state"] = dict(runtime_state)
+    else:
+        payload.pop("runtime_state", None)
+    row.resume_cursor_json = payload
     db.flush()
 
 

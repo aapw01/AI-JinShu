@@ -159,6 +159,29 @@ def _to_status_response(payload: dict) -> GenerationStatusResponse:
     )
 
 
+def _creation_task_runtime_state(row: CreationTask) -> dict:
+    cursor = row.resume_cursor_json if isinstance(row.resume_cursor_json, dict) else {}
+    runtime_state = cursor.get("runtime_state")
+    return dict(runtime_state) if isinstance(runtime_state, dict) else {}
+
+
+def _creation_task_display_totals(row: CreationTask) -> tuple[int, int]:
+    payload_data = row.payload_json if isinstance(row.payload_json, dict) else {}
+    cursor = row.resume_cursor_json if isinstance(row.resume_cursor_json, dict) else {}
+    runtime_state = _creation_task_runtime_state(row)
+    default_total = int(payload_data.get("original_total_chapters") or payload_data.get("num_chapters") or 0)
+    effective_end = int(runtime_state.get("effective_end_chapter") or 0)
+    effective_total = max(int(runtime_state.get("effective_total_chapters") or 0), default_total, effective_end)
+    resume_from = int(runtime_state.get("resume_from_chapter") or cursor.get("next") or 0)
+    if row.status == "completed":
+        current_chapter = max(0, min(effective_total, (resume_from - 1) if resume_from > 0 else effective_total))
+    elif row.status in {"failed", "paused", "running", "queued", "dispatching"}:
+        current_chapter = resume_from
+    else:
+        current_chapter = max(0, resume_from)
+    return int(current_chapter), int(effective_total)
+
+
 def _format_eta(seconds: int) -> str:
     sec = max(0, int(seconds))
     if sec < 60:
@@ -941,14 +964,15 @@ def get_generation_status(
         redis_key_id = row.worker_task_id or row.public_id
         redis_payload = _redis_get_json(_redis_key(redis_key_id))
         result_data = row.result_json if isinstance(row.result_json, dict) else {}
+        current_chapter, total_chapters = _creation_task_display_totals(row)
         payload = {
             "status": row.status,
             "run_state": row.status,
             "step": row.phase or row.status,
             "current_phase": row.phase or row.status,
-            "current_chapter": 0,
-            "total_chapters": 0,
-            "progress": float(row.progress or 0.0),
+            "current_chapter": current_chapter,
+            "total_chapters": total_chapters,
+            "progress": float(row.progress or (100.0 if row.status == "completed" else 0.0) or 0.0),
             "token_usage_input": int(result_data.get("token_usage_input") or 0),
             "token_usage_output": int(result_data.get("token_usage_output") or 0),
             "estimated_cost": float(result_data.get("estimated_cost") or 0.0),
@@ -967,13 +991,15 @@ def get_generation_status(
             "trace_id": None,
         }
         db_status = row.status
-        if isinstance(redis_payload, dict):
+        if isinstance(redis_payload, dict) and db_status not in ("cancelled", "failed", "completed", "paused"):
             for k, v in redis_payload.items():
                 if k in payload:
                     payload[k] = v
         if db_status in ("cancelled", "failed", "completed", "paused"):
             payload["status"] = db_status
             payload["run_state"] = db_status
+            payload["step"] = row.phase or db_status
+            payload["current_phase"] = row.phase or db_status
             payload["message"] = row.message or payload.get("message")
             if row.error_detail:
                 payload["error"] = row.error_detail
