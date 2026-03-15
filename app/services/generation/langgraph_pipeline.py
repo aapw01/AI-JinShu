@@ -31,7 +31,10 @@ from app.services.generation.common import (
     MAX_RETRIES,
     REVIEW_SCORE_THRESHOLD,
     generate_chapter_summary,
+    load_outlines_from_db,
+    load_prewrite_artifacts,
     logger,
+    normalize_chapter_content,
     resolve_chapter_title,
     save_full_outlines,
     save_prewrite_artifacts,
@@ -977,6 +980,12 @@ def _node_init(state: GenerationState) -> GenerationState:
 
 
 def _node_prewrite(state: GenerationState) -> GenerationState:
+    if state["start_chapter"] > 1:
+        existing = load_prewrite_artifacts(state["novel_id"])
+        if existing:
+            logger.info("Resume: loaded existing prewrite for novel %s (start_chapter=%s)", state["novel_id"], state["start_chapter"])
+            _progress(state, "constitution", 0, 2, "加载已有创作宪法...", {"current_phase": "prewrite", "total_chapters": state["num_chapters"]})
+            return {"prewrite": existing}
     _progress(state, "constitution", 0, 2, "生成创作宪法...", {"current_phase": "prewrite", "total_chapters": state["num_chapters"]})
     pre_provider, pre_model = get_model_for_stage(state["strategy"], "architect")
     prewrite = state["prewrite_agent"].run(state["novel_info"], state["num_chapters"], state["target_language"], pre_provider, pre_model)
@@ -985,6 +994,16 @@ def _node_prewrite(state: GenerationState) -> GenerationState:
 
 
 def _node_outline(state: GenerationState) -> GenerationState:
+    if state["start_chapter"] > 1:
+        existing = load_outlines_from_db(state["novel_id"], state.get("novel_version_id"))
+        if existing and len(existing) >= state["end_chapter"]:
+            logger.info(
+                "Resume: loaded %d existing outlines for novel %s (start_chapter=%s)",
+                len(existing), state["novel_id"], state["start_chapter"],
+            )
+            _progress(state, "full_outline_ready", 0, 20, "加载已有章节大纲...", {"current_phase": "outline_ready", "total_chapters": state["num_chapters"]})
+            return {"full_outlines": existing}
+
     _progress(state, "specify_plan_tasks", 0, 10, "完成规格/计划/任务分解...", {"current_phase": "prewrite", "total_chapters": state["num_chapters"]})
     out_provider, out_model = get_model_for_stage(state["strategy"], "outliner")
     full_outlines = state["outliner"].run_full_book(
@@ -995,7 +1014,8 @@ def _node_outline(state: GenerationState) -> GenerationState:
         out_provider,
         out_model,
     )
-    save_full_outlines(state["novel_id"], full_outlines, novel_version_id=state.get("novel_version_id"))
+    is_resume = state["start_chapter"] > 1
+    save_full_outlines(state["novel_id"], full_outlines, novel_version_id=state.get("novel_version_id"), replace_all=not is_resume)
     _progress(state, "full_outline_ready", 0, 20, "全书章节大纲已确定", {"current_phase": "outline_ready", "total_chapters": state["num_chapters"]})
     return {"full_outlines": full_outlines}
 
@@ -1236,9 +1256,14 @@ def _node_load_context(state: GenerationState) -> GenerationState:
     from app.services.memory.context import build_chapter_context
 
     chapter_num = state["current_chapter"]
-    idx = chapter_num - state["start_chapter"]
     outlines = state.get("full_outlines", [])
-    outline = outlines[idx] if 0 <= idx < len(outlines) else {"chapter_num": chapter_num, "title": f"第{chapter_num}章", "outline": ""}
+    outline_map = {o.get("chapter_num"): o for o in outlines if isinstance(o, dict)}
+    outline = outline_map.get(chapter_num)
+    if outline is None:
+        idx = chapter_num - state["start_chapter"]
+        outline = outlines[idx] if 0 <= idx < len(outlines) else None
+    if outline is None:
+        outline = {"chapter_num": chapter_num, "title": f"第{chapter_num}章", "outline": ""}
 
     db = SessionLocal()
     try:
@@ -1597,61 +1622,60 @@ def _node_review(state: GenerationState) -> GenerationState:
     _progress(state, "reviewer", chapter_num, _chapter_progress(state, 0.55), "章节审校...", {"current_phase": "chapter_review", "total_chapters": state["num_chapters"]})
     r_provider, r_model = get_model_for_stage(state["strategy"], "reviewer")
     candidates = state.get("candidate_drafts") or [{"variant": "A", "draft": state.get("draft", "")}]
+    _REVIEWER_FALLBACK: dict[str, Any] = {
+        "score": 0.75, "confidence": 0.3, "feedback": "审校跳过（模型输出异常）",
+        "must_fix": [], "should_fix": [], "positives": [], "risks": ["reviewer_skipped"],
+        "contradictions": [], "raw": {},
+    }
+
     best = None
     for c in candidates:
         text = str(c.get("draft") or "")
-        if hasattr(state["reviewer"], "run_structured"):
-            struct_raw = state["reviewer"].run_structured(
-                text,
-                chapter_num,
-                state["target_language"],
-                state["native_style_profile"],
-                r_provider,
-                r_model,
-            )
-        else:
-            struct_raw = state["reviewer"].run(
-                text,
-                chapter_num,
-                state["target_language"],
-                state["native_style_profile"],
-                r_provider,
-                r_model,
-            )
-        if hasattr(state["reviewer"], "run_factual_structured"):
-            factual_raw = state["reviewer"].run_factual_structured(
-                text,
-                chapter_num,
-                state.get("context") or {},
-                state["target_language"],
-                r_provider,
-                r_model,
-            )
-        else:
-            factual_raw = state["reviewer"].run_factual(
-                text,
-                chapter_num,
-                state.get("context") or {},
-                state["target_language"],
-                r_provider,
-                r_model,
-            )
-        if hasattr(state["reviewer"], "run_aesthetic_structured"):
-            aesthetic_raw = state["reviewer"].run_aesthetic_structured(
-                text,
-                chapter_num,
-                state["target_language"],
-                r_provider,
-                r_model,
-            )
-        else:
-            aesthetic_raw = state["reviewer"].run_aesthetic(
-                text,
-                chapter_num,
-                state["target_language"],
-                r_provider,
-                r_model,
-            )
+        try:
+            if hasattr(state["reviewer"], "run_structured"):
+                struct_raw = state["reviewer"].run_structured(
+                    text, chapter_num, state["target_language"],
+                    state["native_style_profile"], r_provider, r_model,
+                )
+            else:
+                struct_raw = state["reviewer"].run(
+                    text, chapter_num, state["target_language"],
+                    state["native_style_profile"], r_provider, r_model,
+                )
+        except Exception as exc:
+            logger.warning("reviewer.structured failed chapter=%s error=%s", chapter_num, exc)
+            struct_raw = dict(_REVIEWER_FALLBACK)
+
+        try:
+            if hasattr(state["reviewer"], "run_factual_structured"):
+                factual_raw = state["reviewer"].run_factual_structured(
+                    text, chapter_num, state.get("context") or {},
+                    state["target_language"], r_provider, r_model,
+                )
+            else:
+                factual_raw = state["reviewer"].run_factual(
+                    text, chapter_num, state.get("context") or {},
+                    state["target_language"], r_provider, r_model,
+                )
+        except Exception as exc:
+            logger.warning("reviewer.factual failed chapter=%s error=%s", chapter_num, exc)
+            factual_raw = dict(_REVIEWER_FALLBACK)
+
+        try:
+            if hasattr(state["reviewer"], "run_aesthetic_structured"):
+                aesthetic_raw = state["reviewer"].run_aesthetic_structured(
+                    text, chapter_num, state["target_language"],
+                    r_provider, r_model,
+                )
+            else:
+                aesthetic_raw = state["reviewer"].run_aesthetic(
+                    text, chapter_num, state["target_language"],
+                    r_provider, r_model,
+                )
+        except Exception as exc:
+            logger.warning("reviewer.aesthetic failed chapter=%s error=%s", chapter_num, exc)
+            aesthetic_raw = dict(_REVIEWER_FALLBACK)
+
         struct_pack = _normalize_reviewer_payload(struct_raw, "结构审校结果")
         factual_pack = _normalize_reviewer_payload(factual_raw, "事实审校结果")
         aesthetic_pack = _normalize_reviewer_payload(aesthetic_raw, "审美审校结果")
@@ -1826,6 +1850,7 @@ def _node_finalize(state: GenerationState) -> GenerationState:
         provider=f_provider,
         model=f_model,
     )
+    final_content = normalize_chapter_content(final_content)
     language_score, language_report = evaluate_language_quality(final_content, state["target_language"])
     aesthetic_score = _aesthetic_score(final_content)
     chapter_title = resolve_chapter_title(

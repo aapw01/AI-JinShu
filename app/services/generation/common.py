@@ -316,6 +316,106 @@ def extract_chapter_body_from_response(raw: str | None) -> str:
     body = (match.group(1) or "").strip()
     return body or text
 
+_HTML_BLOCK_TAG_RE = re.compile(r"</?(?:p|div|br)\s*/?>", re.IGNORECASE)
+_ESCAPED_NEWLINE_RE = re.compile(r"(?<!\\)\\n")
+_ZERO_WIDTH_RE = re.compile(r"[\u200b\u200c\u200d\ufeff\u00a0]")
+_CONSECUTIVE_BLANK_LINES_RE = re.compile(r"\n{3,}")
+
+
+def normalize_chapter_content(raw: str | None) -> str:
+    """Normalize chapter content to a canonical format with \\n\\n paragraph breaks.
+
+    Handles CRLF, escaped newlines, HTML tags, code fences, <chapter_body> wrappers,
+    zero-width characters, and compresses excessive blank lines.
+    """
+    text = str(raw or "")
+    if not text.strip():
+        return ""
+
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = _ZERO_WIDTH_RE.sub("", text)
+    text = text.lstrip("\ufeff")
+
+    if "<chapter_body>" in text.lower():
+        match = _CHAPTER_BODY_TAG_RE.search(text)
+        if match:
+            text = (match.group(1) or "").strip()
+
+    if text.startswith("```"):
+        lines = text.split("\n")
+        lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines)
+
+    text = "\n".join(
+        ln for ln in text.split("\n") if not re.match(r"^\s*```\w*\s*$", ln)
+    )
+
+    text = _HTML_BLOCK_TAG_RE.sub("\n", text)
+    text = _ESCAPED_NEWLINE_RE.sub("\n", text)
+
+    lines = text.split("\n")
+    cleaned: list[str] = []
+    for line in lines:
+        cleaned.append(line.rstrip())
+    text = "\n".join(cleaned)
+
+    paragraphs = re.split(r"\n\s*\n", text)
+    result_parts: list[str] = []
+    for para in paragraphs:
+        stripped = para.strip()
+        if not stripped:
+            continue
+        inner_lines = [ln.strip() for ln in stripped.split("\n") if ln.strip()]
+        result_parts.append("\n".join(inner_lines))
+
+    result = "\n\n".join(result_parts).strip()
+    result = _CONSECUTIVE_BLANK_LINES_RE.sub("\n\n", result)
+    return result
+
+
+def load_prewrite_artifacts(novel_id: int) -> dict:
+    """Load existing prewrite specification artifacts from the database."""
+    db = SessionLocal()
+    try:
+        rows = db.execute(
+            select(NovelSpecification).where(NovelSpecification.novel_id == novel_id)
+        ).scalars().all()
+        if not rows:
+            return {}
+        return {r.spec_type: r.content for r in rows}
+    finally:
+        db.close()
+
+
+def load_outlines_from_db(
+    novel_id: int, novel_version_id: int | None = None
+) -> list[dict]:
+    """Load existing chapter outlines from the database, sorted by chapter_num."""
+    db = SessionLocal()
+    try:
+        stmt = (
+            select(ChapterOutline)
+            .where(ChapterOutline.novel_id == novel_id)
+        )
+        if novel_version_id is not None:
+            stmt = stmt.where(ChapterOutline.novel_version_id == novel_version_id)
+        stmt = stmt.order_by(ChapterOutline.chapter_num)
+        rows = db.execute(stmt).scalars().all()
+        return [
+            {
+                "chapter_num": r.chapter_num,
+                "title": r.title,
+                "outline": r.outline,
+                **(r.metadata_ if isinstance(r.metadata_, dict) else {}),
+            }
+            for r in rows
+        ]
+    finally:
+        db.close()
+
+
 def save_prewrite_artifacts(novel_id: int, prewrite: dict) -> None:
     db = SessionLocal()
     try:
@@ -343,13 +443,24 @@ def save_prewrite_artifacts(novel_id: int, prewrite: dict) -> None:
         db.close()
 
 
-def save_full_outlines(novel_id: int, outlines: list[dict], novel_version_id: int | None = None) -> None:
+def save_full_outlines(novel_id: int, outlines: list[dict], novel_version_id: int | None = None, *, replace_all: bool = True) -> None:
     db = SessionLocal()
     try:
-        del_stmt = delete(ChapterOutline).where(ChapterOutline.novel_id == novel_id)
-        if novel_version_id is not None:
-            del_stmt = del_stmt.where(ChapterOutline.novel_version_id == novel_version_id)
-        db.execute(del_stmt)
+        if replace_all:
+            del_stmt = delete(ChapterOutline).where(ChapterOutline.novel_id == novel_id)
+            if novel_version_id is not None:
+                del_stmt = del_stmt.where(ChapterOutline.novel_version_id == novel_version_id)
+            db.execute(del_stmt)
+        else:
+            chapter_nums = [o.get("chapter_num") for o in outlines if o.get("chapter_num") is not None]
+            if chapter_nums:
+                del_stmt = delete(ChapterOutline).where(
+                    ChapterOutline.novel_id == novel_id,
+                    ChapterOutline.chapter_num.in_(chapter_nums),
+                )
+                if novel_version_id is not None:
+                    del_stmt = del_stmt.where(ChapterOutline.novel_version_id == novel_version_id)
+                db.execute(del_stmt)
         for o in outlines:
             db.add(
                 ChapterOutline(

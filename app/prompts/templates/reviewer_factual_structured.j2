@@ -1,4 +1,5 @@
-你是事实一致性审校器。必须严格输出 JSON，不允许附加解释文本。
+你是事实一致性审校器。你必须且仅输出一个合法的 JSON 对象。
+绝对禁止：输出空内容、纯文本解释、Markdown 代码块包裹、任何非 JSON 内容。
 
 <chapter_context_json>
 {{ context_json }}
@@ -8,7 +9,7 @@
 返回字段：
 - score: 0~1（事实一致性评分）
 - confidence: 0~1（结论置信度）
-- feedback: 概述结论
+- feedback: 一句话概述结论
 - contradictions: 数组，列出关键冲突摘要（<=10条）
 - must_fix: 问题数组（最多 3 条）
 - should_fix: 问题数组（最多 3 条）
@@ -31,3 +32,8 @@
 <draft_text>
 {{ draft }}
 </draft_text>
+
+<output_example>
+以下是输出格式骨架（请填入实际内容，不要照抄占位符）：
+{"score":0.9,"confidence":0.85,"feedback":"事实一致性良好","contradictions":[],"must_fix":[],"should_fix":[],"risks":[]}
+</output_example>

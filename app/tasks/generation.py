@@ -17,6 +17,7 @@ from app.core.database import SessionLocal
 from app.core.logging_config import bind_log_context, log_event
 from app.core.llm_usage import begin_usage_session, end_usage_session, snapshot_usage
 from app.core.trace import set_trace_id
+from app.models.creation_task import CreationTask
 from app.models.novel import GenerationTask
 from app.services.quota import record_generation_usage
 from app.services.scheduler.scheduler_service import (
@@ -534,6 +535,24 @@ def submit_book_generation_task(
     key = f"generation:{task_id}"
     novel_key = f"generation:novel:{novel_id}"
     db: Any = None
+
+    display_total_chapters = int(num_chapters)
+    if creation_task_id is not None:
+        try:
+            _ct_db = SessionLocal()
+            _ct_row = _ct_db.execute(
+                select(CreationTask).where(CreationTask.id == creation_task_id)
+            ).scalar_one_or_none()
+            if _ct_row and isinstance(_ct_row.payload_json, dict):
+                display_total_chapters = int(
+                    _ct_row.payload_json.get("original_total_chapters")
+                    or _ct_row.payload_json.get("num_chapters")
+                    or num_chapters
+                )
+            _ct_db.close()
+        except Exception:
+            pass
+
     data: dict[str, Any] = {
         "status": "running",
         "run_state": "running",
@@ -542,7 +561,7 @@ def submit_book_generation_task(
         "current_subtask": {"key": "queued", "label": SUBTASK_LABELS.get("queued"), "progress": 0},
         "progress": 0,
         "current_chapter": int(start_chapter),
-        "total_chapters": int(num_chapters),
+        "total_chapters": display_total_chapters,
         "novel_version_id": int(novel_version_id),
         "message": "任务已入队",
         "trace_id": trace_id or "",
@@ -655,7 +674,7 @@ def submit_book_generation_task(
             "current_phase": "book_planning",
             "current_subtask": {"key": "book_planning", "label": SUBTASK_LABELS.get("book_planning"), "progress": 5},
             "current_chapter": start_chapter,
-            "total_chapters": num_chapters,
+            "total_chapters": display_total_chapters,
             "novel_version_id": int(novel_version_id),
             "progress": 5,
             "volume_no": 1,
@@ -679,7 +698,7 @@ def submit_book_generation_task(
                 "current_phase": "volume_dispatch",
                 "current_subtask": {"key": "volume_dispatch", "label": SUBTASK_LABELS.get("volume_dispatch")},
                 "current_chapter": chunk_start,
-                "total_chapters": num_chapters,
+                "total_chapters": display_total_chapters,
                 "novel_version_id": int(novel_version_id),
                 "progress": round(10 + ((volume_no - 1) / max(len(chunks), 1)) * 70, 2),
                 "volume_no": volume_no,
@@ -700,7 +719,7 @@ def submit_book_generation_task(
                 chunk_chapters=chunk_len,
                 chunk_start=chunk_start,
                 parent_task_id=task_id,
-                total_chapters=num_chapters,
+                total_chapters=display_total_chapters,
                 total_start_chapter=start_chapter,
                 volume_no=volume_no,
                 volume_size=volume_size,
@@ -715,7 +734,7 @@ def submit_book_generation_task(
             "current_subtask": {"key": "done", "label": SUBTASK_LABELS.get("done"), "progress": 100},
             "progress": 100,
             "current_chapter": start_chapter + num_chapters - 1,
-            "total_chapters": num_chapters,
+            "total_chapters": display_total_chapters,
             "novel_version_id": int(novel_version_id),
             "volume_no": chunks[-1][0] if chunks else 1,
             "volume_size": volume_size,
@@ -744,7 +763,7 @@ def submit_book_generation_task(
                     "progress": 0,
                 },
                 "progress": 0,
-                "total_chapters": num_chapters,
+                "total_chapters": display_total_chapters,
                 "novel_version_id": int(novel_version_id),
                 "error": None if (is_paused or is_cancelled) else str(e),
                 "error_code": None if (is_paused or is_cancelled) else error_code,

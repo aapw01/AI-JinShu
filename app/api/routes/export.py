@@ -14,16 +14,22 @@ from app.core.authz.resources import load_novel_resource
 from app.core.authz.types import Permission, Principal
 from app.core.database import get_db, resolve_novel
 from app.models.novel import ChapterOutline, ChapterVersion, Novel, NovelSpecification
+from app.services.generation.common import normalize_chapter_content
 from app.services.rewrite.service import get_version_or_default
 
 router = APIRouter()
+
+
+def _normalize_content(raw: str | None) -> str:
+    """Ensure exported content has stable paragraph spacing."""
+    return normalize_chapter_content(raw)
 
 
 def _build_txt(novel: Novel, chapters: list[ChapterVersion]) -> str:
     lines = [f"# {novel.title}\n"]
     for c in chapters:
         lines.append(f"\n\n## 第{c.chapter_num}章 {c.title or ''}\n\n")
-        lines.append(c.content or "")
+        lines.append(_normalize_content(c.content))
     return "\n".join(lines)
 
 
@@ -99,7 +105,7 @@ def export_novel(
             )
             zf.writestr("01_小说信息.txt", f"标题: {novel.title}\n类型: {novel.genre or ''}\n状态: {novel.status}\n")
             for c in chapters:
-                zf.writestr(_chapter_file_name(c), c.content or "")
+                zf.writestr(_chapter_file_name(c), _normalize_content(c.content))
             outlines = _list_outlines_for_version(db, novel.id, version.id)
             if outlines:
                 outline_payload = [
