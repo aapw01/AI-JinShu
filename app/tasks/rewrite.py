@@ -15,6 +15,7 @@ from app.core.strategy import get_model_for_stage
 from app.models.novel import ChapterVersion, Novel, NovelVersion, RewriteRequest
 from app.prompts import render_prompt
 from app.services.generation.common import (
+    normalize_chapter_content,
     resolve_chapter_title,
 )
 from app.services.generation.contracts import OutputContractError
@@ -417,6 +418,7 @@ def submit_rewrite_task(
 
             if not rewritten:
                 rewritten = (base_chapter.content or "").strip()
+            rewritten = normalize_chapter_content(rewritten)
             chapter_title = resolve_chapter_title(
                 chapter_num=chapter_num,
                 title=base_chapter.title,

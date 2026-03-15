@@ -63,11 +63,11 @@ const DEFAULT_STYLES = [
 ];
 
 const DEFAULT_LENGTHS = [
-  { id: "short", label: "短篇（练笔）", description: "12-30章", chapter_target: 20 },
-  { id: "medium", label: "中篇（可完结）", description: "30-80章", chapter_target: 50 },
-  { id: "long", label: "长篇（平台主流）", description: "80-220章", chapter_target: 120 },
-  { id: "epic", label: "超长篇（强连载）", description: "220-500章", chapter_target: 300 },
-  { id: "serial", label: "连载（持续更新）", description: "500+章", chapter_target: 500 },
+  { id: "micro", label: "微短篇（极速爽文）", description: "1-5万字, 5-25章", chapter_target: 15 },
+  { id: "short", label: "短篇（练笔/快穿）", description: "5-20万字, 25-100章", chapter_target: 60 },
+  { id: "medium", label: "中篇（可完结）", description: "20-80万字, 100-400章", chapter_target: 200 },
+  { id: "long", label: "长篇（平台主力）", description: "80-300万字, 400-1500章", chapter_target: 800 },
+  { id: "epic", label: "超长篇（史诗巨著）", description: "300万字+, 1500+章", chapter_target: 2000 },
 ];
 
 const DEFAULT_AUDIENCES = [
@@ -127,8 +127,8 @@ export default function Home() {
     genre: "",
     style: "",
     audience: "general",
-    length: "medium",
-    chapterTarget: 50,
+    length: "short",
+    chapterTarget: 60,
     method: "three_act",
   });
   const [genres, setGenres] = useState(DEFAULT_GENRES);
@@ -510,7 +510,7 @@ export default function Home() {
                           label="目标章节"
                           type="number"
                           min={1}
-                          max={1000}
+                          max={5000}
                           value={form.chapterTarget}
                           onChange={(e) => setForm((prev) => ({ ...prev, chapterTarget: Number(e.target.value || 1) }))}
                         />

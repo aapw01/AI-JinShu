@@ -423,6 +423,7 @@ def retry_generation(
         payload_data = source_creation.payload_json or {}
         start_ch = int(payload_data.get("start_chapter") or 1)
         num_ch = int(payload_data.get("num_chapters") or 1)
+        original_total = int(payload_data.get("original_total_chapters") or num_ch)
         cursor = source_creation.resume_cursor_json if isinstance(source_creation.resume_cursor_json, dict) else {}
         retry_start = int(cursor.get("next") or start_ch)
         source_end = start_ch + max(1, num_ch) - 1
@@ -445,6 +446,7 @@ def retry_generation(
                 "novel_version_id": int(retry_version_id),
                 "num_chapters": int(retry_num),
                 "start_chapter": int(retry_start),
+                "original_total_chapters": int(original_total),
                 "trace_id": trace_id,
             },
         )
@@ -460,15 +462,15 @@ def retry_generation(
             "subtask_label": "任务已入队",
             "subtask_progress": 0,
             "current_chapter": retry_start,
-            "total_chapters": retry_num,
+            "total_chapters": original_total,
             "progress": 0,
-            "message": f"重试已提交：从第{retry_start}章继续",
+            "message": f"重试已提交：从第{retry_start}章继续（共{original_total}章）",
             "task_id": creation_task.public_id,
             "trace_id": trace_id,
         }
         _redis_set_json(_redis_key(creation_task.public_id), data)
         _redis_set_json(_novel_key(str(novel.id)), data)
-        log_event(logger, "generation.retry.submit", novel_id=novel.id, user_id=principal.user_uuid, task_id=creation_task.public_id, run_state="queued", chapter_num=retry_start, total_chapters=retry_num)
+        log_event(logger, "generation.retry.submit", novel_id=novel.id, user_id=principal.user_uuid, task_id=creation_task.public_id, run_state="queued", chapter_num=retry_start, total_chapters=original_total)
         return GenerateResponse(task_id=creation_task.public_id, novel_id=novel.uuid or str(novel.id), status="queued")
 
     # 4) Fallback: legacy path using GenerationTask (creates new CreationTask)
@@ -500,8 +502,8 @@ def retry_generation(
 
     source_start = int(source_task.start_chapter or 1)
     source_total = int(source_task.total_chapters or source_task.num_chapters or 1)
+    original_total = source_total
     source_end = source_start + max(1, source_total) - 1
-    # Prefer resume_cursor from CreationTask (worker_task_id links to GenerationTask.task_id)
     retry_start = int(source_task.current_chapter or source_start)
     legacy_creation = db.execute(
         select(CreationTask).where(
@@ -515,6 +517,8 @@ def retry_generation(
         next_val = legacy_creation.resume_cursor_json.get("next")
         if next_val is not None:
             retry_start = max(source_start, min(int(next_val), source_end))
+        legacy_payload = legacy_creation.payload_json or {}
+        original_total = int(legacy_payload.get("original_total_chapters") or legacy_payload.get("num_chapters") or source_total)
     else:
         retry_start = max(source_start, min(retry_start, source_end))
     retry_num = max(1, source_end - retry_start + 1)
@@ -553,6 +557,7 @@ def retry_generation(
             "novel_version_id": int(retry_version_id),
             "num_chapters": int(retry_num),
             "start_chapter": int(retry_start),
+            "original_total_chapters": int(original_total),
             "trace_id": trace_id,
         },
     )
@@ -569,9 +574,9 @@ def retry_generation(
         "subtask_label": "任务已入队",
         "subtask_progress": 0,
         "current_chapter": retry_start,
-        "total_chapters": retry_num,
+        "total_chapters": original_total,
         "progress": 0,
-        "message": f"重试已提交：从第{retry_start}章继续",
+        "message": f"重试已提交：从第{retry_start}章继续（共{original_total}章）",
         "task_id": creation_task.public_id,
         "trace_id": trace_id,
     }
@@ -585,7 +590,7 @@ def retry_generation(
         task_id=creation_task.public_id,
         run_state="queued",
         chapter_num=retry_start,
-        total_chapters=retry_num,
+        total_chapters=original_total,
     )
     return GenerateResponse(task_id=creation_task.public_id, novel_id=novel.uuid or str(novel.id), status="queued")
 

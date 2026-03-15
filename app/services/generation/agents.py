@@ -99,7 +99,7 @@ def _invoke_json_with_schema(
     llm: Any,
     prompt: str,
     schema_cls: type[BaseModel],
-    retries: int = 2,
+    retries: int = 3,
     *,
     stage: str = "structured",
     strict: bool = False,
@@ -144,6 +144,21 @@ def _invoke_json_with_schema(
                 prompt_hash,
             )
             content = response_to_text(resp).strip()
+            if not content:
+                delay = _AGENT_RETRY_BACKOFF[attempt] if attempt < len(_AGENT_RETRY_BACKOFF) else 10.0
+                logger.warning(
+                    "LLM structured empty response stage=%s schema=%s attempt=%s delay=%.1fs prompt_hash=%s",
+                    stage,
+                    schema_cls.__name__,
+                    attempt + 1,
+                    delay,
+                    prompt_hash,
+                )
+                error = "empty response from model"
+                last_error_code = "MODEL_OUTPUT_PARSE_FAILED"
+                if attempt < retries:
+                    time.sleep(delay)
+                continue
             try:
                 parsed = parser.parse(content)
                 return parsed.model_dump()

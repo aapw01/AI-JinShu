@@ -15,6 +15,7 @@ import {
   RewriteAnnotationInput,
   getErrorMessage,
 } from "@/lib/api";
+import { parseChapterContent } from "@/lib/novelContent";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Card } from "@/components/ui/Card";
@@ -470,48 +471,49 @@ export default function NovelPage() {
     if (!content.trim()) {
       return "暂无内容";
     }
-    if (!selectedChapterAnnotationRanges.length) {
-      return content;
+
+    if (selectedChapterAnnotationRanges.length) {
+      const nodes: ReactNode[] = [];
+      let cursor = 0;
+      let chunkId = 0;
+      for (const ann of selectedChapterAnnotationRanges) {
+        if (ann.start < cursor) continue;
+        if (ann.start > cursor) nodes.push(content.slice(cursor, ann.start));
+        const snippet = content.slice(ann.start, ann.end);
+        nodes.push(
+          <span
+            key={`ann-${ann._index}-${chunkId++}`}
+            className="rounded-[6px] bg-[#FFE8E5] px-1 py-0.5 text-[#A52A25] border border-[#FFD2CC] inline cursor-pointer"
+            onClick={(event) => { event.stopPropagation(); removeAnnotation(ann._index); }}
+            onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); removeAnnotation(ann._index); } }}
+            role="button"
+            tabIndex={0}
+            title="点击删除该建议"
+          >
+            {snippet}
+          </span>
+        );
+        cursor = ann.end;
+      }
+      if (cursor < content.length) nodes.push(content.slice(cursor));
+      return <div className="whitespace-pre-wrap">{nodes}</div>;
     }
 
-    const nodes: ReactNode[] = [];
-    let cursor = 0;
-    let chunkId = 0;
-    for (const ann of selectedChapterAnnotationRanges) {
-      if (ann.start < cursor) {
-        continue;
-      }
-      if (ann.start > cursor) {
-        nodes.push(content.slice(cursor, ann.start));
-      }
-      const snippet = content.slice(ann.start, ann.end);
-      nodes.push(
-        <span
-          key={`ann-${ann._index}-${chunkId++}`}
-          className="rounded-[6px] bg-[#FFE8E5] px-1 py-0.5 text-[#A52A25] border border-[#FFD2CC] inline cursor-pointer"
-          onClick={(event) => {
-            event.stopPropagation();
-            removeAnnotation(ann._index);
-          }}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" || event.key === " ") {
-              event.preventDefault();
-              removeAnnotation(ann._index);
-            }
-          }}
-          role="button"
-          tabIndex={0}
-          title="点击删除该建议"
-        >
-          {snippet}
-        </span>
-      );
-      cursor = ann.end;
-    }
-    if (cursor < content.length) {
-      nodes.push(content.slice(cursor));
-    }
-    return nodes;
+    const displayParas = parseChapterContent(content);
+    if (!displayParas.length) return "暂无内容";
+    return (
+      <div className="novel-content">
+        {displayParas.map((para, i) =>
+          para.type === "break" ? (
+            <div key={i} className="h-4" />
+          ) : (
+            <p key={i} style={{ textIndent: "2em" }} className="mb-4 leading-[1.9]">
+              {para.content}
+            </p>
+          )
+        )}
+      </div>
+    );
   };
 
   const submitRewrite = async () => {
@@ -797,7 +799,7 @@ export default function NovelPage() {
                     <div
                       ref={contentRef}
                       onMouseUp={onContentMouseUp}
-                      className="text-[#3A3A3C] leading-relaxed whitespace-pre-wrap cursor-text"
+                      className="text-[#3A3A3C] text-base leading-relaxed cursor-text"
                     >
                       {renderSelectedChapterContent()}
                     </div>

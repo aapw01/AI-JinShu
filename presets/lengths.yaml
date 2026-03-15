@@ -1,35 +1,49 @@
-- id: short
-  label: 短篇（练笔）
-  description: 单线主冲突，快速起承转合
+- id: micro
+  label: 微短篇（极速爽文）
+  description: 短剧本、盐言故事，极速起承转合
   min_words: 10000
   max_words: 50000
-  chapters: "12-30"
-  chapter_target: 20
-- id: medium
-  label: 中篇（可完结）
-  description: 双线推进，含1-2次中型反转
+  chapters: "5-25"
+  chapter_target: 15
+  volumes: "1"
+  suited_for: 短剧本、知乎盐言故事
+
+- id: short
+  label: 短篇（练笔/快穿）
+  description: 单线剧情、节奏紧凑
   min_words: 50000
   max_words: 200000
-  chapters: "30-80"
-  chapter_target: 50
-- id: long
-  label: 长篇（平台主流）
-  description: 多线并行，分卷叙事，适合番茄主流连载
+  chapters: "25-100"
+  chapter_target: 60
+  volumes: "1-2"
+  suited_for: 规则怪谈、单副本脑洞文
+
+- id: medium
+  label: 中篇（迷你剧/完结）
+  description: 双线推进，含1-2次核心反转
   min_words: 200000
-  max_words: 1000000
-  chapters: "80-220"
-  chapter_target: 120
-- id: epic
-  label: 超长篇（强连载）
-  description: 多卷大纲，角色群像，长线伏笔回收
-  min_words: 1000000
+  max_words: 800000
+  chapters: "100-400"
+  chapter_target: 200
+  volumes: "3-8"
+  suited_for: 都市异能、完整快穿合集
+
+- id: long
+  label: 长篇（平台主力）
+  description: 多线并行，分卷叙事，升级流
+  min_words: 800000
   max_words: 3000000
-  chapters: "220-500"
-  chapter_target: 300
-- id: serial
-  label: 连载（持续更新）
-  description: 章节工厂化节奏，可持续扩展世界观
+  chapters: "400-1500"
+  chapter_target: 800
+  volumes: "10-30"
+  suited_for: 传统修仙、全球高武升级流
+
+- id: epic
+  label: 超长篇（史诗巨著）
+  description: 多卷大纲，角色群像，跨地图扩展
   min_words: 3000000
   max_words: null
-  chapters: "500+"
-  chapter_target: 500
+  chapters: "1500+"
+  chapter_target: 2000
+  volumes: "30+"
+  suited_for: 诸天万界、无限换地图大作
