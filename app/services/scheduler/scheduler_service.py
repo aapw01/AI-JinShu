@@ -245,6 +245,16 @@ def finalize_task(
         task.error_detail = error_detail
     if result_json is not None:
         task.result_json = result_json
+
+    _NOVEL_STATUS_SYNC = {"completed", "failed", "cancelled"}
+    if final_status in _NOVEL_STATUS_SYNC and task.resource_type == "novel" and task.resource_id:
+        from app.models.novel import Novel
+        novel = db.execute(
+            select(Novel).where(Novel.id == task.resource_id)
+        ).scalar_one_or_none()
+        if novel and novel.status != final_status:
+            novel.status = final_status
+
     db.flush()
     dispatch_user_queue(db, user_uuid=task.user_uuid)
     return task

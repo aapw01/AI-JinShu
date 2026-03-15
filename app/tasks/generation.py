@@ -722,15 +722,6 @@ def submit_book_generation_task(
             "message": "总控任务完成",
             "trace_id": trace_id,
         }
-        db = SessionLocal()
-        try:
-            novel = db.execute(select(Novel).where(Novel.id == novel_id)).scalar_one_or_none()
-            if novel:
-                novel.status = "completed"
-                db.commit()
-        finally:
-            db.close()
-            db = None
     except Exception as e:
         err = str(e)
         _worker_superseded = "worker superseded" in err
@@ -762,15 +753,6 @@ def submit_book_generation_task(
                 "message": "任务暂停并等待恢复" if is_paused else ("任务已取消" if is_cancelled else "总控任务失败"),
                 "trace_id": trace_id,
             }
-            db = SessionLocal()
-            try:
-                novel = db.execute(select(Novel).where(Novel.id == novel_id)).scalar_one_or_none()
-                if novel and not is_paused and not is_cancelled:
-                    novel.status = "failed"
-                    db.commit()
-            finally:
-                db.close()
-                db = None
     finally:
         if hb_ctx is not None:
             hb_ctx.__exit__(None, None, None)

@@ -86,6 +86,17 @@ def _extract_json(text: str) -> dict[str, Any] | str:
 def _coerce_framework_payload(raw: Any) -> dict[str, Any]:
     if isinstance(raw, IdeaFrameworkSchema):
         return raw.model_dump()
+
+    from langchain_core.messages import BaseMessage
+    if isinstance(raw, BaseMessage):
+        text = response_to_text(raw)
+        payload = _extract_json(text)
+        if isinstance(payload, str):
+            payload = _extract_json(payload)
+        if isinstance(payload, dict):
+            return payload
+        raise TypeError("idea framework response must be a JSON object")
+
     if isinstance(raw, BaseModel):
         dumped = raw.model_dump()
         if isinstance(dumped, dict):
