@@ -7,7 +7,7 @@ from sqlalchemy import select
 
 from app.core.database import SessionLocal, resolve_novel
 from app.models.creation_task import CreationTask
-from app.models.novel import ChapterVersion, GenerationCheckpoint, NovelVersion, QualityReport
+from app.models.novel import ChapterOutline, ChapterVersion, GenerationCheckpoint, NovelVersion, QualityReport
 
 
 @pytest.fixture
@@ -238,6 +238,227 @@ def test_generation_status_terminal_state_ignores_stale_redis_progress(client, m
     assert body["message"] == "db completed"
 
 
+def test_generation_status_prefers_resume_cursor_after_chapter_done(client, monkeypatch):
+    created = client.post("/api/novels", json={"title": "Chapter Done Status", "target_language": "zh"})
+    assert created.status_code == 200
+    novel_id = created.json()["id"]
+
+    db = SessionLocal()
+    try:
+        novel = resolve_novel(db, novel_id)
+        assert novel is not None
+        row = CreationTask(
+            user_uuid="test-admin-user",
+            task_type="generation",
+            resource_type="novel",
+            resource_id=int(novel.id),
+            status="running",
+            phase="chapter_done",
+            progress=38.0,
+            payload_json={"novel_id": int(novel.id), "start_chapter": 1, "num_chapters": 15},
+            resume_cursor_json={
+                "unit_type": "chapter",
+                "partition": None,
+                "last_completed": 1,
+                "next": 2,
+                "runtime_state": {
+                    "node": "chapter_loop",
+                    "resume_from_chapter": 2,
+                    "effective_end_chapter": 15,
+                    "effective_total_chapters": 15,
+                    "tail_rewrite_attempts": 0,
+                    "bridge_attempts": 0,
+                    "terminal": False,
+                },
+            },
+        )
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        task_id = row.public_id
+    finally:
+        db.close()
+
+    monkeypatch.setattr(
+        "app.api.routes.generation._redis_get_json",
+        lambda _key: {
+            "status": "running",
+            "run_state": "running",
+            "step": "chapter_done",
+            "current_phase": "chapter_done",
+            "current_chapter": 1,
+            "total_chapters": 15,
+            "progress": 42,
+            "message": "第1章完成",
+        },
+    )
+
+    status = client.get(f"/api/novels/{novel_id}/generation/status?task_id={task_id}")
+    assert status.status_code == 200
+    body = status.json()
+    assert body["status"] == "running"
+    assert body["step"] == "chapter_done"
+    assert body["current_phase"] == "chapter_done"
+    assert body["current_chapter"] == 2
+    assert body["total_chapters"] == 15
+
+
+def test_generation_status_uses_creation_task_outline_confirmation_state(client, monkeypatch):
+    created = client.post("/api/novels", json={"title": "Outline Pending", "target_language": "zh"})
+    assert created.status_code == 200
+    novel_id = created.json()["id"]
+
+    db = SessionLocal()
+    try:
+        novel = resolve_novel(db, novel_id)
+        assert novel is not None
+        row = CreationTask(
+            user_uuid="test-admin-user",
+            task_type="generation",
+            resource_type="novel",
+            resource_id=int(novel.id),
+            status="running",
+            phase="outline_ready",
+            progress=20.0,
+            payload_json={
+                "novel_id": int(novel.id),
+                "start_chapter": 1,
+                "num_chapters": 8,
+                "awaiting_outline_confirmation": True,
+                "outline_confirmed": False,
+            },
+        )
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        task_id = row.public_id
+    finally:
+        db.close()
+
+    monkeypatch.setattr("app.api.routes.generation._redis_get_json", lambda _key: None)
+    status = client.get(f"/api/novels/{novel_id}/generation/status?task_id={task_id}")
+    assert status.status_code == 200
+    body = status.json()
+    assert body["status"] == "awaiting_outline_confirmation"
+    assert body["run_state"] == "awaiting_outline_confirmation"
+    assert body["current_phase"] == "outline_ready"
+    assert body["current_chapter"] == 1
+    assert body["total_chapters"] == 8
+
+
+def test_confirm_outline_generation_updates_creation_task(client):
+    created = client.post("/api/novels", json={"title": "Confirm Outline", "target_language": "zh"})
+    assert created.status_code == 200
+    novel_id = created.json()["id"]
+
+    db = SessionLocal()
+    try:
+        novel = resolve_novel(db, novel_id)
+        assert novel is not None
+        row = CreationTask(
+            user_uuid="test-admin-user",
+            task_type="generation",
+            resource_type="novel",
+            resource_id=int(novel.id),
+            status="running",
+            phase="outline_ready",
+            worker_task_id="worker-outline-confirm",
+            progress=20.0,
+            payload_json={
+                "novel_id": int(novel.id),
+                "start_chapter": 1,
+                "num_chapters": 6,
+                "awaiting_outline_confirmation": True,
+                "outline_confirmed": False,
+            },
+        )
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        task_id = row.public_id
+    finally:
+        db.close()
+
+    resp = client.post(f"/api/novels/{novel_id}/generation/{task_id}/confirm-outline")
+    assert resp.status_code == 200
+
+    db = SessionLocal()
+    try:
+        row = db.execute(select(CreationTask).where(CreationTask.public_id == task_id)).scalar_one()
+        payload = row.payload_json if isinstance(row.payload_json, dict) else {}
+    finally:
+        db.close()
+
+    assert payload.get("awaiting_outline_confirmation") is False
+    assert payload.get("outline_confirmed") is True
+    assert row.phase == "chapter_writing"
+    assert row.message == "已确认大纲，继续生成章节"
+
+
+def test_confirm_outline_generation_accepts_worker_task_id(client):
+    created = client.post("/api/novels", json={"title": "Confirm Outline Worker Id", "target_language": "zh"})
+    assert created.status_code == 200
+    novel_id = created.json()["id"]
+
+    db = SessionLocal()
+    try:
+        novel = resolve_novel(db, novel_id)
+        assert novel is not None
+        row = CreationTask(
+            user_uuid="test-admin-user",
+            task_type="generation",
+            resource_type="novel",
+            resource_id=int(novel.id),
+            status="running",
+            phase="outline_ready",
+            worker_task_id="legacy-worker-outline",
+            progress=20.0,
+            payload_json={
+                "novel_id": int(novel.id),
+                "start_chapter": 1,
+                "num_chapters": 6,
+                "awaiting_outline_confirmation": True,
+                "outline_confirmed": False,
+            },
+        )
+        db.add(row)
+        db.flush()
+        task_id = row.public_id
+        from app.models.novel import GenerationTask
+
+        db.add(
+            GenerationTask(
+                task_id="legacy-worker-outline",
+                novel_id=int(novel.id),
+                status="awaiting_outline_confirmation",
+                run_state="running",
+                current_phase="outline_ready",
+                current_chapter=1,
+                total_chapters=6,
+                num_chapters=6,
+                start_chapter=1,
+                outline_confirmed=0,
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    resp = client.post(f"/api/novels/{novel_id}/generation/legacy-worker-outline/confirm-outline")
+    assert resp.status_code == 200
+
+    db = SessionLocal()
+    try:
+        row = db.execute(select(CreationTask).where(CreationTask.public_id == task_id)).scalar_one()
+        payload = row.payload_json if isinstance(row.payload_json, dict) else {}
+    finally:
+        db.close()
+
+    assert payload.get("awaiting_outline_confirmation") is False
+    assert payload.get("outline_confirmed") is True
+    assert row.phase == "chapter_writing"
+
+
 def test_version_scoped_endpoints_require_version_id(client):
     r = client.post("/api/novels", json={"title": "Version Scope", "target_language": "zh"})
     assert r.status_code == 200
@@ -399,6 +620,169 @@ def test_chapter_progress_defaults_to_volume_size_30_when_not_configured(client)
     assert item["chapter_num"] == 31
     assert item["volume_size"] == 30
     assert item["volume_no"] == 2
+
+
+def test_chapter_progress_uses_creation_task_resume_cursor_when_redis_missing(client, monkeypatch):
+    r = client.post("/api/novels", json={"title": "Progress Resume Cursor", "target_language": "zh"})
+    assert r.status_code == 200
+    novel_id = r.json()["id"]
+    version_id: int | None = None
+
+    db = SessionLocal()
+    try:
+        novel = resolve_novel(db, novel_id)
+        assert novel is not None
+        version = db.execute(
+            select(NovelVersion).where(
+                NovelVersion.novel_id == novel.id,
+                NovelVersion.is_default == 1,
+            )
+        ).scalar_one()
+        version_id = int(version.id)
+        db.add_all(
+            [
+                ChapterOutline(novel_id=novel.id, novel_version_id=version_id, chapter_num=1, title="第1章"),
+                ChapterOutline(novel_id=novel.id, novel_version_id=version_id, chapter_num=2, title="第2章"),
+                ChapterOutline(novel_id=novel.id, novel_version_id=version_id, chapter_num=3, title="第3章"),
+            ]
+        )
+        db.add(
+            CreationTask(
+                user_uuid="test-admin-user",
+                task_type="generation",
+                resource_type="novel",
+                resource_id=int(novel.id),
+                status="running",
+                payload_json={"novel_id": int(novel.id), "start_chapter": 1, "num_chapters": 3},
+                resume_cursor_json={
+                    "unit_type": "chapter",
+                    "partition": None,
+                    "last_completed": 1,
+                    "next": 2,
+                    "runtime_state": {
+                        "node": "chapter_loop",
+                        "resume_from_chapter": 2,
+                        "effective_end_chapter": 3,
+                        "effective_total_chapters": 3,
+                        "tail_rewrite_attempts": 0,
+                        "bridge_attempts": 0,
+                        "terminal": False,
+                    },
+                },
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    monkeypatch.setattr("app.api.routes.chapters._get_generating_chapter_from_redis", lambda _novel_id: None)
+    assert version_id is not None
+    resp = client.get(f"/api/novels/{novel_id}/chapter-progress?version_id={version_id}")
+    assert resp.status_code == 200
+    by_num = {int(item["chapter_num"]): item for item in resp.json()}
+    assert by_num[1]["status"] == "pending"
+    assert by_num[2]["status"] == "generating"
+    assert by_num[3]["status"] == "pending"
+
+
+def test_generation_tasks_list_preserves_paused_status_over_outline_pending_flag(client):
+    created = client.post("/api/novels", json={"title": "Task List Paused", "target_language": "zh"})
+    assert created.status_code == 200
+    novel_id = created.json()["id"]
+
+    db = SessionLocal()
+    try:
+        novel = resolve_novel(db, novel_id)
+        assert novel is not None
+        row = CreationTask(
+            user_uuid="test-admin-user",
+            task_type="generation",
+            resource_type="novel",
+            resource_id=int(novel.id),
+            status="paused",
+            phase="paused",
+            progress=20.0,
+            payload_json={
+                "novel_id": int(novel.id),
+                "start_chapter": 1,
+                "num_chapters": 5,
+                "awaiting_outline_confirmation": True,
+                "outline_confirmed": False,
+            },
+            resume_cursor_json={"next": 1},
+        )
+        db.add(row)
+        db.commit()
+    finally:
+        db.close()
+
+    resp = client.get(f"/api/novels/{novel_id}/generation/tasks")
+    assert resp.status_code == 200
+    items = resp.json()
+    assert items
+    assert items[0]["status"] == "paused"
+    assert items[0]["run_state"] == "paused"
+
+
+def test_generation_tasks_list_prefers_resume_cursor_after_chapter_done(client, monkeypatch):
+    created = client.post("/api/novels", json={"title": "Task List Chapter Done", "target_language": "zh"})
+    assert created.status_code == 200
+    novel_id = created.json()["id"]
+
+    db = SessionLocal()
+    try:
+        novel = resolve_novel(db, novel_id)
+        assert novel is not None
+        row = CreationTask(
+            user_uuid="test-admin-user",
+            task_type="generation",
+            resource_type="novel",
+            resource_id=int(novel.id),
+            status="running",
+            phase="chapter_done",
+            progress=42.0,
+            payload_json={"novel_id": int(novel.id), "start_chapter": 1, "num_chapters": 15},
+            resume_cursor_json={
+                "unit_type": "chapter",
+                "partition": None,
+                "last_completed": 1,
+                "next": 2,
+                "runtime_state": {
+                    "node": "chapter_loop",
+                    "resume_from_chapter": 2,
+                    "effective_end_chapter": 15,
+                    "effective_total_chapters": 15,
+                    "tail_rewrite_attempts": 0,
+                    "bridge_attempts": 0,
+                    "terminal": False,
+                },
+            },
+        )
+        db.add(row)
+        db.commit()
+    finally:
+        db.close()
+
+    monkeypatch.setattr(
+        "app.api.routes.generation._redis_get_json",
+        lambda _key: {
+            "status": "running",
+            "run_state": "running",
+            "step": "chapter_done",
+            "current_phase": "chapter_done",
+            "current_chapter": 1,
+            "total_chapters": 15,
+            "progress": 42,
+            "message": "第1章完成",
+        },
+    )
+
+    resp = client.get(f"/api/novels/{novel_id}/generation/tasks")
+    assert resp.status_code == 200
+    items = resp.json()
+    assert items
+    assert items[0]["current_chapter"] == 2
+    assert items[0]["total_chapters"] == 15
 
 
 def test_longform_quality_and_checkpoints_endpoints(client):

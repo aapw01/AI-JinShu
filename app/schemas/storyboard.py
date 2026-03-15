@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.task import TaskStatusBase
+
 
 LANES = ("vertical_feed", "horizontal_cinematic")
 
@@ -71,22 +73,11 @@ class StoryboardStylePresetsResponse(BaseModel):
     director_styles: list[dict]
 
 
-class StoryboardTaskStatusResponse(BaseModel):
+class StoryboardTaskStatusResponse(TaskStatusBase):
     storyboard_project_id: int
     task_id: str | None = None
-    status: str
-    run_state: str | None = None
-    current_phase: str | None = None
     current_lane: str | None = None
-    progress: float = 0.0
     current_episode: int | None = None
-    eta_seconds: int | None = None
-    eta_label: str | None = None
-    message: str | None = None
-    error: str | None = None
-    error_code: str | None = None
-    error_category: str | None = None
-    retryable: bool | None = None
     style_consistency_score: float | None = None
     hook_score_episode: dict[str, float] | None = None
     quality_gate_reasons: list[str] | None = None

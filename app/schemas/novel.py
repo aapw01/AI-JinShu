@@ -1,6 +1,8 @@
 """Pydantic schemas for novels, chapters, generation."""
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.task import TaskErrorDTO, TaskStatusBase
+
 
 class NovelCreate(BaseModel):
     title: str
@@ -111,20 +113,16 @@ class RetryGenerationRequest(BaseModel):
     task_id: str | None = None
 
 
-class GenerationStatusResponse(BaseModel):
+class GenerationStatusResponse(TaskStatusBase):
     task_id: str | None = None
-    status: str
     trace_id: str | None = None
-    run_state: str | None = None
     step: str | None = None
-    current_phase: str | None = None
     subtask_key: str | None = None
     subtask_label: str | None = None
     subtask_progress: float | None = None
     current_subtask: dict | None = None
     current_chapter: int = 0
     total_chapters: int = 0
-    progress: float = 0.0
     token_usage_input: int = 0
     token_usage_output: int = 0
     estimated_cost: float = 0.0
@@ -134,14 +132,7 @@ class GenerationStatusResponse(BaseModel):
     low_progress_streak: int | None = None
     progress_signal: float | None = None
     decision_state: dict | None = None
-    eta_seconds: int | None = None
-    eta_label: str | None = None
-    message: str | None = None
-    error: str | None = None
-    error_code: str | None = None
-    error_category: str | None = None
-    retryable: bool | None = None
-    last_error: dict | None = None
+    last_error: TaskErrorDTO | None = None
 
 
 class NovelVersionResponse(BaseModel):
@@ -171,24 +162,15 @@ class RewriteRequestCreate(BaseModel):
     annotations: list[RewriteAnnotationInput]
 
 
-class RewriteRequestResponse(BaseModel):
+class RewriteRequestResponse(TaskStatusBase):
     id: int
     novel_id: str
     base_version_id: int
     target_version_id: int
     task_id: str | None = None
-    status: str
     rewrite_from_chapter: int
     rewrite_to_chapter: int
     current_chapter: int | None = None
-    progress: float = 0.0
-    eta_seconds: int | None = None
-    eta_label: str | None = None
-    message: str | None = None
-    error: str | None = None
-    error_code: str | None = None
-    error_category: str | None = None
-    retryable: bool | None = None
     created_at: str
     updated_at: str | None = None
 

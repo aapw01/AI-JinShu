@@ -230,6 +230,7 @@ def finalize_task(
     else:
         task.status = final_status
         task.finished_at = _utc_now()
+        task.worker_task_id = None
         task.worker_lease_expires_at = None
     if progress is not None:
         task.progress = float(max(0.0, min(100.0, progress)))
@@ -278,6 +279,11 @@ def pause_task(db: Session, *, public_id: str, user_uuid: str) -> CreationTask:
 
 
 def resume_task(db: Session, *, public_id: str, user_uuid: str) -> CreationTask:
+    """Transition task back to queued.
+
+    NOTE: Caller must call ``dispatch_user_queue`` **after** committing the DB
+    transaction to avoid a race where the dispatcher reads stale state.
+    """
     task = get_task_by_public_id(db, public_id=public_id, user_uuid=user_uuid)
     if not task:
         raise ValueError("task_not_found")
@@ -294,7 +300,6 @@ def resume_task(db: Session, *, public_id: str, user_uuid: str) -> CreationTask:
     task.worker_lease_expires_at = None
     if old_status == "failed" and task.retry_count < task.max_retries:
         task.retry_count += 1
-    dispatch_user_queue(db, user_uuid=user_uuid)
     return task
 
 

@@ -182,8 +182,14 @@ def _persist_generation_task(
 
 
 def _get_task_state(task_id: str) -> tuple[str | None, str | None]:
+    """Read authoritative task state from CreationTask (falls back to GenerationTask for legacy)."""
     db = SessionLocal()
     try:
+        ct = db.execute(
+            select(CreationTask).where(CreationTask.worker_task_id == task_id)
+        ).scalar_one_or_none()
+        if ct:
+            return ct.status, ct.phase
         row = db.execute(select(GenerationTask).where(GenerationTask.task_id == task_id)).scalar_one_or_none()
         if not row:
             return None, None
@@ -712,18 +718,17 @@ def submit_book_generation_task(
                 )
                 return task_id
 
-        from app.models.novel import GenerationTask
-
         hb_ctx = background_heartbeat(creation_task_id, heartbeat_fn=_heartbeat_creation, interval_seconds=CREATION_WORKER_HEARTBEAT_SECONDS)
         hb_ctx.__enter__()
 
         db = SessionLocal()
         try:
-            gt_stmt = select(GenerationTask).where(GenerationTask.task_id == task_id)
-            gt = db.execute(gt_stmt).scalar_one_or_none()
-            trace_id = trace_id or (gt.trace_id if gt else None) or ""
-            gt_status = gt.status if gt else None
-            gt_run_state = gt.run_state if gt else None
+            ct = db.execute(
+                select(CreationTask).where(CreationTask.id == creation_task_id)
+            ).scalar_one_or_none()
+            ct_status = ct.status if ct else None
+            ct_phase = ct.phase if ct else None
+            trace_id = trace_id or (((ct.payload_json or {}).get("trace_id")) if ct else None) or ""
 
             novel_stmt = select(Novel).where(Novel.id == novel_id)
             novel = db.execute(novel_stmt).scalar_one_or_none()
@@ -744,15 +749,15 @@ def submit_book_generation_task(
                 chapter_num=start_chapter,
                 total_chapters=num_chapters,
             )
-        if gt_status in {"completed", "cancelled"}:
-            logger.info("Skip replay for task %s because status=%s", task_id, gt_status)
+        if ct_status in {"completed", "cancelled"}:
+            logger.info("Skip replay for task %s because creation_task status=%s", task_id, ct_status)
             data.update(
                 {
-                    "status": str(gt_status),
-                    "run_state": str(gt_run_state or gt_status),
+                    "status": str(ct_status),
+                    "run_state": str(ct_phase or ct_status),
                     "step": "skipped",
                     "current_phase": "skipped",
-                    "message": f"跳过重放：任务状态为 {gt_status}",
+                    "message": f"跳过重放：任务状态为 {ct_status}",
                     "trace_id": trace_id,
                 }
             )
@@ -880,6 +885,25 @@ def submit_book_generation_task(
         data["token_usage_input"] = int(usage.get("input_tokens") or data.get("token_usage_input") or 0)
         data["token_usage_output"] = int(usage.get("output_tokens") or data.get("token_usage_output") or 0)
         data["estimated_cost"] = float(usage.get("estimated_cost") or data.get("estimated_cost") or 0.0)
+        prompt_meta = get_last_prompt_meta() or {}
+        status = str(data.get("status") or "")
+        usage_summary = {
+            "token_usage_input": int(data.get("token_usage_input") or 0),
+            "token_usage_output": int(data.get("token_usage_output") or 0),
+            "estimated_cost": float(data.get("estimated_cost") or 0.0),
+            "start_chapter": int(start_chapter or 1),
+            "current_chapter": int(data.get("current_chapter") or 0),
+            "total_chapters": int(data.get("total_chapters") or 0),
+            "completed_chapters": max(
+                0,
+                int(data.get("current_chapter") or 0) - int(start_chapter or 1) + 1,
+            ) if status == "completed" else 0,
+            "usage_calls": int((usage or {}).get("calls") or 0),
+            "usage_stages": (usage or {}).get("stages") or {},
+            "prompt_version": str(prompt_meta.get("prompt_version") or "v2"),
+            "prompt_hash": prompt_meta.get("prompt_hash"),
+            "prompt_template": prompt_meta.get("prompt_template"),
+        }
         db = SessionLocal()
         try:
             if creation_task_id is not None and data.get("status") in {"failed", "paused"}:
@@ -900,6 +924,10 @@ def submit_book_generation_task(
                         )
                 except Exception:
                     logger.warning("Failed to update resume_cursor on task failure", exc_info=True)
+            if creation_task_id is not None:
+                row = db.execute(select(CreationTask).where(CreationTask.id == creation_task_id)).scalar_one_or_none()
+                if row:
+                    row.result_json = usage_summary
             _persist_generation_task(db, task_id, data)
             record_generation_usage(db, task_id=task_id, novel_id=int(novel_id), source="generation")
             db.commit()
@@ -922,18 +950,6 @@ def submit_book_generation_task(
         _set_status(r, key, novel_key, data)
         if creation_task_id is not None:
             try:
-                status = str(data.get("status") or "")
-                prompt_meta = get_last_prompt_meta() or {}
-                usage_summary = {
-                    "token_usage_input": int(data.get("token_usage_input") or 0),
-                    "token_usage_output": int(data.get("token_usage_output") or 0),
-                    "estimated_cost": float(data.get("estimated_cost") or 0.0),
-                    "usage_calls": int((usage or {}).get("calls") or 0),
-                    "usage_stages": (usage or {}).get("stages") or {},
-                    "prompt_version": str(prompt_meta.get("prompt_version") or "v2"),
-                    "prompt_hash": prompt_meta.get("prompt_hash"),
-                    "prompt_template": prompt_meta.get("prompt_template"),
-                }
                 if status == "completed":
                     _finalize_creation(
                         creation_task_id,
