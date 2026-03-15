@@ -6,6 +6,7 @@ from unittest.mock import patch
 from sqlalchemy import select
 
 from app.core.database import SessionLocal, resolve_novel
+from app.models.creation_task import CreationTask
 from app.models.novel import ChapterVersion, GenerationCheckpoint, NovelVersion, QualityReport
 
 
@@ -166,6 +167,75 @@ def test_generation_status_extended_fields(client):
     assert "error_code" in body
     assert "error_category" in body
     assert "retryable" in body
+
+
+def test_generation_status_terminal_state_ignores_stale_redis_progress(client, monkeypatch):
+    created = client.post("/api/novels", json={"title": "Terminal Status", "target_language": "zh"})
+    assert created.status_code == 200
+    novel_id = created.json()["id"]
+
+    db = SessionLocal()
+    try:
+        novel = resolve_novel(db, novel_id)
+        assert novel is not None
+        row = CreationTask(
+            user_uuid="test-admin-user",
+            task_type="generation",
+            resource_type="novel",
+            resource_id=int(novel.id),
+            status="completed",
+            phase="completed",
+            progress=100.0,
+            message="db completed",
+            payload_json={"novel_id": int(novel.id), "start_chapter": 1, "num_chapters": 15},
+            resume_cursor_json={
+                "unit_type": "chapter",
+                "partition": None,
+                "last_completed": 16,
+                "next": 17,
+                "runtime_state": {
+                    "node": "final_book_review",
+                    "resume_from_chapter": 17,
+                    "effective_end_chapter": 16,
+                    "effective_total_chapters": 16,
+                    "tail_rewrite_attempts": 2,
+                    "bridge_attempts": 1,
+                    "terminal": True,
+                },
+            },
+        )
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        task_id = row.public_id
+    finally:
+        db.close()
+
+    monkeypatch.setattr(
+        "app.api.routes.generation._redis_get_json",
+        lambda _key: {
+            "status": "running",
+            "run_state": "running",
+            "step": "chapter_writing",
+            "current_phase": "chapter_writing",
+            "current_chapter": 13,
+            "total_chapters": 15,
+            "progress": 42,
+            "message": "stale redis payload",
+        },
+    )
+
+    status = client.get(f"/api/novels/{novel_id}/generation/status?task_id={task_id}")
+    assert status.status_code == 200
+    body = status.json()
+    assert body["status"] == "completed"
+    assert body["run_state"] == "completed"
+    assert body["step"] == "completed"
+    assert body["current_phase"] == "completed"
+    assert body["current_chapter"] == 16
+    assert body["total_chapters"] == 16
+    assert body["progress"] == 100
+    assert body["message"] == "db completed"
 
 
 def test_version_scoped_endpoints_require_version_id(client):
