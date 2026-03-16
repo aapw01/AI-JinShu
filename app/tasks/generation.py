@@ -235,6 +235,31 @@ def _update_creation_progress(task_db_id: int, *, progress: float, phase: str, m
         db.close()
 
 
+def _resolve_completed_usage_totals(
+    *,
+    row: CreationTask | None,
+    start_chapter: int,
+    fallback_current: int,
+    fallback_total: int,
+) -> tuple[int, int, int]:
+    current = max(0, int(fallback_current or 0))
+    total = max(0, int(fallback_total or 0))
+    completed = max(0, current - int(start_chapter or 1) + 1) if current >= int(start_chapter or 1) else 0
+    if not row:
+        return current, total, completed
+
+    cursor = row.resume_cursor_json if isinstance(row.resume_cursor_json, dict) else {}
+    runtime_state = cursor.get("runtime_state") if isinstance(cursor.get("runtime_state"), dict) else {}
+    runtime_end = int(runtime_state.get("effective_end_chapter") or 0)
+    runtime_total = int(runtime_state.get("effective_total_chapters") or 0)
+    last_completed = int(cursor.get("last_completed") or 0)
+
+    total = max(total, runtime_total, runtime_end, last_completed)
+    current = max(current, runtime_end, last_completed)
+    completed = max(0, current - int(start_chapter or 1) + 1) if current >= int(start_chapter or 1) else 0
+    return int(current), int(total), int(completed)
+
+
 def _heartbeat_creation(task_db_id: int) -> None:
     db = SessionLocal()
     try:
@@ -927,6 +952,18 @@ def submit_book_generation_task(
             if creation_task_id is not None:
                 row = db.execute(select(CreationTask).where(CreationTask.id == creation_task_id)).scalar_one_or_none()
                 if row:
+                    if status == "completed":
+                        effective_current, effective_total, completed_chapters = _resolve_completed_usage_totals(
+                            row=row,
+                            start_chapter=int(start_chapter or 1),
+                            fallback_current=int(data.get("current_chapter") or 0),
+                            fallback_total=int(data.get("total_chapters") or 0),
+                        )
+                        data["current_chapter"] = effective_current
+                        data["total_chapters"] = effective_total
+                        usage_summary["current_chapter"] = effective_current
+                        usage_summary["total_chapters"] = effective_total
+                        usage_summary["completed_chapters"] = completed_chapters
                     row.result_json = usage_summary
             _persist_generation_task(db, task_id, data)
             record_generation_usage(db, task_id=task_id, novel_id=int(novel_id), source="generation")

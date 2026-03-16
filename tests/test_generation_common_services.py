@@ -4,12 +4,13 @@ import pytest
 from sqlalchemy import select
 
 from app.core.database import SessionLocal
-from app.models.novel import ChapterOutline, Novel, NovelSpecification
+from app.models.novel import ChapterOutline, Novel, NovelSpecification, NovelVersion
 from app.services.generation.agents import WriterAgent
 from app.services.generation.common import (
     generate_chapter_summary,
     save_full_outlines,
     save_prewrite_artifacts,
+    upsert_chapter_outline,
     update_character_states_from_content,
 )
 
@@ -22,6 +23,23 @@ def _create_novel(title: str = "common-test") -> Novel:
         db.commit()
         db.refresh(novel)
         return novel
+    finally:
+        db.close()
+
+
+def _create_version(novel: Novel, version_no: int = 1) -> NovelVersion:
+    db = SessionLocal()
+    try:
+        version = NovelVersion(
+            novel_id=novel.id,
+            version_no=version_no,
+            status="completed",
+            is_default=1 if version_no == 1 else 0,
+        )
+        db.add(version)
+        db.commit()
+        db.refresh(version)
+        return version
     finally:
         db.close()
 
@@ -69,6 +87,48 @@ def test_save_full_outlines_replace_and_metadata():
         assert rows[0].chapter_num == 3
         assert rows[0].metadata_["purpose"] == "收束"
         assert rows[0].metadata_["summary"] == "终章"
+    finally:
+        db.close()
+
+
+def test_upsert_chapter_outline_updates_same_version_chapter():
+    novel = _create_novel("outline-upsert")
+    version = _create_version(novel)
+
+    upsert_chapter_outline(
+        novel.id,
+        {"chapter_num": 16, "title": "桥接前", "outline": "旧提纲", "purpose": "补铺垫"},
+        novel_version_id=version.id,
+    )
+    normalized = upsert_chapter_outline(
+        novel.id,
+        {
+            "chapter_num": 16,
+            "title": "第16章 桥接补完",
+            "outline": "新提纲",
+            "purpose": "收束主线",
+            "summary": "进入收官",
+        },
+        novel_version_id=version.id,
+    )
+
+    db = SessionLocal()
+    try:
+        rows = db.execute(
+            select(ChapterOutline)
+            .where(
+                ChapterOutline.novel_id == novel.id,
+                ChapterOutline.novel_version_id == version.id,
+            )
+            .order_by(ChapterOutline.chapter_num.asc())
+        ).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].chapter_num == 16
+        assert rows[0].title == "第16章 桥接补完"
+        assert rows[0].outline == "新提纲"
+        assert rows[0].metadata_["purpose"] == "收束主线"
+        assert rows[0].metadata_["summary"] == "进入收官"
+        assert normalized["title"] == "第16章 桥接补完"
     finally:
         db.close()
 

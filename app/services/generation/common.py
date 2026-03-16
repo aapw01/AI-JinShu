@@ -1,6 +1,8 @@
 """Shared constants and helpers for generation pipeline modules."""
 import logging
 import re
+from typing import Any
+
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
@@ -50,6 +52,17 @@ _STRONG_PREFACE_MARKERS = (
     "重点解决如下问题",
     "原章节内容",
     "人工标注",
+)
+_OUTLINE_METADATA_KEYS = (
+    "role",
+    "purpose",
+    "suspense_level",
+    "foreshadowing",
+    "plot_twist_level",
+    "hook",
+    "payoff",
+    "mini_climax",
+    "summary",
 )
 
 
@@ -140,6 +153,86 @@ def is_effective_title(title: str | None, chapter_num: int | None = None) -> boo
         if _looks_like_meta_text(remainder):
             return False
     return True
+
+
+def normalize_outline_payload(chapter_num: int, outline: dict[str, Any] | None) -> dict[str, Any]:
+    """Normalize outline payloads so runtime-added chapters match full-book outline storage."""
+    item = dict(outline or {})
+    normalized_title = normalize_title_text(item.get("title"))
+    if not is_effective_title(normalized_title, chapter_num):
+        normalized_title = f"第{chapter_num}章"
+    return {
+        "chapter_num": int(chapter_num),
+        "title": normalized_title,
+        "outline": item.get("outline", "") or "",
+        **{key: item.get(key) for key in _OUTLINE_METADATA_KEYS},
+    }
+
+
+def _outline_metadata_payload(outline: dict[str, Any]) -> dict[str, Any]:
+    return {key: outline.get(key) for key in _OUTLINE_METADATA_KEYS}
+
+
+def _outline_stmt(*, novel_id: int, chapter_num: int, novel_version_id: int | None):
+    stmt = select(ChapterOutline).where(
+        ChapterOutline.novel_id == int(novel_id),
+        ChapterOutline.chapter_num == int(chapter_num),
+    )
+    if novel_version_id is None:
+        stmt = stmt.where(ChapterOutline.novel_version_id.is_(None))
+    else:
+        stmt = stmt.where(ChapterOutline.novel_version_id == int(novel_version_id))
+    return stmt
+
+
+def upsert_chapter_outline(
+    novel_id: int,
+    outline: dict[str, Any],
+    *,
+    novel_version_id: int | None = None,
+    db=None,
+) -> dict[str, Any]:
+    """Create or update a single chapter outline row and return the normalized payload."""
+    chapter_num = int(outline.get("chapter_num") or 0)
+    if chapter_num <= 0:
+        raise ValueError("chapter_num is required for chapter outline upsert")
+
+    normalized = normalize_outline_payload(chapter_num, outline)
+    owns_session = db is None
+    session = db or SessionLocal()
+    try:
+        existing = session.execute(
+            _outline_stmt(
+                novel_id=novel_id,
+                chapter_num=normalized["chapter_num"],
+                novel_version_id=novel_version_id,
+            )
+        ).scalar_one_or_none()
+        if existing:
+            existing.title = normalized["title"]
+            existing.outline = normalized["outline"]
+            existing.metadata_ = _outline_metadata_payload(normalized)
+        else:
+            session.add(
+                ChapterOutline(
+                    novel_id=int(novel_id),
+                    novel_version_id=int(novel_version_id) if novel_version_id is not None else None,
+                    chapter_num=normalized["chapter_num"],
+                    title=normalized["title"],
+                    outline=normalized["outline"],
+                    metadata_=_outline_metadata_payload(normalized),
+                )
+            )
+        if owns_session:
+            session.commit()
+        return normalized
+    except Exception:
+        if owns_session:
+            session.rollback()
+        raise
+    finally:
+        if owns_session:
+            session.close()
 
 
 def _extract_title_suffix(text: str | None) -> str:
@@ -462,25 +555,11 @@ def save_full_outlines(novel_id: int, outlines: list[dict], novel_version_id: in
                     del_stmt = del_stmt.where(ChapterOutline.novel_version_id == novel_version_id)
                 db.execute(del_stmt)
         for o in outlines:
-            db.add(
-                ChapterOutline(
-                    novel_id=novel_id,
-                    novel_version_id=novel_version_id,
-                    chapter_num=o.get("chapter_num"),
-                    title=o.get("title"),
-                    outline=o.get("outline"),
-                    metadata_={
-                        "role": o.get("role"),
-                        "purpose": o.get("purpose"),
-                        "suspense_level": o.get("suspense_level"),
-                        "foreshadowing": o.get("foreshadowing"),
-                        "plot_twist_level": o.get("plot_twist_level"),
-                        "hook": o.get("hook"),
-                        "payoff": o.get("payoff"),
-                        "mini_climax": o.get("mini_climax"),
-                        "summary": o.get("summary"),
-                    },
-                )
+            upsert_chapter_outline(
+                novel_id=novel_id,
+                outline=o,
+                novel_version_id=novel_version_id,
+                db=db,
             )
         db.commit()
     finally:
