@@ -1,24 +1,39 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
 import { BookOpen, CircleAlert, LoaderCircle, RotateCcw, Sparkles, WandSparkles, Zap } from "lucide-react";
-import { api, Novel, getErrorMessage } from "@/lib/api";
+import { api, GenerationTaskItem, getErrorMessage } from "@/lib/api";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { Textarea } from "@/components/ui/Textarea";
 import { Badge } from "@/components/ui/Badge";
-import { formatNovelStatus } from "@/lib/display";
+import {
+  formatNovelStatus,
+  getNovelStatusVariant,
+  resolveNovelDisplayStatus,
+  shouldOpenNovelProgress,
+} from "@/lib/display";
+import {
+  useHomeGenerationTasks,
+  useHomeNovelMetrics,
+  useHomeNovels,
+  useHomePresets,
+} from "@/hooks/use-home-dashboard";
 
 type FilterStatus = "all" | "generating" | "completed" | "failed";
 
 const STATUS_MAP: Record<string, { label: string; variant: "default" | "success" | "warning" | "error" | "info" }> = {
   draft: { label: "草稿", variant: "default" },
   generating: { label: "生成中", variant: "warning" },
+  queued: { label: "排队中", variant: "warning" },
+  dispatching: { label: "调度中", variant: "warning" },
+  awaiting_outline_confirmation: { label: "待确认大纲", variant: "info" },
+  paused: { label: "已暂停", variant: "info" },
   completed: { label: "已完成", variant: "success" },
   failed: { label: "失败", variant: "error" },
   cancelled: { label: "已取消", variant: "info" },
@@ -98,12 +113,22 @@ interface FormData {
   method: string;
 }
 
-interface NovelMetrics {
-  completed: number;
-  total: number;
-  percent: number;
-  words: number;
-  quality: number;
+function formatGenerationCardLine(task?: GenerationTaskItem | null) {
+  if (!task?.total_chapters) return null;
+  const current = task.current_chapter || 0;
+  const total = task.total_chapters || 0;
+  switch (task.status) {
+    case "paused":
+      return `已暂停，将从第 ${current} / ${total} 章继续`;
+    case "failed":
+      return `生成失败，停在第 ${current} / ${total} 章`;
+    case "cancelled":
+      return `任务已取消，停在第 ${current} / ${total} 章`;
+    case "completed":
+      return `生成完成，共 ${total} 章`;
+    default:
+      return `正在生成第 ${current} / ${total} 章`;
+  }
 }
 
 export default function Home() {
@@ -113,12 +138,7 @@ export default function Home() {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [ideaGenerating, setIdeaGenerating] = useState(false);
   const [ideaError, setIdeaError] = useState<string | null>(null);
-
-  const [novels, setNovels] = useState<Novel[]>([]);
-  const [novelsLoading, setNovelsLoading] = useState(true);
-  const [novelsError, setNovelsError] = useState<string | null>(null);
   const [historyFilter, setHistoryFilter] = useState<FilterStatus>("all");
-  const [metricsById, setMetricsById] = useState<Record<string, NovelMetrics>>({});
 
   const [form, setForm] = useState<FormData>({
     title: "",
@@ -131,10 +151,51 @@ export default function Home() {
     chapterTarget: 60,
     method: "three_act",
   });
-  const [genres, setGenres] = useState(DEFAULT_GENRES);
-  const [styles, setStyles] = useState(DEFAULT_STYLES);
-  const [lengths, setLengths] = useState(DEFAULT_LENGTHS);
-  const [audiences, setAudiences] = useState(DEFAULT_AUDIENCES);
+
+  const { data: presetsData } = useHomePresets();
+  const {
+    data: novels = [],
+    isLoading: novelsLoading,
+    error: novelsQueryError,
+  } = useHomeNovels();
+  const { data: metricsById = {} } = useHomeNovelMetrics(novels);
+  const { data: activeGenerationByNovelId = {} } = useHomeGenerationTasks(novels);
+
+  const genres = useMemo(() => {
+    const items = (presetsData?.genres || []).map((item) => ({ id: item.id, label: item.label, desc: item.description || "" }));
+    return items.length ? items : DEFAULT_GENRES;
+  }, [presetsData]);
+
+  const styles = useMemo(() => {
+    const items = (presetsData?.styles || []).map((item) => ({
+      id: item.id,
+      label: item.label,
+      desc: item.description || "",
+      strategy: item.strategy || "web-novel",
+    }));
+    return items.length ? items : DEFAULT_STYLES;
+  }, [presetsData]);
+
+  const lengths = useMemo(() => {
+    const items = (presetsData?.lengths || []).map((item) => ({
+      id: item.id,
+      label: item.label,
+      description: item.description || "",
+      chapter_target: item.chapter_target || 50,
+    }));
+    return items.length ? items : DEFAULT_LENGTHS;
+  }, [presetsData]);
+
+  const audiences = useMemo(() => {
+    const items = (presetsData?.audiences || []).map((item) => ({
+      id: item.id,
+      label: item.label,
+      description: item.description || "",
+    }));
+    return items.length ? items : DEFAULT_AUDIENCES;
+  }, [presetsData]);
+
+  const novelsError = novelsQueryError ? getErrorMessage(novelsQueryError, "生成历史加载失败") : null;
 
   const selectedLength = useMemo(
     () => lengths.find((x) => x.id === form.length) || lengths[0],
@@ -146,119 +207,24 @@ export default function Home() {
   );
 
   const inProgressNovels = useMemo(() => novels.filter((n) => n.status === "generating"), [novels]);
-  const filteredNovels = useMemo(
-    () => novels.filter((n) => historyFilter === "all" || n.status === historyFilter),
-    [novels, historyFilter]
+  const inProgressCards = useMemo(
+    () =>
+      inProgressNovels.filter((novel) => {
+        const task = activeGenerationByNovelId[novel.id];
+        return Boolean(task && shouldOpenNovelProgress(task.status));
+      }),
+    [activeGenerationByNovelId, inProgressNovels]
   );
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const presets = await api.getPresets();
-        const g = (presets.genres || []).map((x) => ({ id: x.id, label: x.label, desc: x.description || "" }));
-        const s = (presets.styles || []).map((x) => ({
-          id: x.id,
-          label: x.label,
-          desc: x.description || "",
-          strategy: x.strategy || "web-novel",
-        }));
-        const l = (presets.lengths || []).map((x) => ({
-          id: x.id,
-          label: x.label,
-          description: x.description || "",
-          chapter_target: x.chapter_target || 50,
-        }));
-        const a = (presets.audiences || []).map((x) => ({ id: x.id, label: x.label, description: x.description || "" }));
-        if (g.length) setGenres(g);
-        if (s.length) setStyles(s);
-        if (l.length) setLengths(l);
-        if (a.length) setAudiences(a);
-      } catch {
-        // fallback to defaults
-      }
-    })();
-  }, []);
-
-  useEffect(() => {
-    let disposed = false;
-    const loadNovels = async () => {
-      try {
-        setNovelsLoading(true);
-        setNovelsError(null);
-        const list = await api.listNovels();
-        if (!disposed) setNovels(list);
-      } catch {
-        if (!disposed) setNovelsError("生成历史加载失败");
-      } finally {
-        if (!disposed) setNovelsLoading(false);
-      }
-    };
-    loadNovels();
-    const timer = setInterval(loadNovels, 15000);
-    return () => {
-      disposed = true;
-      clearInterval(timer);
-    };
-  }, []);
-
-  useEffect(() => {
-    let disposed = false;
-    const targets = novels.slice(0, 12);
-    if (!targets.length) {
-      setMetricsById({});
-      return;
-    }
-
-    (async () => {
-      const entries = await Promise.all(
-        targets.map(async (novel) => {
-          try {
-            const versions = await api.getVersions(novel.id);
-            const defaultVersion = versions.find((v) => v.is_default) || versions[0];
-            if (!defaultVersion) {
-              return [
-                novel.id,
-                { completed: 0, total: 1, percent: 0, words: 0, quality: fallbackQuality(novel.id, novel.status) },
-              ] as const;
-            }
-            const [progressRes, chaptersRes] = await Promise.allSettled([
-              api.getChapterProgress(novel.id, defaultVersion.id),
-              api.getChapters(novel.id, defaultVersion.id),
-            ]);
-
-            const progress = progressRes.status === "fulfilled" ? progressRes.value : [];
-            const chapters = chaptersRes.status === "fulfilled" ? chaptersRes.value : [];
-
-            const completed = progress.length
-              ? progress.filter((c) => c.status === "completed").length
-              : chapters.filter((c) => Boolean(c.content)).length;
-            const total =
-              progress.length ||
-              Number((novel.config as { chapter_target?: number } | undefined)?.chapter_target) ||
-              Math.max(...chapters.map((c) => c.chapter_num), 1);
-            const percent = Math.min(100, Math.round((completed / Math.max(total, 1)) * 100));
-            const words = chapters.reduce((sum, c) => sum + (c.word_count || 0), 0) || completed * 1800;
-            const qualityScores = chapters
-              .map((c) => c.language_quality_score)
-              .filter((x): x is number => typeof x === "number");
-            const quality = qualityScores.length
-              ? Math.round(((qualityScores.reduce((a, b) => a + b, 0) / qualityScores.length) * 10) * 10) / 10
-              : fallbackQuality(novel.id, novel.status);
-            return [novel.id, { completed, total, percent, words, quality }] as const;
-          } catch {
-            return [novel.id, { completed: 0, total: 1, percent: 0, words: 0, quality: fallbackQuality(novel.id, novel.status) }] as const;
-          }
-        })
-      );
-
-      if (!disposed) setMetricsById(Object.fromEntries(entries));
-    })();
-
-    return () => {
-      disposed = true;
-    };
-  }, [novels]);
-
+  const filteredNovels = useMemo(
+    () =>
+      novels.filter((novel) => {
+        const displayStatus = resolveNovelDisplayStatus(novel.status, activeGenerationByNovelId[novel.id]);
+        if (historyFilter === "all") return true;
+        if (historyFilter === "generating") return shouldOpenNovelProgress(displayStatus);
+        return displayStatus === historyFilter;
+      }),
+    [activeGenerationByNovelId, historyFilter, novels]
+  );
 
   const canProceed = () => {
     switch (step) {
@@ -569,26 +535,26 @@ export default function Home() {
                   <Zap className="w-4 h-4 text-[#1F1B18]" />
                   进行中
                 </h3>
-                <Badge variant="warning">{inProgressNovels.length}</Badge>
+                <Badge variant="warning">{inProgressCards.length}</Badge>
               </div>
-              {inProgressNovels.length === 0 ? (
+              {inProgressCards.length === 0 ? (
                 <p className="text-sm text-[#8E8379]">暂无进行中的任务</p>
               ) : (
                 <div className="space-y-2">
-                  {inProgressNovels.slice(0, 1).map((novel) => {
+                  {inProgressCards.slice(0, 1).map((novel) => {
                     const m = metricsById[novel.id];
+                    const task = activeGenerationByNovelId[novel.id];
+                    const progressPercent = Math.round(task?.progress || m?.percent || 0);
                     return (
                       <Link key={novel.id} href={`/novels/${novel.id}/progress`} className="block rounded-[12px] border border-[#E4DFDA] bg-white p-3">
                         <div className="flex items-center justify-between gap-2">
                           <p className="font-semibold text-[#1F1B18] line-clamp-1">{novel.title}</p>
-                          <span className="text-[#1E7ADC] font-semibold">{m?.percent || 0}%</span>
+                          <span className="text-[#1E7ADC] font-semibold">{progressPercent}%</span>
                         </div>
                         <div className="mt-2 h-2 bg-[#EFE9E3] rounded-full overflow-hidden">
-                          <div className="h-full bg-[#1E7ADC]" style={{ width: `${m?.percent || 0}%` }} />
+                          <div className="h-full bg-[#1E7ADC]" style={{ width: `${progressPercent}%` }} />
                         </div>
-                        <p className="text-xs text-[#8E8379] mt-1">
-                          正在生成第 {Math.max(1, (m?.completed || 0) + 1)} 章 · {(m?.completed || 0)}/{m?.total || 0} 章
-                        </p>
+                        <p className="text-xs text-[#8E8379] mt-1">{formatGenerationCardLine(task)}</p>
                       </Link>
                     );
                   })}
@@ -638,22 +604,24 @@ export default function Home() {
                 ) : (
                   filteredNovels.slice(0, 12).map((novel) => {
                     const m = metricsById[novel.id];
+                    const displayTask = activeGenerationByNovelId[novel.id];
+                    const displayStatus = resolveNovelDisplayStatus(novel.status, displayTask);
                     return (
                       <Link
                         key={novel.id}
-                        href={novel.status === "generating" ? `/novels/${novel.id}/progress` : `/novels/${novel.id}`}
+                        href={shouldOpenNovelProgress(displayStatus) ? `/novels/${novel.id}/progress` : `/novels/${novel.id}`}
                         className="block rounded-[12px] border border-[#E4DFDA] bg-white p-3 hover:bg-[#FCFBFA] transition-colors"
                       >
                         <div className="flex items-start justify-between gap-2">
                           <p className="font-semibold text-[#1F1B18] line-clamp-1">{novel.title}</p>
-                          {novel.status === "failed" ? (
+                          {displayStatus === "failed" ? (
                             <span className="inline-flex items-center gap-1 text-[#B22F2A] text-xs font-medium">
                               <RotateCcw className="w-3.5 h-3.5" />
                               重试
                             </span>
                           ) : (
-                            <Badge variant={STATUS_MAP[novel.status]?.variant || "default"}>
-                              {STATUS_MAP[novel.status]?.label || formatNovelStatus(novel.status)}
+                            <Badge variant={STATUS_MAP[displayStatus]?.variant || getNovelStatusVariant(displayStatus)}>
+                              {STATUS_MAP[displayStatus]?.label || formatNovelStatus(displayStatus)}
                             </Badge>
                           )}
                         </div>
@@ -734,10 +702,4 @@ function formatWordCount(words: number) {
   if (!words) return "0 字";
   if (words >= 10000) return `${(words / 10000).toFixed(1)} 万字`;
   return `${words.toLocaleString()} 字`;
-}
-
-function fallbackQuality(seed: string, status: string) {
-  if (status === "draft") return 0;
-  const base = Array.from(seed).reduce((sum, c) => sum + c.charCodeAt(0), 0);
-  return 82 + (base % 14);
 }

@@ -34,7 +34,14 @@ from app.services.rewrite.service import (
     validate_annotation_payload,
 )
 from app.models.creation_task import CreationTask
-from app.services.scheduler.scheduler_service import cancel_task, dispatch_user_queue, get_task_by_public_id, pause_task, submit_task, resume_task
+from app.services.scheduler.scheduler_service import (
+    cancel_task,
+    dispatch_user_queue_for_user,
+    get_task_by_public_id,
+    pause_task,
+    resume_task,
+    submit_task,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -303,6 +310,7 @@ def create_rewrite_request(
     target_version.status = "draft"
 
     db.commit()
+    dispatch_user_queue_for_user(user_uuid=principal.user_uuid or "")
     db.refresh(rewrite)
     log_event(
         logger,
@@ -381,6 +389,7 @@ def pause_rewrite_request(
         raise http_error(409, "task_not_pausable", "当前任务不可暂停")
     row.status = "paused"
     db.commit()
+    dispatch_user_queue_for_user(user_uuid=principal.user_uuid or "")
     return {"ok": True, "task_id": row.task_id, "status": "paused"}
 
 
@@ -408,6 +417,7 @@ def cancel_rewrite_request(
             pass
     row.status = "cancelled"
     db.commit()
+    dispatch_user_queue_for_user(user_uuid=principal.user_uuid or "")
     return {"ok": True, "task_id": row.task_id, "status": "cancelled"}
 
 
@@ -460,7 +470,7 @@ def retry_rewrite_request(
                 target.status = "draft"
                 target.source_task_id = resumed.public_id
             db.commit()
-            dispatch_user_queue(db, user_uuid=principal.user_uuid or "")
+            dispatch_user_queue_for_user(user_uuid=principal.user_uuid or "")
             db.refresh(row)
             log_event(logger, "rewrite.request.retry.resumed", novel_id=novel.id, task_id=resumed.public_id, run_state="queued")
             return _to_rewrite_response(row, novel.uuid or str(novel.id))
@@ -491,6 +501,7 @@ def retry_rewrite_request(
         target.source_task_id = creation_task.public_id
 
     db.commit()
+    dispatch_user_queue_for_user(user_uuid=principal.user_uuid or "")
     db.refresh(row)
     log_event(
         logger,

@@ -17,3 +17,6 @@ QUOTA_ADMIN_MONTHLY_TOKEN_LIMIT = 100_000_000_000
 # ── LLM output contract ────────────────────────────────────────────────
 LLM_OUTPUT_MAX_SCHEMA_RETRIES = 2
 LLM_OUTPUT_MIN_CHARS = 120
+
+# ── Generation prompt defaults ─────────────────────────────────────────
+DEFAULT_CHAPTER_WORD_COUNT = 3000

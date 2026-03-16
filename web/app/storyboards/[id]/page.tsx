@@ -16,6 +16,7 @@ import {
 import { formatRunState, formatStoryboardLane, formatStoryboardPhase } from "@/lib/display";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
+import { ConfirmModal } from "@/components/ui";
 import { Select } from "@/components/ui/Select";
 import { TopBar } from "@/components/ui/TopBar";
 
@@ -42,6 +43,8 @@ export default function StoryboardWorkbenchPage() {
   const [actionBusy, setActionBusy] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string>("");
   const [actionMessageType, setActionMessageType] = useState<"success" | "error">("success");
+  const [showCancelConfirm, setShowCancelConfirm] = useState(false);
+  const [showFinalizeConfirm, setShowFinalizeConfirm] = useState(false);
   const lastRunStateRef = useRef<string>("");
   const runEventSourceRef = useRef<EventSource | null>(null);
 
@@ -441,20 +444,7 @@ export default function StoryboardWorkbenchPage() {
                 className={toolbarBtnClass}
                 disabled={!canCancel}
                 loading={actionBusy === "cancel"}
-                onClick={() => {
-                  if (!window.confirm("确定要取消当前分镜任务吗？")) return;
-                  void runAction(
-                    "cancel",
-                    async () => {
-                      if (currentRunId) {
-                        await api.actionStoryboardRun(projectId, currentRunId, "cancel");
-                      } else {
-                        await api.cancelStoryboard(projectId, status?.task_id);
-                      }
-                    },
-                    "任务已取消"
-                  );
-                }}
+                onClick={() => setShowCancelConfirm(true)}
               >
                 <Ban className="w-4 h-4 mr-1.5" />取消
               </Button>
@@ -550,7 +540,7 @@ export default function StoryboardWorkbenchPage() {
                 </Button>
               ) : null}
               {activeVersion ? (
-                <Button size="sm" className={toolbarBtnClass} disabled={!canFinalize} loading={actionBusy === "finalize"} onClick={() => { if (!window.confirm("确认定稿后将无法继续编辑，是否继续？")) return; void runAction("finalize", async () => { await api.finalizeStoryboardVersion(projectId, activeVersion.id); }, "版本已定稿"); }}>
+                <Button size="sm" className={toolbarBtnClass} disabled={!canFinalize} loading={actionBusy === "finalize"} onClick={() => setShowFinalizeConfirm(true)}>
                   <CheckCircle2 className="w-4 h-4 mr-1.5" />确认定稿
                 </Button>
               ) : null}
@@ -848,6 +838,48 @@ export default function StoryboardWorkbenchPage() {
           <Button variant="secondary" size="sm" className="h-8 px-3">新建分镜项目</Button>
         </Link>
       </div>
+      <ConfirmModal
+        open={showCancelConfirm}
+        onClose={() => setShowCancelConfirm(false)}
+        onConfirm={() => {
+          void runAction(
+            "cancel",
+            async () => {
+              if (currentRunId) {
+                await api.actionStoryboardRun(projectId, currentRunId, "cancel");
+              } else {
+                await api.cancelStoryboard(projectId, status?.task_id);
+              }
+              setShowCancelConfirm(false);
+            },
+            "任务已取消"
+          );
+        }}
+        title="取消分镜任务"
+        message="确定要取消当前分镜任务吗？"
+        confirmText="确认取消"
+        loading={actionBusy === "cancel"}
+      />
+      <ConfirmModal
+        open={showFinalizeConfirm}
+        onClose={() => setShowFinalizeConfirm(false)}
+        onConfirm={() => {
+          if (!activeVersion) return;
+          void runAction(
+            "finalize",
+            async () => {
+              await api.finalizeStoryboardVersion(projectId, activeVersion.id);
+              setShowFinalizeConfirm(false);
+            },
+            "版本已定稿"
+          );
+        }}
+        title="确认定稿"
+        message="确认定稿后将无法继续编辑，是否继续？"
+        confirmText="确认定稿"
+        confirmVariant="primary"
+        loading={actionBusy === "finalize"}
+      />
     </main>
   );
 }

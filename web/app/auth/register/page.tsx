@@ -6,7 +6,7 @@ import { FormEvent, Suspense, useState } from "react";
 
 import { api, getErrorMessage } from "@/lib/api";
 import { Button } from "@/components/ui/Button";
-import { ErrorDialog } from "@/components/ui/ErrorDialog";
+import { ErrorDialog } from "@/components/ui";
 
 function RegisterPageContent() {
   const router = useRouter();

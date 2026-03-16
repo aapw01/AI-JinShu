@@ -394,16 +394,21 @@ class OutlinerAgent:
         novel_id: str,
         num_chapters: int,
         prewrite: dict,
+        start_chapter: int = 1,
         language: str = "zh",
         provider: str | None = None,
         model: str | None = None,
     ) -> list[dict]:
         """Generate full-book chapter outlines before chapter writing."""
         llm = get_llm_with_fallback(provider, model)
+        start_chapter = max(1, int(start_chapter or 1))
+        end_chapter = start_chapter + max(0, int(num_chapters or 0)) - 1
         prompt = render_prompt(
             "chapter_blueprint_all",
             novel_id=novel_id,
             num_chapters=num_chapters,
+            start_chapter=start_chapter,
+            end_chapter=end_chapter,
             prewrite=prewrite,
             language=language,
         )
@@ -415,11 +420,12 @@ class OutlinerAgent:
             normalized = []
             for idx in range(1, num_chapters + 1):
                 item = outlines[idx - 1] if idx - 1 < len(outlines) else {}
+                chapter_no = start_chapter + idx - 1
                 normalized_title = normalize_title_text(item.get("title"))
                 normalized.append(
                     {
-                        "chapter_num": idx,
-                        "title": normalized_title or f"第{idx}章",
+                        "chapter_num": chapter_no,
+                        "title": normalized_title or f"第{chapter_no}章",
                         "outline": item.get("outline", ""),
                         "role": item.get("role"),
                         "purpose": item.get("purpose"),
@@ -450,7 +456,7 @@ class OutlinerAgent:
                     "mini_climax": "none",
                     "summary": "",
                 }
-                for i in range(1, num_chapters + 1)
+                for i in range(start_chapter, end_chapter + 1)
             ]
 
 
@@ -492,6 +498,7 @@ class WriterAgent:
         native_style_profile: str = "",
         provider: str | None = None,
         model: str | None = None,
+        word_count: int | None = None,
     ) -> str:
         template = "first_chapter" if chapter_num == 1 else "next_chapter"
         prompt = render_prompt(
@@ -502,6 +509,7 @@ class WriterAgent:
             context=context,
             language=language,
             native_style_profile=native_style_profile,
+            word_count=word_count,
         )
         try:
             content = invoke_chapter_body_structured(
@@ -718,6 +726,7 @@ class FinalizerAgent:
         language: str = "zh",
         provider: str | None = None,
         model: str | None = None,
+        word_count: int | None = None,
     ) -> str:
         # If no significant feedback, return draft as-is
         if not feedback or feedback == "Auto-review: acceptable quality":
@@ -729,6 +738,7 @@ class FinalizerAgent:
             feedback=feedback,
             draft=draft,
             language=language,
+            word_count=word_count,
         )
 
         try:

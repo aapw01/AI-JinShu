@@ -5,7 +5,7 @@ import { FormEvent, useEffect, useState } from "react";
 import { api, AuthUser, getErrorMessage } from "@/lib/api";
 import { formatUserRole, formatUserStatus } from "@/lib/display";
 import { Button } from "@/components/ui/Button";
-import { ErrorDialog } from "@/components/ui/ErrorDialog";
+import { ErrorDialog } from "@/components/ui";
 
 export default function AccountProfilePage() {
   const [user, setUser] = useState<AuthUser | null>(null);

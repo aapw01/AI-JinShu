@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import { AppHeader } from "@/components/layout/AppHeader";
+import { AppQueryProvider } from "@/components/providers/QueryProvider";
 
 export const metadata: Metadata = {
   title: "锦书 - AI 小说生成平台",
@@ -20,8 +21,10 @@ export default function RootLayout({
   return (
     <html lang="zh">
       <body className="min-h-screen bg-[#F4F3F1] text-[#1F1B18] antialiased">
-        <AppHeader />
-        {children}
+        <AppQueryProvider>
+          <AppHeader />
+          {children}
+        </AppQueryProvider>
       </body>
     </html>
   );

@@ -21,6 +21,7 @@ from app.services.generation.common import (
 from app.services.generation.contracts import OutputContractError
 from app.services.rewrite.service import group_annotations_by_chapter
 from app.services.scheduler.scheduler_service import (
+    dispatch_user_queue_for_user,
     heartbeat_task as heartbeat_creation_task,
     finalize_task as finalize_creation_task,
     get_task_by_id as get_creation_task_by_id,
@@ -74,10 +75,25 @@ def _check_worker_superseded(task_db_id: int, current_celery_id: str) -> None:
         db.close()
 
 
-def _mark_creation_running(task_db_id: int) -> None:
+def _activate_creation_task(task_db_id: int, *, current_celery_id: str) -> None:
     db = SessionLocal()
     try:
-        mark_creation_task_running(db, task_id=task_db_id)
+        row = get_creation_task_by_id(db, task_id=task_db_id)
+        if not row:
+            raise RuntimeError("creation_task_not_found")
+        if row.worker_task_id and row.worker_task_id != current_celery_id:
+            raise RuntimeError(
+                f"worker superseded: creation_task.worker_task_id={row.worker_task_id}, "
+                f"current={current_celery_id}"
+            )
+        state = str(row.status or "")
+        if state == "cancelled":
+            raise RuntimeError("rewrite_cancelled")
+        if state == "paused":
+            raise RuntimeError("rewrite_paused")
+        if state not in {"dispatching", "running"}:
+            raise RuntimeError(f"rewrite_invalid_start:{state or 'unknown'}")
+        mark_creation_task_running(db, task_id=task_db_id, worker_task_id=current_celery_id)
         db.commit()
     finally:
         db.close()
@@ -175,8 +191,9 @@ def _finalize_creation(
     result_json: dict | None = None,
 ) -> None:
     db = SessionLocal()
+    user_uuid: str | None = None
     try:
-        finalize_creation_task(
+        row = finalize_creation_task(
             db,
             task_id=task_db_id,
             final_status=final_status,
@@ -188,9 +205,12 @@ def _finalize_creation(
             error_detail=error_detail,
             result_json=result_json,
         )
+        user_uuid = row.user_uuid if row else None
         db.commit()
     finally:
         db.close()
+    if user_uuid:
+        dispatch_user_queue_for_user(user_uuid=user_uuid)
 
 
 def _rewrite_prompt(
@@ -281,12 +301,7 @@ def submit_rewrite_task(
     db = SessionLocal()
     try:
         if creation_task_id is not None:
-            _check_worker_superseded(creation_task_id, self.request.id)
-            c_status = _get_creation_task_state(creation_task_id)
-            if c_status not in {"dispatching", "running"}:
-                logger.info("Skip rewrite execution because creation_task status=%s", c_status)
-                return
-            _mark_creation_running(creation_task_id)
+            _activate_creation_task(creation_task_id, current_celery_id=self.request.id)
             rewrite_from = _resolve_rewrite_resume(
                 creation_task_id,
                 rewrite_from=int(rewrite_from),

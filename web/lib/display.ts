@@ -74,7 +74,10 @@ export function formatNovelStatus(status?: string | null): string {
   const value = String(status || "").toLowerCase();
   const map: Record<string, string> = {
     draft: "草稿",
+    queued: "排队中",
+    dispatching: "调度中",
     generating: "生成中",
+    running: "生成中",
     awaiting_outline_confirmation: "待确认大纲",
     completed: "已完成",
     failed: "失败",
@@ -82,4 +85,40 @@ export function formatNovelStatus(status?: string | null): string {
     paused: "已暂停",
   };
   return map[value] || "未知状态";
+}
+
+export function getNovelStatusVariant(status?: string | null): "default" | "success" | "warning" | "error" | "info" {
+  const value = String(status || "").toLowerCase();
+  const map: Record<string, "default" | "success" | "warning" | "error" | "info"> = {
+    draft: "default",
+    queued: "warning",
+    dispatching: "warning",
+    generating: "warning",
+    running: "warning",
+    awaiting_outline_confirmation: "info",
+    paused: "info",
+    completed: "success",
+    failed: "error",
+    cancelled: "info",
+  };
+  return map[value] || "default";
+}
+
+export function isActiveGenerationTaskStatus(status?: string | null): boolean {
+  const value = String(status || "").toLowerCase();
+  return ["queued", "dispatching", "running", "paused", "awaiting_outline_confirmation"].includes(value);
+}
+
+export function shouldOpenNovelProgress(status?: string | null): boolean {
+  return isActiveGenerationTaskStatus(status);
+}
+
+export function resolveNovelDisplayStatus(
+  novelStatus?: string | null,
+  task?: { status?: string | null } | null,
+): string {
+  const taskStatus = String(task?.status || "").toLowerCase().trim();
+  if (taskStatus) return taskStatus;
+  const value = String(novelStatus || "").toLowerCase().trim();
+  return value || "draft";
 }

@@ -9,6 +9,7 @@ import { api, Novel, GenerationStatus, ObservabilityPayload, VolumeGateReport, C
 import { formatRunState } from "@/lib/display";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
+import { ConfirmModal } from "@/components/ui";
 import { SectionTitle } from "@/components/ui/SectionTitle";
 import { StatsCard } from "@/components/ui/StatsCard";
 import { TopBar } from "@/components/ui/TopBar";
@@ -82,8 +83,26 @@ const CLOSURE_ACTION_LABELS: Record<string, string> = {
   force_finalize: "强制终审",
 };
 
-const ACTIVE_GENERATION_STATUSES = new Set(["queued", "dispatching", "running"]);
+const ACTIVE_GENERATION_STATUSES = new Set(["queued", "dispatching", "running", "awaiting_outline_confirmation"]);
 const TERMINAL_GENERATION_STATUSES = new Set(["completed", "failed", "cancelled"]);
+
+function formatGenerationPosition(status: GenerationStatus | null): string | null {
+  if (!status?.total_chapters) return null;
+  const current = status.current_chapter || 0;
+  const total = status.total_chapters || 0;
+  switch (status.status) {
+    case "paused":
+      return `已暂停，将从第 ${current} / ${total} 章继续`;
+    case "failed":
+      return `生成失败，停在第 ${current} / ${total} 章`;
+    case "cancelled":
+      return `任务已取消，停在第 ${current} / ${total} 章`;
+    case "completed":
+      return `生成完成，共 ${total} 章`;
+    default:
+      return `正在生成第 ${current} / ${total} 章`;
+  }
+}
 
 const ERROR_CODE_HINTS: Record<string, string> = {
   MODEL_OUTPUT_PARSE_FAILED: "模型输出无法解析为结构化正文，请重试或切换模型。",
@@ -114,6 +133,7 @@ export default function ProgressPage() {
   const [gateReport, setGateReport] = useState<VolumeGateReport | null>(null);
   const [closureReport, setClosureReport] = useState<ClosureReport | null>(null);
   const [observability, setObservability] = useState<ObservabilityPayload | null>(null);
+  const [showCancelConfirm, setShowCancelConfirm] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
@@ -149,18 +169,7 @@ export default function ProgressPage() {
     const pollStatus = async () => {
       try {
         const s = await api.getGenerationStatus(id, taskId || undefined);
-        setStatus((prev) => {
-          if (!prev) return s;
-          const merged = { ...prev };
-          for (const [k, v] of Object.entries(s)) {
-            if (v !== undefined && v !== null && v !== 0 && v !== "") {
-              (merged as Record<string, unknown>)[k] = v;
-            }
-          }
-          if (s.status) merged.status = s.status;
-          if (s.progress !== undefined) merged.progress = s.progress;
-          return merged as typeof s;
-        });
+        setStatus(s);
         setLoading(false);
       } catch (err) {
         console.error(err);
@@ -253,9 +262,9 @@ export default function ProgressPage() {
         try {
           const data = JSON.parse(event.data);
           if (data && typeof data === "object" && "status" in data) {
-            setStatus((prev) => ({ ...(prev || {}), ...(data as GenerationStatus) }));
+            setStatus(data as GenerationStatus);
           } else if (data.type === "status") {
-            setStatus((prev) => ({ ...(prev || {}), ...(data.payload as GenerationStatus) }));
+            setStatus(data.payload as GenerationStatus);
           } else if (data.type === "log") {
             setLogs((prev) => [...prev, data.payload]);
           }
@@ -312,12 +321,12 @@ export default function ProgressPage() {
   const isRewriteMode = Boolean(rewriteRequestId);
   const isComplete = isRewriteMode ? rewriteStatus?.status === "completed" : status?.status === "completed";
   const isFailed = isRewriteMode ? rewriteStatus?.status === "failed" : status?.status === "failed";
-  const isAwaitingOutline = false;
+  const isAwaitingOutline = !isRewriteMode && status?.status === "awaiting_outline_confirmation";
   const runState = status?.run_state || status?.status;
   const effectiveTaskId = taskId || status?.task_id || undefined;
   const isRunning = isRewriteMode
     ? rewriteStatus?.status === "running" || rewriteStatus?.status === "queued"
-    : status?.status === "queued" || status?.status === "dispatching" || status?.status === "running" || runState === "running";
+    : ACTIVE_GENERATION_STATUSES.has(status?.status || "") || runState === "running";
   const isPaused = !isRewriteMode && runState === "paused";
   const failureCode = isRewriteMode ? rewriteStatus?.error_code : status?.error_code;
   const failureMessage = isRewriteMode
@@ -450,10 +459,18 @@ export default function ProgressPage() {
                 <p className="text-xs text-[#7E756D] mt-1">预计剩余时间：{rewriteStatus.eta_label}</p>
               ) : null}
             </>
-          ) : status?.current_chapter && status?.total_chapters ? (
-            <p className="text-sm text-[#7E756D]">
-              正在生成第 {status.current_chapter} / {status.total_chapters} 章
-            </p>
+          ) : formatGenerationPosition(status) ? (
+            <div className="space-y-1.5">
+              <p className="text-sm text-[#7E756D]">
+                {formatGenerationPosition(status)}
+              </p>
+              {(status?.status === "queued" || status?.status === "dispatching" || status?.status === "running" || status?.status === "awaiting_outline_confirmation") &&
+              (status?.total_chapters || 0) > Math.max(status?.volume_size || 0, 0) ? (
+                <p className="text-xs text-[#8A5A13]">
+                  长篇目录按卷逐步补齐。小说详情页会先显示当前已生成大纲的卷，后续卷会随着任务推进自动出现。
+                </p>
+              ) : null}
+            </div>
           ) : null}
           {isRunning && status?.eta_label ? (
             <p className="text-xs text-[#7E756D] mt-1">预计剩余时间：{status.eta_label}</p>
@@ -504,17 +521,7 @@ export default function ProgressPage() {
                 variant="secondary"
                 size="sm"
                 disabled={mutatingRunState || isComplete || isFailed}
-                onClick={async () => {
-                  if (!window.confirm("确定要取消当前生成任务吗？此操作不可撤销。")) return;
-                  try {
-                    setMutatingRunState(true);
-                    await api.cancelGenerationByNovel(id, effectiveTaskId);
-                    const next = await api.getGenerationStatus(id, effectiveTaskId);
-                    setStatus(next);
-                  } finally {
-                    setMutatingRunState(false);
-                  }
-                }}
+                onClick={() => setShowCancelConfirm(true)}
               >
                 <Square className="w-4 h-4 mr-1.5" />
                 取消
@@ -758,6 +765,27 @@ export default function ProgressPage() {
         )}
 
       </div>
+      <ConfirmModal
+        open={showCancelConfirm}
+        onClose={() => setShowCancelConfirm(false)}
+        onConfirm={() => {
+          void (async () => {
+            try {
+              setMutatingRunState(true);
+              await api.cancelGenerationByNovel(id, effectiveTaskId);
+              const next = await api.getGenerationStatus(id, effectiveTaskId);
+              setStatus(next);
+              setShowCancelConfirm(false);
+            } finally {
+              setMutatingRunState(false);
+            }
+          })();
+        }}
+        title="取消生成任务"
+        message="确定要取消当前生成任务吗？此操作不可撤销。"
+        confirmText="确认取消"
+        loading={mutatingRunState}
+      />
     </main>
   );
 }

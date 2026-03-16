@@ -4,15 +4,21 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import { BookOpen, Filter, RefreshCw, Trash2 } from "lucide-react";
-import { api, AuthUser, Novel, getErrorMessage } from "@/lib/api";
+import { api, AuthUser, GenerationTaskItem, Novel, getErrorMessage } from "@/lib/api";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Select } from "@/components/ui/Select";
 import { Badge } from "@/components/ui/Badge";
-import { ConfirmModal } from "@/components/ui/Modal";
+import { ConfirmModal } from "@/components/ui";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Spinner } from "@/components/ui/Spinner";
-import { formatNovelStatus } from "@/lib/display";
+import {
+  formatNovelStatus,
+  getNovelStatusVariant,
+  isActiveGenerationTaskStatus,
+  resolveNovelDisplayStatus,
+  shouldOpenNovelProgress,
+} from "@/lib/display";
 
 type FilterStatus = "all" | "draft" | "generating" | "completed" | "failed" | "cancelled";
 
@@ -24,6 +30,10 @@ type AdminUserOption = {
 const STATUS_MAP: Record<string, { label: string; variant: "default" | "success" | "warning" | "error" | "info" }> = {
   draft: { label: "草稿", variant: "default" },
   generating: { label: "生成中", variant: "warning" },
+  queued: { label: "排队中", variant: "warning" },
+  dispatching: { label: "调度中", variant: "warning" },
+  awaiting_outline_confirmation: { label: "待确认大纲", variant: "info" },
+  paused: { label: "已暂停", variant: "info" },
   completed: { label: "已完成", variant: "success" },
   cancelled: { label: "已取消", variant: "info" },
   failed: { label: "失败", variant: "error" },
@@ -60,6 +70,7 @@ export default function NovelsPage() {
   const [adminUsers, setAdminUsers] = useState<AdminUserOption[]>([]);
   const [selectedUserUuid, setSelectedUserUuid] = useState("");
   const [onlyMine, setOnlyMine] = useState(false);
+  const [generationTaskByNovelId, setGenerationTaskByNovelId] = useState<Record<string, GenerationTaskItem>>({});
 
   const isAdmin = viewer?.role === "admin";
 
@@ -73,9 +84,50 @@ export default function NovelsPage() {
   }, [viewer, selectedUserUuid, onlyMine]);
 
   useEffect(() => {
+    if (!viewer) return;
+    const timer = window.setInterval(() => {
+      void loadNovels();
+    }, 15000);
+    return () => window.clearInterval(timer);
+  }, [onlyMine, selectedUserUuid, viewer]);
+
+  useEffect(() => {
     if (viewer?.role !== "admin") return;
     void loadAdminUsers();
   }, [viewer]);
+
+  useEffect(() => {
+    let disposed = false;
+    if (!novels.length) {
+      setGenerationTaskByNovelId({});
+      return;
+    }
+
+    (async () => {
+      const entries = await Promise.all(
+        novels.map(async (novel) => {
+          try {
+            const tasks = await api.listGenerationTasks(novel.id, 10);
+            const displayTask = tasks.find((task) => isActiveGenerationTaskStatus(task.status)) || tasks[0] || null;
+            return [novel.id, displayTask] as const;
+          } catch {
+            return [novel.id, null] as const;
+          }
+        })
+      );
+
+      if (disposed) return;
+      const nextMap: Record<string, GenerationTaskItem> = {};
+      for (const [novelId, task] of entries) {
+        if (task) nextMap[novelId] = task;
+      }
+      setGenerationTaskByNovelId(nextMap);
+    })();
+
+    return () => {
+      disposed = true;
+    };
+  }, [novels]);
 
   const loadViewer = async () => {
     try {
@@ -133,7 +185,9 @@ export default function NovelsPage() {
 
   const filteredNovels = novels.filter((n) => {
     if (filter === "all") return true;
-    return n.status === filter;
+    const displayStatus = resolveNovelDisplayStatus(n.status, generationTaskByNovelId[n.id]);
+    if (filter === "generating") return shouldOpenNovelProgress(displayStatus);
+    return displayStatus === filter;
   });
 
   const parseServerTime = (dateStr: string) => {
@@ -283,52 +337,55 @@ export default function NovelsPage() {
             transition={{ duration: 0.4, ease: [0.25, 0.1, 0.25, 1] }}
             className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"
           >
-            {filteredNovels.map((novel, idx) => (
-              <motion.div
-                key={novel.id}
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.28, ease: [0.25, 0.1, 0.25, 1], delay: idx * 0.04 }}
-              >
-              <Card hover className="group relative p-5">
-                <Link href={`/novels/${novel.id}`} className="block">
-                  <div className="flex items-start justify-between mb-3">
-                    <h3 className="font-semibold text-[#1F1B18] line-clamp-1 pr-3">{novel.title}</h3>
-                    <Badge variant={STATUS_MAP[novel.status]?.variant || "default"}>
-                      {STATUS_MAP[novel.status]?.label || formatNovelStatus(novel.status)}
-                    </Badge>
-                  </div>
-                  <div className="flex items-center gap-2 text-sm text-[#7E756D] mb-1">
-                    {novel.genre && (
-                      <>
-                        <span>{GENRE_LABELS[novel.genre] || novel.genre}</span>
-                        <span>·</span>
-                      </>
-                    )}
-                    {novel.style && (
-                      <>
-                        <span>{STYLE_LABELS[novel.style] || novel.style}</span>
-                        <span>·</span>
-                      </>
-                    )}
-                    <span>{formatDateTime(novel.updated_at || novel.created_at)}</span>
-                  </div>
-                </Link>
-                <div className="absolute top-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity">
-                  <button
-                    onClick={(e) => {
-                      e.preventDefault();
-                      setDeleteTarget(novel);
-                    }}
-                    className="p-2 text-[#8E8E93] hover:text-[#C4372D] hover:bg-[#FFECEB] rounded-[8px] transition-colors"
-                    aria-label="删除"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </div>
-              </Card>
-              </motion.div>
-            ))}
+            {filteredNovels.map((novel, idx) => {
+              const displayStatus = resolveNovelDisplayStatus(novel.status, generationTaskByNovelId[novel.id]);
+              return (
+                <motion.div
+                  key={novel.id}
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.28, ease: [0.25, 0.1, 0.25, 1], delay: idx * 0.04 }}
+                >
+                  <Card hover className="group relative p-5">
+                    <Link href={shouldOpenNovelProgress(displayStatus) ? `/novels/${novel.id}/progress` : `/novels/${novel.id}`} className="block">
+                      <div className="flex items-start justify-between mb-3">
+                        <h3 className="font-semibold text-[#1F1B18] line-clamp-1 pr-3">{novel.title}</h3>
+                        <Badge variant={STATUS_MAP[displayStatus]?.variant || getNovelStatusVariant(displayStatus)}>
+                          {STATUS_MAP[displayStatus]?.label || formatNovelStatus(displayStatus)}
+                        </Badge>
+                      </div>
+                      <div className="flex items-center gap-2 text-sm text-[#7E756D] mb-1">
+                        {novel.genre && (
+                          <>
+                            <span>{GENRE_LABELS[novel.genre] || novel.genre}</span>
+                            <span>·</span>
+                          </>
+                        )}
+                        {novel.style && (
+                          <>
+                            <span>{STYLE_LABELS[novel.style] || novel.style}</span>
+                            <span>·</span>
+                          </>
+                        )}
+                        <span>{formatDateTime(novel.updated_at || novel.created_at)}</span>
+                      </div>
+                    </Link>
+                    <div className="absolute top-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity">
+                      <button
+                        onClick={(e) => {
+                          e.preventDefault();
+                          setDeleteTarget(novel);
+                        }}
+                        className="p-2 text-[#8E8E93] hover:text-[#C4372D] hover:bg-[#FFECEB] rounded-[8px] transition-colors"
+                        aria-label="删除"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  </Card>
+                </motion.div>
+              );
+            })}
           </motion.div>
         )}
       </div>

@@ -163,7 +163,7 @@ class _DummyReviewer:
 
 
 class _AlwaysFailWriter:
-    def run(self, novel_id, chapter_num, outline, context, language, native_style_profile, provider, model):
+    def run(self, novel_id, chapter_num, outline, context, language, native_style_profile, provider, model, word_count=None):
         variant = context.get("ab_variant") or "?"
         raise RuntimeError(f"writer generation failed for chapter={chapter_num} provider={provider} model={model} variant={variant}")
 

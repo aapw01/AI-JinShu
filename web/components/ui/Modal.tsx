@@ -9,9 +9,23 @@ interface ModalProps {
   title?: string;
   children: ReactNode;
   footer?: ReactNode;
+  maxWidthClassName?: string;
+  panelClassName?: string;
+  bodyClassName?: string;
+  footerClassName?: string;
 }
 
-export function Modal({ open, onClose, title, children, footer }: ModalProps) {
+export function Modal({
+  open,
+  onClose,
+  title,
+  children,
+  footer,
+  maxWidthClassName = "max-w-md",
+  panelClassName = "",
+  bodyClassName = "",
+  footerClassName = "",
+}: ModalProps) {
   const handleEscape = useCallback(
     (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -35,7 +49,9 @@ export function Modal({ open, onClose, title, children, footer }: ModalProps) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       <div className="absolute inset-0 bg-black/15 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative bg-white/90 border border-white rounded-[12px] shadow-[0_16px_40px_rgba(0,0,0,0.14)] max-w-md w-full mx-4 animate-fade-in">
+      <div
+        className={`relative w-full mx-4 bg-white/90 border border-white rounded-[12px] shadow-[0_16px_40px_rgba(0,0,0,0.14)] animate-fade-in ${maxWidthClassName} ${panelClassName}`}
+      >
         {title && (
           <div className="flex items-center justify-between p-6 border-b border-[rgba(60,60,67,0.12)]">
             <h3 className="text-lg font-semibold text-[#1D1D1F]">{title}</h3>
@@ -50,8 +66,8 @@ export function Modal({ open, onClose, title, children, footer }: ModalProps) {
             </button>
           </div>
         )}
-        <div className="p-6">{children}</div>
-        {footer && <div className="p-6 pt-0 flex justify-end gap-3">{footer}</div>}
+        <div className={`p-6 ${bodyClassName}`}>{children}</div>
+        {footer && <div className={`p-6 pt-0 flex justify-end gap-3 ${footerClassName}`}>{footer}</div>}
       </div>
     </div>
   );
@@ -64,6 +80,8 @@ interface ConfirmModalProps {
   title: string;
   message: string;
   confirmText?: string;
+  cancelText?: string;
+  confirmVariant?: "primary" | "secondary" | "ghost" | "destructive";
   loading?: boolean;
 }
 
@@ -74,25 +92,46 @@ export function ConfirmModal({
   title,
   message,
   confirmText = "确认",
+  cancelText = "取消",
+  confirmVariant = "destructive",
   loading,
 }: ConfirmModalProps) {
+  const confirmClassName =
+    confirmVariant === "destructive"
+      ? "min-w-[104px] h-9 px-4 shadow-none"
+      : "min-w-[104px] h-9 px-4";
+
   return (
     <Modal
       open={open}
       onClose={onClose}
       title={title}
+      bodyClassName="pb-5"
+      footerClassName="items-center gap-2.5"
       footer={
         <>
-          <Button variant="ghost" onClick={onClose} disabled={loading}>
-            取消
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-9 min-w-[72px] px-3.5 text-[#7E756D] hover:bg-[#F5F1EC]"
+            onClick={onClose}
+            disabled={loading}
+          >
+            {cancelText}
           </Button>
-          <Button variant="destructive" onClick={onConfirm} loading={loading}>
+          <Button
+            variant={confirmVariant}
+            size="sm"
+            className={confirmClassName}
+            onClick={onConfirm}
+            loading={loading}
+          >
             {confirmText}
           </Button>
         </>
       }
     >
-      <p className="text-[#3A3A3C]">{message}</p>
+      <p className="text-[15px] leading-7 text-[#4A433D]">{message}</p>
     </Modal>
   );
 }

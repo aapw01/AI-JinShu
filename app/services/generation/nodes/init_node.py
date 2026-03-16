@@ -30,6 +30,18 @@ from app.services.memory.story_bible import CheckpointStore, QualityReportStore,
 from app.services.memory.summary_manager import SummaryManager
 
 
+def _covers_outline_range(outlines: list[dict] | None, start_chapter: int, end_chapter: int) -> bool:
+    required = set(range(int(start_chapter), int(end_chapter) + 1))
+    if not required:
+        return False
+    available = {
+        int(item.get("chapter_num") or 0)
+        for item in (outlines or [])
+        if isinstance(item, dict) and int(item.get("chapter_num") or 0) > 0
+    }
+    return required.issubset(available)
+
+
 def node_init(state: GenerationState) -> GenerationState:
     db = SessionLocal()
     try:
@@ -43,12 +55,26 @@ def node_init(state: GenerationState) -> GenerationState:
         volume_size = int((config.get("volume_size") or 30))
         flex_abs = max(0, int(config.get("chapter_flex_max_abs", 2) or 2))
         flex_ratio = float(config.get("chapter_flex_max_ratio", 0.1) or 0.1)
-        target_total = int(state["num_chapters"])
-        flex_by_ratio = max(0, int(round(target_total * max(flex_ratio, 0.0))))
+        segment_start = int(state.get("segment_start_chapter") or state["start_chapter"])
+        segment_target = int(state.get("segment_target_chapters") or state["num_chapters"])
+        segment_end = int(state.get("segment_end_chapter") or (segment_start + segment_target - 1))
+        book_start = int(state.get("book_start_chapter") or segment_start)
+        book_target_total = int(state.get("book_target_total_chapters") or state["num_chapters"])
+        book_effective_end = int(state.get("book_effective_end_chapter") or (book_start + book_target_total - 1))
+        flex_by_ratio = max(0, int(round(book_target_total * max(flex_ratio, 0.0))))
         flex_window = min(flex_abs, flex_by_ratio if flex_by_ratio > 0 else flex_abs)
-        min_total = max(1, target_total - flex_window)
-        max_total = max(target_total, target_total + flex_window)
+        min_total = max(1, book_target_total - flex_window)
+        max_total = max(book_target_total, book_target_total + flex_window)
         return {
+            "book_start_chapter": book_start,
+            "book_target_total_chapters": book_target_total,
+            "book_effective_end_chapter": max(book_effective_end, segment_end),
+            "book_min_total_chapters": min_total,
+            "book_max_total_chapters": max_total,
+            "segment_start_chapter": segment_start,
+            "segment_target_chapters": segment_target,
+            "segment_end_chapter": segment_end,
+            "next_chapter": segment_start,
             "strategy": strategy,
             "target_language": target_language,
             "native_style_profile": novel.native_style_profile or get_native_style_profile(target_language),
@@ -71,10 +97,12 @@ def node_init(state: GenerationState) -> GenerationState:
             "finalizer": FinalizerAgent(),
             "final_reviewer": FinalReviewerAgent(),
             "fact_extractor": FactExtractorAgent(),
-            "current_chapter": state["start_chapter"],
-            "end_chapter": state["start_chapter"] + state["num_chapters"] - 1,
+            "current_chapter": segment_start,
+            "start_chapter": segment_start,
+            "num_chapters": segment_target,
+            "end_chapter": segment_end,
             "creation_task_id": state.get("creation_task_id"),
-            "target_chapters": target_total,
+            "target_chapters": book_target_total,
             "min_total_chapters": min_total,
             "max_total_chapters": max_total,
             "total_input_tokens": 0,
@@ -83,6 +111,7 @@ def node_init(state: GenerationState) -> GenerationState:
             "review_attempt": 0,
             "rerun_count": 0,
             "volume_size": max(volume_size, 1),
+            "volume_no": int(state.get("volume_no") or 1),
             "bible_store": StoryBibleStore(),
             "checkpoint_store": CheckpointStore(),
             "quality_store": QualityReportStore(),
@@ -119,10 +148,12 @@ def node_prewrite(state: GenerationState) -> GenerationState:
 def node_outline(state: GenerationState) -> GenerationState:
     if state["start_chapter"] > 1:
         existing = load_outlines_from_db(state["novel_id"], state.get("novel_version_id"))
-        if existing and len(existing) >= state["end_chapter"]:
+        if _covers_outline_range(existing, state["start_chapter"], state["end_chapter"]):
             logger.info(
-                "Resume: loaded %d existing outlines for novel %s (start_chapter=%s)",
-                len(existing), state["novel_id"], state["start_chapter"],
+                "Resume: loaded outlines for novel %s range=%s-%s",
+                state["novel_id"],
+                state["start_chapter"],
+                state["end_chapter"],
             )
             progress(state, "full_outline_ready", 0, 20, "加载已有章节大纲...", {"current_phase": "outline_ready", "total_chapters": state["num_chapters"]})
             return {"full_outlines": existing}
@@ -130,14 +161,16 @@ def node_outline(state: GenerationState) -> GenerationState:
     progress(state, "specify_plan_tasks", 0, 10, "完成规格/计划/任务分解...", {"current_phase": "prewrite", "total_chapters": state["num_chapters"]})
     out_provider, out_model = get_model_for_stage(state["strategy"], "outliner")
     full_outlines = state["outliner"].run_full_book(
-        state["novel_id"],
-        state["num_chapters"],
-        state["prewrite"],
-        state["target_language"],
-        out_provider,
-        out_model,
+        novel_id=state["novel_id"],
+        num_chapters=state["num_chapters"],
+        prewrite=state["prewrite"],
+        start_chapter=state["start_chapter"],
+        language=state["target_language"],
+        provider=out_provider,
+        model=out_model,
     )
     is_resume = state["start_chapter"] > 1
     save_full_outlines(state["novel_id"], full_outlines, novel_version_id=state.get("novel_version_id"), replace_all=not is_resume)
+    full_outlines = load_outlines_from_db(state["novel_id"], state.get("novel_version_id"))
     progress(state, "full_outline_ready", 0, 20, "全书章节大纲已确定", {"current_phase": "outline_ready", "total_chapters": state["num_chapters"]})
     return {"full_outlines": full_outlines}

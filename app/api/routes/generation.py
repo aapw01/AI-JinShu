@@ -3,6 +3,7 @@ import json
 import asyncio
 import logging
 from datetime import datetime, timezone
+from typing import Any
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
@@ -19,48 +20,35 @@ from app.core.logging_config import log_event
 from app.models.creation_task import CreationTask
 from app.models.novel import GenerationTask, GenerationCheckpoint, User
 from app.schemas.novel import GenerateRequest, GenerateResponse, GenerationStatusResponse, RetryGenerationRequest
+from app.services.generation.status_snapshot import (
+    GENERATION_CACHE_ACTIVE_STATUSES,
+    SUBTASK_LABELS,
+    build_generation_snapshot,
+    creation_task_display_totals as snapshot_creation_task_display_totals,
+    creation_task_effective_phase as snapshot_creation_task_effective_phase,
+    creation_task_effective_status as snapshot_creation_task_effective_status,
+    creation_task_payload as snapshot_creation_task_payload,
+    creation_task_runtime_state as snapshot_creation_task_runtime_state,
+    creation_task_waiting_outline_confirmation as snapshot_creation_task_waiting_outline_confirmation,
+    generation_novel_key as snapshot_novel_key,
+    generation_task_key as snapshot_task_key,
+    read_generation_cache,
+    sync_generation_novel_snapshot,
+    write_generation_cache,
+)
 from app.services.quota import check_generation_quota
-from app.services.scheduler.scheduler_service import cancel_task, dispatch_user_queue, get_task_by_public_id, pause_task, resume_task, submit_task
+from app.services.scheduler.scheduler_service import (
+    cancel_task,
+    dispatch_user_queue_for_user,
+    get_task_by_public_id,
+    pause_task,
+    resume_task,
+    submit_task,
+)
 from app.services.rewrite.service import get_default_version_id
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
-
-SUBTASK_LABELS: dict[str, str] = {
-    "queued": "任务已入队",
-    "prewrite": "预写准备",
-    "outline_ready": "大纲就绪",
-    "chapter_writing": "章节写作中",
-    "chapter_review": "章节审校中",
-    "chapter_finalizing": "章节定稿中",
-    "full_book_review": "全书终审中",
-    "completed": "任务已完成",
-    "failed": "任务失败",
-    "cancelled": "任务已取消",
-    "book_planning": "拆分卷任务",
-    "volume_dispatch": "调度卷任务",
-    "constitution": "生成创作宪法",
-    "specify_plan_tasks": "生成规格/计划/任务分解",
-    "full_outline_ready": "全书大纲已完成",
-    "outline_waiting_confirmation": "等待大纲确认",
-    "volume_replan": "分卷策略重规划",
-    "closure_gate": "收官完整性检查",
-    "bridge_chapter": "追加桥接章节",
-    "tail_rewrite": "尾章重写补完",
-    "context": "加载上下文",
-    "consistency": "一致性检查",
-    "chapter_blocked": "一致性未通过（跳过）",
-    "beats": "生成节拍卡",
-    "writer": "写作章节草稿",
-    "reviewer": "章节质量审校",
-    "revise": "按反馈修订",
-    "rollback_rerun": "回滚并重跑",
-    "finalizer": "章节定稿",
-    "memory_update": "更新记忆与摘要",
-    "chapter_done": "章节完成",
-    "final_book_review": "全书终审",
-    "done": "全书完成",
-}
 
 # Redis connection pool for better performance
 _redis_pool = None
@@ -75,6 +63,9 @@ def _get_redis():
 
 
 def _redis_get_json(key: str) -> dict | None:
+    payload = read_generation_cache(key)
+    if payload is not None:
+        return payload
     try:
         return _decode_redis_payload(_get_redis().get(key))
     except redis.RedisError as exc:
@@ -90,11 +81,11 @@ def _redis_set_json(key: str, payload: dict, ttl_seconds: int = 86400) -> None:
 
 
 def _redis_key(task_id: str) -> str:
-    return f"generation:{task_id}"
+    return snapshot_task_key(task_id)
 
 
 def _novel_key(novel_id: str) -> str:
-    return f"generation:novel:{novel_id}"
+    return snapshot_novel_key(novel_id)
 
 
 def _sse_status_event(payload: dict) -> str:
@@ -160,31 +151,42 @@ def _to_status_response(payload: dict) -> GenerationStatusResponse:
 
 
 def _creation_task_runtime_state(row: CreationTask) -> dict:
-    cursor = row.resume_cursor_json if isinstance(row.resume_cursor_json, dict) else {}
-    runtime_state = cursor.get("runtime_state")
-    return dict(runtime_state) if isinstance(runtime_state, dict) else {}
+    return snapshot_creation_task_runtime_state(row)
 
 
 def _creation_task_payload(row: CreationTask) -> dict:
-    payload = row.payload_json if isinstance(row.payload_json, dict) else {}
-    return dict(payload)
+    return snapshot_creation_task_payload(row)
+
+
+def _payload_book_start(payload_data: dict) -> int:
+    return int(payload_data.get("book_start_chapter") or payload_data.get("start_chapter") or 1)
+
+
+def _payload_book_total(payload_data: dict) -> int:
+    return int(
+        payload_data.get("book_target_total_chapters")
+        or payload_data.get("original_total_chapters")
+        or payload_data.get("num_chapters")
+        or 0
+    )
+
+
+def _payload_book_end(payload_data: dict) -> int:
+    book_start = _payload_book_start(payload_data)
+    book_total = max(0, _payload_book_total(payload_data))
+    return int(book_start + max(book_total - 1, 0))
 
 
 def _creation_task_waiting_outline_confirmation(row: CreationTask) -> bool:
-    payload = _creation_task_payload(row)
-    return bool(payload.get("awaiting_outline_confirmation")) and not bool(payload.get("outline_confirmed"))
+    return snapshot_creation_task_waiting_outline_confirmation(row)
 
 
 def _creation_task_effective_status(row: CreationTask) -> str:
-    if row.status in {"queued", "dispatching", "running"} and _creation_task_waiting_outline_confirmation(row):
-        return "awaiting_outline_confirmation"
-    return str(row.status or "unknown")
+    return snapshot_creation_task_effective_status(row)
 
 
 def _creation_task_effective_phase(row: CreationTask) -> str:
-    if row.status in {"queued", "dispatching", "running"} and _creation_task_waiting_outline_confirmation(row):
-        return "outline_ready"
-    return str(row.phase or row.status or "unknown")
+    return snapshot_creation_task_effective_phase(row)
 
 
 def _find_generation_creation_task(
@@ -212,20 +214,7 @@ def _find_generation_creation_task(
 
 
 def _creation_task_display_totals(row: CreationTask) -> tuple[int, int]:
-    payload_data = _creation_task_payload(row)
-    cursor = row.resume_cursor_json if isinstance(row.resume_cursor_json, dict) else {}
-    runtime_state = _creation_task_runtime_state(row)
-    default_total = int(payload_data.get("original_total_chapters") or payload_data.get("num_chapters") or 0)
-    effective_end = int(runtime_state.get("effective_end_chapter") or 0)
-    effective_total = max(int(runtime_state.get("effective_total_chapters") or 0), default_total, effective_end)
-    resume_from = int(runtime_state.get("resume_from_chapter") or cursor.get("next") or payload_data.get("start_chapter") or 0)
-    if row.status == "completed":
-        current_chapter = max(0, min(effective_total, (resume_from - 1) if resume_from > 0 else effective_total))
-    elif row.status in {"failed", "paused", "running", "queued", "dispatching"}:
-        current_chapter = resume_from
-    else:
-        current_chapter = max(0, resume_from)
-    return int(current_chapter), int(effective_total)
+    return snapshot_creation_task_display_totals(row)
 
 
 def _resolve_live_chapter_display(
@@ -251,6 +240,28 @@ def _resolve_live_chapter_display(
     if total > 0:
         resolved_total = max(int(resolved_total or 0), total)
     return int(resolved_current), int(resolved_total)
+
+
+def _publish_generation_snapshot(
+    db: Session,
+    row: CreationTask,
+    *,
+    live_payload: dict | None = None,
+    stale_worker_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    snapshot = build_generation_snapshot(row, live_payload=live_payload)
+    write_generation_cache(
+        task_public_id=row.public_id,
+        novel_id=int(row.resource_id),
+        payload=snapshot,
+        worker_task_id=row.worker_task_id,
+        mirror_worker=False,
+        clear_worker_ids=stale_worker_ids or [],
+        mirror_novel=_creation_task_effective_status(row) in GENERATION_CACHE_ACTIVE_STATUSES,
+    )
+    if _creation_task_effective_status(row) not in GENERATION_CACHE_ACTIVE_STATUSES:
+        sync_generation_novel_snapshot(db, novel_id=int(row.resource_id))
+    return snapshot
 
 
 def _format_eta(seconds: int) -> str:
@@ -406,12 +417,17 @@ def submit_generation(
             "novel_version_id": int(get_default_version_id(db, novel.id)),
             "num_chapters": int(req.num_chapters),
             "start_chapter": int(req.start_chapter),
+            "book_start_chapter": int(req.start_chapter),
+            "book_target_total_chapters": int(req.num_chapters),
             "trace_id": trace_id,
         },
     )
     novel.status = "generating"
     novel.config = {**(novel.config or {}), "require_outline_confirmation": bool(req.require_outline_confirmation)}
     db.commit()
+    db.refresh(creation_task)
+    _publish_generation_snapshot(db, creation_task)
+    dispatch_user_queue_for_user(user_uuid=principal.user_uuid or "")
     log_event(
         logger,
         "generation.submit",
@@ -477,37 +493,25 @@ def retry_generation(
             raise
         novel.status = "generating"
         db.commit()
-        dispatch_user_queue(db, user_uuid=principal.user_uuid or "")
+        dispatch_user_queue_for_user(user_uuid=principal.user_uuid or "")
+        db.refresh(resumed)
+        _publish_generation_snapshot(db, resumed)
         cursor = resumed.resume_cursor_json if isinstance(resumed.resume_cursor_json, dict) else {}
         next_ch = cursor.get("next")
         payload_data = resumed.payload_json or {}
-        total_ch = int(payload_data.get("num_chapters") or 0)
-        msg = f"重试已提交：从第{int(next_ch)}章继续" if next_ch is not None else "重试已提交"
-        data = {
-            "status": "queued",
-            "run_state": "queued",
-            "step": "queued",
-            "current_phase": "queued",
-            "current_subtask": {"key": "queued", "label": "任务已入队", "progress": 0},
-            "subtask_key": "queued",
-            "subtask_label": "任务已入队",
-            "subtask_progress": 0,
-            "current_chapter": int(next_ch) if next_ch is not None else 0,
-            "total_chapters": total_ch,
-            "progress": 0,
-            "message": msg,
-            "task_id": resumed.public_id,
-            "trace_id": getattr(request.state, "trace_id", None),
-        }
-        _redis_set_json(_redis_key(resumed.public_id), data)
-        _redis_set_json(_novel_key(str(novel.id)), data)
+        total_ch = int(
+            payload_data.get("book_target_total_chapters")
+            or payload_data.get("original_total_chapters")
+            or payload_data.get("num_chapters")
+            or 0
+        )
         log_event(
             logger,
             "generation.retry.submit",
             novel_id=novel.id,
             user_id=principal.user_uuid,
             task_id=resumed.public_id,
-            run_state="queued",
+            run_state=resumed.status,
             chapter_num=int(next_ch) if next_ch is not None else 0,
             total_chapters=total_ch,
         )
@@ -519,6 +523,7 @@ def retry_generation(
         start_ch = int(payload_data.get("start_chapter") or 1)
         num_ch = int(payload_data.get("num_chapters") or 1)
         original_total = int(payload_data.get("original_total_chapters") or num_ch)
+        source_book_start = int(payload_data.get("book_start_chapter") or start_ch)
         cursor = source_creation.resume_cursor_json if isinstance(source_creation.resume_cursor_json, dict) else {}
         retry_start = int(cursor.get("next") or start_ch)
         source_end = start_ch + max(1, num_ch) - 1
@@ -542,29 +547,16 @@ def retry_generation(
                 "num_chapters": int(retry_num),
                 "start_chapter": int(retry_start),
                 "original_total_chapters": int(original_total),
+                "book_start_chapter": int(source_book_start),
+                "book_target_total_chapters": int(original_total),
                 "trace_id": trace_id,
             },
         )
         novel.status = "generating"
         db.commit()
-        data = {
-            "status": "queued",
-            "run_state": "queued",
-            "step": "queued",
-            "current_phase": "queued",
-            "current_subtask": {"key": "queued", "label": "任务已入队", "progress": 0},
-            "subtask_key": "queued",
-            "subtask_label": "任务已入队",
-            "subtask_progress": 0,
-            "current_chapter": retry_start,
-            "total_chapters": original_total,
-            "progress": 0,
-            "message": f"重试已提交：从第{retry_start}章继续（共{original_total}章）",
-            "task_id": creation_task.public_id,
-            "trace_id": trace_id,
-        }
-        _redis_set_json(_redis_key(creation_task.public_id), data)
-        _redis_set_json(_novel_key(str(novel.id)), data)
+        db.refresh(creation_task)
+        _publish_generation_snapshot(db, creation_task)
+        dispatch_user_queue_for_user(user_uuid=principal.user_uuid or "")
         log_event(logger, "generation.retry.submit", novel_id=novel.id, user_id=principal.user_uuid, task_id=creation_task.public_id, run_state="queued", chapter_num=retry_start, total_chapters=original_total)
         return GenerateResponse(task_id=creation_task.public_id, novel_id=novel.uuid or str(novel.id), status="queued")
 
@@ -598,6 +590,7 @@ def retry_generation(
     source_start = int(source_task.start_chapter or 1)
     source_total = int(source_task.total_chapters or source_task.num_chapters or 1)
     original_total = source_total
+    source_book_start = source_start
     source_end = source_start + max(1, source_total) - 1
     retry_start = int(source_task.current_chapter or source_start)
     legacy_creation = db.execute(
@@ -614,6 +607,7 @@ def retry_generation(
             retry_start = max(source_start, min(int(next_val), source_end))
         legacy_payload = legacy_creation.payload_json or {}
         original_total = int(legacy_payload.get("original_total_chapters") or legacy_payload.get("num_chapters") or source_total)
+        source_book_start = int(legacy_payload.get("book_start_chapter") or source_book_start)
     else:
         retry_start = max(source_start, min(retry_start, source_end))
     retry_num = max(1, source_end - retry_start + 1)
@@ -653,30 +647,16 @@ def retry_generation(
             "num_chapters": int(retry_num),
             "start_chapter": int(retry_start),
             "original_total_chapters": int(original_total),
+            "book_start_chapter": int(source_book_start),
+            "book_target_total_chapters": int(original_total),
             "trace_id": trace_id,
         },
     )
     novel.status = "generating"
     db.commit()
-
-    data = {
-        "status": "queued",
-        "run_state": "queued",
-        "step": "queued",
-        "current_phase": "queued",
-        "current_subtask": {"key": "queued", "label": "任务已入队", "progress": 0},
-        "subtask_key": "queued",
-        "subtask_label": "任务已入队",
-        "subtask_progress": 0,
-        "current_chapter": retry_start,
-        "total_chapters": original_total,
-        "progress": 0,
-        "message": f"重试已提交：从第{retry_start}章继续（共{original_total}章）",
-        "task_id": creation_task.public_id,
-        "trace_id": trace_id,
-    }
-    _redis_set_json(_redis_key(creation_task.public_id), data)
-    _redis_set_json(_novel_key(str(novel.id)), data)
+    db.refresh(creation_task)
+    _publish_generation_snapshot(db, creation_task)
+    dispatch_user_queue_for_user(user_uuid=principal.user_uuid or "")
     log_event(
         logger,
         "generation.retry.submit",
@@ -709,26 +689,16 @@ def cancel_generation(
         raise http_error(404, "task_not_found", "Task not found")
     if ctask.status in {"completed", "failed", "cancelled"}:
         return {"ok": True, "message": f"Task already {ctask.status}"}
+    stale_worker_id = ctask.worker_task_id
     try:
         cancel_task(db, public_id=task_id, user_uuid=_.user_uuid or "")
     except ValueError:
         raise http_error(409, "task_not_cancellable", "当前任务不可取消")
     novel.status = "cancelled"
     db.commit()
-
-    data = {
-        "status": "cancelled",
-        "run_state": "cancelled",
-        "step": "cancelled",
-        "current_phase": "cancelled",
-        "progress": ctask.progress or 0,
-        "message": "任务已取消",
-        "task_id": ctask.public_id,
-    }
-    _redis_set_json(_redis_key(ctask.public_id), data)
-    if ctask.worker_task_id:
-        _redis_set_json(_redis_key(ctask.worker_task_id), data)
-    _redis_set_json(_novel_key(str(novel.id)), data)
+    dispatch_user_queue_for_user(user_uuid=_.user_uuid or "")
+    db.refresh(ctask)
+    _publish_generation_snapshot(db, ctask, stale_worker_ids=[str(stale_worker_id)] if stale_worker_id else None)
     log_event(logger, "generation.cancel", novel_id=novel.id, task_id=task_id, run_state="cancelled")
     return {"ok": True, "message": "Task cancelled"}
 
@@ -762,6 +732,7 @@ def pause_generation(
         ).scalar_one_or_none()
     if not row:
         raise http_error(404, "no_running_task", "No running task")
+    stale_worker_id = row.worker_task_id
     try:
         pause_task(db, public_id=row.public_id, user_uuid=principal.user_uuid or "")
     except ValueError as exc:
@@ -774,22 +745,9 @@ def pause_generation(
             raise http_error(409, "task_not_pausable", "当前任务不可暂停")
         raise http_error(409, "task_not_pausable", "当前任务不可暂停")
     db.commit()
-    existing = _redis_get_json(_redis_key(row.worker_task_id or row.public_id)) or {}
-    payload = {
-        "status": "paused",
-        "run_state": "paused",
-        "step": "paused",
-        "current_phase": "paused",
-        "current_chapter": existing.get("current_chapter") or 0,
-        "total_chapters": existing.get("total_chapters") or 0,
-        "progress": row.progress or existing.get("progress") or 0,
-        "message": "任务已暂停",
-        "task_id": row.public_id,
-    }
-    _redis_set_json(_redis_key(row.public_id), payload)
-    if row.worker_task_id:
-        _redis_set_json(_redis_key(row.worker_task_id), payload)
-    _redis_set_json(_novel_key(str(novel.id)), payload)
+    dispatch_user_queue_for_user(user_uuid=principal.user_uuid or "")
+    db.refresh(row)
+    _publish_generation_snapshot(db, row, stale_worker_ids=[str(stale_worker_id)] if stale_worker_id else None)
     log_event(logger, "generation.pause", novel_id=novel.id, task_id=row.public_id, run_state="paused")
     return {"ok": True, "task_id": row.public_id, "run_state": "paused"}
 
@@ -834,23 +792,9 @@ def resume_generation(
             raise http_error(409, "task_not_resumable", "当前任务不可恢复")
         raise http_error(409, "task_not_resumable", "当前任务不可恢复")
     db.commit()
-    dispatch_user_queue(db, user_uuid=principal.user_uuid or "")
-    existing = _redis_get_json(_redis_key(old_worker_task_id or row.public_id)) or {}
-    payload = {
-        "status": "queued",
-        "run_state": "queued",
-        "step": "queued",
-        "current_phase": "queued",
-        "current_chapter": existing.get("current_chapter") or 0,
-        "total_chapters": existing.get("total_chapters") or 0,
-        "progress": row.progress or existing.get("progress") or 0,
-        "message": "任务已恢复并重新入队",
-        "task_id": row.public_id,
-    }
-    _redis_set_json(_redis_key(row.public_id), payload)
-    if old_worker_task_id:
-        _redis_set_json(_redis_key(old_worker_task_id), payload)
-    _redis_set_json(_novel_key(str(novel.id)), payload)
+    dispatch_user_queue_for_user(user_uuid=principal.user_uuid or "")
+    db.refresh(row)
+    _publish_generation_snapshot(db, row, stale_worker_ids=[str(old_worker_task_id)] if old_worker_task_id else None)
     log_event(logger, "generation.resume", novel_id=novel.id, task_id=row.public_id, run_state="queued")
     return {"ok": True, "task_id": row.public_id, "run_state": "queued"}
 
@@ -886,6 +830,7 @@ def cancel_generation_by_novel(
         raise http_error(404, "no_active_task", "No active task")
     if row.status in {"completed", "failed", "cancelled"}:
         return {"ok": True, "task_id": row.public_id, "run_state": row.status}
+    stale_worker_id = row.worker_task_id
     try:
         cancel_task(db, public_id=row.public_id, user_uuid=principal.user_uuid or "")
     except ValueError as exc:
@@ -895,21 +840,9 @@ def cancel_generation_by_novel(
         raise http_error(409, "task_not_cancellable", "当前任务不可取消")
     novel.status = "cancelled"
     db.commit()
-    payload = {
-        "status": "cancelled",
-        "run_state": "cancelled",
-        "step": "cancelled",
-        "current_phase": "cancelled",
-        "current_chapter": 0,
-        "total_chapters": 0,
-        "progress": row.progress or 0,
-        "message": "任务已取消",
-        "task_id": row.public_id,
-    }
-    _redis_set_json(_redis_key(row.public_id), payload)
-    if row.worker_task_id:
-        _redis_set_json(_redis_key(row.worker_task_id), payload)
-    _redis_set_json(_novel_key(str(novel.id)), payload)
+    dispatch_user_queue_for_user(user_uuid=principal.user_uuid or "")
+    db.refresh(row)
+    _publish_generation_snapshot(db, row, stale_worker_ids=[str(stale_worker_id)] if stale_worker_id else None)
     log_event(logger, "generation.cancel", novel_id=novel.id, task_id=row.public_id, run_state="cancelled")
     return {"ok": True, "task_id": row.public_id, "run_state": "cancelled"}
 
@@ -939,28 +872,25 @@ def list_generation_tasks(
     ).scalars().all()
     results = []
     for r in rows:
-        payload_data = _creation_task_payload(r)
-        redis_data = _redis_get_json(_redis_key(r.worker_task_id or r.public_id)) or {}
-        current_chapter, total_chapters = _creation_task_display_totals(r)
-        status = _creation_task_effective_status(r)
-        live_current, live_total = _resolve_live_chapter_display(
-            redis_payload=redis_data if r.status not in {"completed", "failed", "cancelled", "paused"} else None,
-            db_current_chapter=current_chapter,
-            db_total_chapters=total_chapters,
+        runtime_state = _creation_task_runtime_state(r)
+        snapshot = build_generation_snapshot(
+            r,
+            live_payload=_redis_get_json(_redis_key(r.public_id)),
         )
         results.append({
             "task_id": r.public_id,
-            "status": status,
-            "run_state": status,
-            "current_chapter": live_current,
-            "total_chapters": live_total or int(payload_data.get("num_chapters") or 0),
-            "progress": r.progress or 0,
-            "message": r.message,
-            "error": r.error_detail,
-            "error_code": r.error_code,
-            "error_category": r.error_category,
-            "retryable": bool((r.retry_count or 0) < (r.max_retries or 0)),
-            "trace_id": None,
+            "status": snapshot.get("status"),
+            "run_state": snapshot.get("run_state"),
+            "current_chapter": snapshot.get("current_chapter"),
+            "total_chapters": snapshot.get("total_chapters"),
+            "progress": snapshot.get("progress"),
+            "message": snapshot.get("message"),
+            "error": snapshot.get("error"),
+            "error_code": snapshot.get("error_code"),
+            "error_category": snapshot.get("error_category"),
+            "retryable": snapshot.get("retryable"),
+            "trace_id": snapshot.get("trace_id"),
+            "volume_no": snapshot.get("volume_no") or int(runtime_state.get("volume_no") or 0) or None,
             "updated_at": r.updated_at.isoformat() if r.updated_at else None,
         })
     return results
@@ -1011,27 +941,8 @@ def confirm_outline_generation(
             gt.outline_confirmed = 1
 
         db.commit()
-        current_chapter, total_chapters = _creation_task_display_totals(row)
-        data = {
-            "status": "running",
-            "run_state": "running",
-            "current_phase": "chapter_writing",
-            "step": "chapter_writing",
-            "current_subtask": {"key": "chapter_writing", "label": "开始章节生成", "progress": row.progress or 20},
-            "subtask_key": "chapter_writing",
-            "subtask_label": "开始章节生成",
-            "subtask_progress": row.progress or 20,
-            "current_chapter": current_chapter or int(payload_data.get("start_chapter") or 1),
-            "total_chapters": total_chapters,
-            "progress": row.progress or 20,
-            "message": "已确认大纲，继续生成章节",
-            "task_id": row.public_id,
-            "trace_id": None,
-        }
-        _redis_set_json(_redis_key(task_id), data)
-        if row.worker_task_id:
-            _redis_set_json(_redis_key(row.worker_task_id), data)
-        _redis_set_json(_novel_key(str(novel.id)), data)
+        db.refresh(row)
+        _publish_generation_snapshot(db, row)
         return {"ok": True, "message": "已确认大纲，任务继续"}
 
     gt_stmt = select(GenerationTask).where(
@@ -1068,25 +979,9 @@ def confirm_outline_generation(
     gt.current_phase = "chapter_writing"
     novel.status = "generating"
     db.commit()
-    data = {
-        "status": "running",
-        "run_state": "running",
-        "current_phase": "chapter_writing",
-        "step": "chapter_writing",
-        "current_subtask": {"key": "chapter_writing", "label": "开始章节生成", "progress": gt.progress or 20},
-        "subtask_key": "chapter_writing",
-        "subtask_label": "开始章节生成",
-        "subtask_progress": gt.progress or 20,
-        "current_chapter": gt.current_chapter or 1,
-        "total_chapters": gt.total_chapters or gt.num_chapters or 0,
-        "progress": gt.progress or 20,
-        "message": "已确认大纲，继续生成章节",
-        "trace_id": gt.trace_id,
-    }
-    _redis_set_json(_redis_key(task_id), data)
     if row:
-        _redis_set_json(_redis_key(row.public_id), {**data, "task_id": row.public_id})
-    _redis_set_json(_novel_key(str(novel.id)), data)
+        db.refresh(row)
+        _publish_generation_snapshot(db, row)
     return {"ok": True, "message": "已确认大纲，任务继续"}
 
 
@@ -1104,7 +999,12 @@ def get_generation_status(
         raise http_error(404, "novel_not_found", "Novel not found")
     row: CreationTask | None = None
     if task_id:
-        row = get_task_by_public_id(db, public_id=task_id, user_uuid=_.user_uuid or "")
+        row = _find_generation_creation_task(
+            db,
+            task_id=task_id,
+            user_uuid=_.user_uuid or "",
+            novel_db_id=int(novel.id),
+        )
     else:
         row = db.execute(
             select(CreationTask)
@@ -1118,63 +1018,11 @@ def get_generation_status(
             .limit(1)
         ).scalar_one_or_none()
     if row:
-        redis_key_id = row.worker_task_id or row.public_id
-        redis_payload = _redis_get_json(_redis_key(redis_key_id))
-        result_data = row.result_json if isinstance(row.result_json, dict) else {}
-        current_chapter, total_chapters = _creation_task_display_totals(row)
-        effective_status = _creation_task_effective_status(row)
-        effective_phase = _creation_task_effective_phase(row)
-        payload = {
-            "status": effective_status,
-            "run_state": effective_status,
-            "step": effective_phase,
-            "current_phase": effective_phase,
-            "current_chapter": current_chapter,
-            "total_chapters": total_chapters,
-            "progress": float(row.progress or (100.0 if row.status == "completed" else 0.0) or 0.0),
-            "token_usage_input": int(result_data.get("token_usage_input") or 0),
-            "token_usage_output": int(result_data.get("token_usage_output") or 0),
-            "estimated_cost": float(result_data.get("estimated_cost") or 0.0),
-            "volume_no": None,
-            "volume_size": None,
-            "pacing_mode": None,
-            "low_progress_streak": None,
-            "progress_signal": None,
-            "decision_state": None,
-            "message": row.message,
-            "error": row.error_detail,
-            "error_code": row.error_code,
-            "error_category": row.error_category,
-            "retryable": bool((row.retry_count or 0) < (row.max_retries or 0)),
-            "task_id": row.public_id,
-            "trace_id": None,
-        }
-        db_status = row.status
-        if isinstance(redis_payload, dict) and db_status not in ("cancelled", "failed", "completed", "paused"):
-            for k, v in redis_payload.items():
-                if k in payload:
-                    payload[k] = v
-            live_current, live_total = _resolve_live_chapter_display(
-                redis_payload=redis_payload,
-                db_current_chapter=current_chapter,
-                db_total_chapters=total_chapters,
-            )
-            payload["current_chapter"] = live_current
-            payload["total_chapters"] = live_total
-        if db_status in ("cancelled", "failed", "completed", "paused"):
-            payload["status"] = db_status
-            payload["run_state"] = db_status
-            payload["step"] = row.phase or db_status
-            payload["current_phase"] = row.phase or db_status
-            payload["message"] = row.message or payload.get("message")
-            if row.error_detail:
-                payload["error"] = row.error_detail
-            if row.error_code:
-                payload["error_code"] = row.error_code
-            if row.error_category:
-                payload["error_category"] = row.error_category
-            payload["retryable"] = bool((row.retry_count or 0) < (row.max_retries or 0))
-        payload = _estimate_eta_payload(db, novel.id, redis_key_id, payload)
+        payload = build_generation_snapshot(
+            row,
+            live_payload=_redis_get_json(_redis_key(row.public_id)),
+        )
+        payload = _estimate_eta_payload(db, novel.id, row.worker_task_id or row.public_id, payload)
         return _to_status_response(payload)
     return GenerationStatusResponse(status="unknown", progress=0, current_chapter=0)
 
@@ -1215,6 +1063,11 @@ def stream_generation_progress(
     _: Principal = Depends(require_permission(Permission.NOVEL_READ, resource_loader=load_novel_resource)),
 ):
     """SSE endpoint for real-time generation progress."""
+    from app.core.database import resolve_novel
+
+    novel = resolve_novel(db, novel_id)
+    if not novel:
+        raise http_error(404, "novel_not_found", "Novel not found")
 
     _TERMINAL = {"completed", "failed", "cancelled", "paused"}
 
@@ -1223,35 +1076,19 @@ def stream_generation_progress(
         no_data_count = 0
         while True:
             db.expire_all()
-            ctask = get_task_by_public_id(db, public_id=task_id, user_uuid=_.user_uuid or "")
-            db_status = ctask.status if ctask else None
-            key_id = (ctask.worker_task_id if ctask and ctask.worker_task_id else task_id)
-            key = _redis_key(key_id)
-            data = None
-            try:
-                data = _get_redis().get(key)
-            except redis.RedisError as exc:
-                log_event(logger, "generation.redis.get_failed", level=logging.WARNING, error=str(exc), redis_key=key)
-            if data:
+            ctask = _find_generation_creation_task(
+                db,
+                task_id=task_id,
+                user_uuid=_.user_uuid or "",
+                novel_db_id=int(novel.id),
+            )
+            if ctask:
                 no_data_count = 0
-                d = json.loads(data)
-                if ctask and db_status not in _TERMINAL:
-                    current_chapter, total_chapters = _creation_task_display_totals(ctask)
-                    live_current, live_total = _resolve_live_chapter_display(
-                        redis_payload=d,
-                        db_current_chapter=current_chapter,
-                        db_total_chapters=total_chapters,
-                    )
-                    d["current_chapter"] = live_current
-                    d["total_chapters"] = live_total
-                if db_status in _TERMINAL:
-                    d["status"] = db_status
-                    d["run_state"] = db_status
-                    if ctask:
-                        d["message"] = ctask.message or d.get("message")
-                        if ctask.error_detail:
-                            d["error"] = ctask.error_detail
-                payload = json.dumps(d)
+                d = build_generation_snapshot(
+                    ctask,
+                    live_payload=_redis_get_json(_redis_key(ctask.public_id)),
+                )
+                payload = json.dumps(d, ensure_ascii=False)
                 if payload != last:
                     last = payload
                     yield _sse_status_event(d)
@@ -1259,18 +1096,6 @@ def stream_generation_progress(
                     break
             else:
                 no_data_count += 1
-                if ctask:
-                    yield _sse_status_event(
-                        {
-                            "status": ctask.status,
-                            "current_phase": ctask.phase,
-                            "progress": ctask.progress,
-                            "message": ctask.message,
-                            "error": ctask.error_detail,
-                        }
-                    )
-                    if db_status in _TERMINAL:
-                        break
                 if no_data_count >= 60:
                     yield _sse_status_event({"status": "unknown", "error": "Task not found or expired"})
                     break

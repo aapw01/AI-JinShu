@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/Input";
 import { Textarea } from "@/components/ui/Textarea";
 import { Select } from "@/components/ui/Select";
 import { TopBar } from "@/components/ui/TopBar";
-import { ErrorDialog } from "@/components/ui/ErrorDialog";
+import { ErrorDialog } from "@/components/ui";
 
 const STEPS = [
   { id: 1, title: "创意", icon: "lightbulb" },
