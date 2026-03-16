@@ -54,7 +54,13 @@ class GenerationResumePlan:
     book_target_total_chapters: int
     book_effective_end_chapter: int
     current_volume_no: int
+    segment_start_chapter: int
+    segment_end_chapter: int
+    retry_resume_chapter: int
     mode: str = "segment_running"
+
+
+_KEEP_RUNTIME_VALUE = object()
 
 
 def _task_book_start(payload_data: dict[str, Any], *, fallback_start: int) -> int:
@@ -82,6 +88,27 @@ def _volume_no_for_next_chapter(*, next_chapter: int, book_start_chapter: int, v
     start = max(1, int(book_start_chapter or 1))
     chapter = max(start, int(next_chapter or start))
     return max(1, ((chapter - start) // size) + 1)
+
+
+def _resolve_segment_window(
+    *,
+    next_chapter: int,
+    runtime_segment_start: int,
+    runtime_segment_end: int,
+    book_effective_end_chapter: int,
+    volume_size: int,
+) -> tuple[int, int]:
+    next_ch = int(next_chapter)
+    book_end = int(book_effective_end_chapter)
+    if (
+        runtime_segment_start > 0
+        and runtime_segment_end >= runtime_segment_start
+        and runtime_segment_start <= next_ch <= runtime_segment_end
+    ):
+        return int(runtime_segment_start), min(int(runtime_segment_end), book_end)
+    start = max(1, next_ch)
+    end = min(start + max(int(volume_size or 1) - 1, 0), book_end)
+    return start, end
 
 
 def _error_meta_from_exc(exc: Exception) -> tuple[str, str, bool]:
@@ -293,23 +320,30 @@ def _persist_task_runtime_state(
     book_effective_end_chapter: int,
     tail_rewrite_attempts: int = 0,
     bridge_attempts: int = 0,
+    retry_resume_chapter: int | None = None,
+    segment_plan: dict[str, Any] | None | object = _KEEP_RUNTIME_VALUE,
 ) -> None:
     db = SessionLocal()
     try:
+        runtime_state = {
+            "mode": str(mode),
+            "volume_no": int(volume_no),
+            "segment_start_chapter": int(segment_start_chapter),
+            "segment_end_chapter": int(segment_end_chapter),
+            "next_chapter": int(next_chapter),
+            "book_effective_end_chapter": int(book_effective_end_chapter),
+            "book_target_total_chapters": int(book_target_total_chapters),
+            "tail_rewrite_attempts": int(tail_rewrite_attempts or 0),
+            "bridge_attempts": int(bridge_attempts or 0),
+        }
+        if retry_resume_chapter is not None:
+            runtime_state["retry_resume_chapter"] = int(retry_resume_chapter)
+        if segment_plan is not _KEEP_RUNTIME_VALUE:
+            runtime_state["segment_plan"] = segment_plan
         update_resume_runtime_state(
             db,
             creation_task_id=task_db_id,
-            runtime_state={
-                "mode": str(mode),
-                "volume_no": int(volume_no),
-                "segment_start_chapter": int(segment_start_chapter),
-                "segment_end_chapter": int(segment_end_chapter),
-                "next_chapter": int(next_chapter),
-                "book_effective_end_chapter": int(book_effective_end_chapter),
-                "book_target_total_chapters": int(book_target_total_chapters),
-                "tail_rewrite_attempts": int(tail_rewrite_attempts or 0),
-                "bridge_attempts": int(bridge_attempts or 0),
-            },
+            runtime_state=runtime_state,
         )
         update_resume_cursor(
             db,
@@ -378,11 +412,15 @@ def _resolve_generation_resume(
         effective_book_end = int(runtime_state.get("book_effective_end_chapter") or book_end)
         next_chapter = int(runtime_state.get("next_chapter") or 0)
         current_volume_no = int(runtime_state.get("volume_no") or 0)
+        runtime_segment_start = int(runtime_state.get("segment_start_chapter") or 0)
         runtime_segment_end = int(runtime_state.get("segment_end_chapter") or 0)
+        retry_resume_chapter = int(runtime_state.get("retry_resume_chapter") or 0)
 
         if not next_chapter:
             cursor = row.resume_cursor_json if row and isinstance(row.resume_cursor_json, dict) else {}
             next_chapter = int(cursor.get("next") or task_start)
+        if retry_resume_chapter <= 0:
+            retry_resume_chapter = int(next_chapter)
         computed_volume_no = _volume_no_for_next_chapter(
             next_chapter=max(next_chapter, book_start),
             book_start_chapter=book_start,
@@ -390,6 +428,13 @@ def _resolve_generation_resume(
         )
         if current_volume_no <= 0 or (runtime_segment_end > 0 and next_chapter > runtime_segment_end):
             current_volume_no = computed_volume_no
+        segment_start, segment_end = _resolve_segment_window(
+            next_chapter=max(next_chapter, task_start),
+            runtime_segment_start=runtime_segment_start,
+            runtime_segment_end=runtime_segment_end,
+            book_effective_end_chapter=max(book_end, effective_book_end),
+            volume_size=volume_size,
+        )
 
         if runtime_mode == "completed":
             update_resume_cursor(
@@ -406,6 +451,9 @@ def _resolve_generation_resume(
                 book_target_total_chapters=book_total,
                 book_effective_end_chapter=max(book_end, effective_book_end),
                 current_volume_no=current_volume_no,
+                segment_start_chapter=segment_start,
+                segment_end_chapter=segment_end,
+                retry_resume_chapter=retry_resume_chapter,
                 mode="completed",
             )
         if runtime_mode == "book_final_review_pending":
@@ -423,6 +471,9 @@ def _resolve_generation_resume(
                 book_target_total_chapters=book_total,
                 book_effective_end_chapter=max(book_end, effective_book_end),
                 current_volume_no=current_volume_no,
+                segment_start_chapter=segment_start,
+                segment_end_chapter=segment_end,
+                retry_resume_chapter=retry_resume_chapter,
                 mode="book_final_review_pending",
             )
         if runtime_mode == "segment_running":
@@ -441,6 +492,9 @@ def _resolve_generation_resume(
                 book_target_total_chapters=book_total,
                 book_effective_end_chapter=max(book_end, effective_book_end),
                 current_volume_no=current_volume_no,
+                segment_start_chapter=segment_start,
+                segment_end_chapter=segment_end,
+                retry_resume_chapter=max(int(retry_resume_chapter or 0), int(resume_from)),
                 mode="segment_running",
             )
         last_completed = get_last_completed_unit(
@@ -469,6 +523,9 @@ def _resolve_generation_resume(
             book_target_total_chapters=book_total,
             book_effective_end_chapter=max(book_end, effective_book_end),
             current_volume_no=max(1, ((max(resume_from, book_start) - book_start) // max(int(volume_size or 1), 1)) + 1),
+            segment_start_chapter=int(resume_from),
+            segment_end_chapter=min(int(resume_from) + max(int(volume_size or 1) - 1, 0), max(book_end, effective_book_end)),
+            retry_resume_chapter=int(resume_from),
             mode="segment_running",
         )
     finally:
@@ -764,6 +821,9 @@ def submit_book_generation_task(
     next_chapter = int(start_chapter or 1)
     current_volume_no = 1
     volume_size = 30
+    current_segment_start = int(start_chapter or 1)
+    current_segment_end = current_segment_start + max(int(volume_size) - 1, 0)
+    retry_resume_chapter = int(start_chapter or 1)
 
     data: dict[str, Any] = {
         "status": "running",
@@ -821,6 +881,9 @@ def submit_book_generation_task(
             book_target_total_chapters = int(resume_plan.book_target_total_chapters)
             book_effective_end_chapter = int(resume_plan.book_effective_end_chapter)
             current_volume_no = int(resume_plan.current_volume_no or 1)
+            current_segment_start = int(resume_plan.segment_start_chapter)
+            current_segment_end = int(resume_plan.segment_end_chapter)
+            retry_resume_chapter = int(resume_plan.retry_resume_chapter or next_chapter)
             resume_mode = str(resume_plan.mode or "segment_running")
             if resume_mode == "completed" or next_chapter > book_effective_end_chapter:
                 done_data = {
@@ -922,8 +985,9 @@ def submit_book_generation_task(
             db = None
 
         while resume_mode == "segment_running" and next_chapter <= book_effective_end_chapter:
-            segment_start_chapter = int(next_chapter)
-            segment_end_chapter = min(segment_start_chapter + max(volume_size - 1, 0), book_effective_end_chapter)
+            segment_start_chapter = int(current_segment_start if current_segment_start > 0 else next_chapter)
+            segment_end_chapter = int(current_segment_end if current_segment_end >= segment_start_chapter else min(segment_start_chapter + max(volume_size - 1, 0), book_effective_end_chapter))
+            segment_end_chapter = min(segment_end_chapter, book_effective_end_chapter)
             segment_target_chapters = max(1, segment_end_chapter - segment_start_chapter + 1)
             announce = {
                 "status": "running",
@@ -953,16 +1017,19 @@ def submit_book_generation_task(
                 db.close()
                 db = None
             if creation_task_id is not None:
+                clear_segment_plan = segment_start_chapter == next_chapter
                 _persist_task_runtime_state(
                     creation_task_id,
                     mode="segment_running",
                     volume_no=current_volume_no,
                     segment_start_chapter=segment_start_chapter,
                     segment_end_chapter=segment_end_chapter,
-                    next_chapter=segment_start_chapter,
+                    next_chapter=next_chapter,
                     book_start_chapter=book_start_chapter,
                     book_target_total_chapters=book_target_total_chapters,
                     book_effective_end_chapter=book_effective_end_chapter,
+                    retry_resume_chapter=retry_resume_chapter,
+                    segment_plan=None if clear_segment_plan else _KEEP_RUNTIME_VALUE,
                 )
             _run_volume_generation(
                 novel_id=int(novel_id),
@@ -1002,7 +1069,9 @@ def submit_book_generation_task(
                     ),
                 )
                 next_chapter = int(runtime_state.get("next_chapter") or cursor.get("next") or (segment_end_chapter + 1))
+                retry_resume_chapter = int(runtime_state.get("retry_resume_chapter") or retry_resume_chapter or next_chapter)
                 runtime_segment_end = int(runtime_state.get("segment_end_chapter") or 0)
+                runtime_segment_start = int(runtime_state.get("segment_start_chapter") or 0)
                 computed_volume_no = _volume_no_for_next_chapter(
                     next_chapter=next_chapter,
                     book_start_chapter=book_start_chapter,
@@ -1011,6 +1080,13 @@ def submit_book_generation_task(
                 current_volume_no = int(runtime_state.get("volume_no") or 0)
                 if current_volume_no <= 0 or (runtime_segment_end > 0 and next_chapter > runtime_segment_end):
                     current_volume_no = computed_volume_no
+                current_segment_start, current_segment_end = _resolve_segment_window(
+                    next_chapter=next_chapter,
+                    runtime_segment_start=runtime_segment_start,
+                    runtime_segment_end=runtime_segment_end,
+                    book_effective_end_chapter=book_effective_end_chapter,
+                    volume_size=volume_size,
+                )
                 resume_mode = str(runtime_state.get("mode") or "segment_running")
             finally:
                 db.close()

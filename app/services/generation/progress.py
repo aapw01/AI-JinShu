@@ -70,6 +70,8 @@ def persist_resume_runtime_state(
     volume_no: int | None = None,
     tail_rewrite_attempts: int | None = None,
     bridge_attempts: int | None = None,
+    retry_resume_chapter: int | None = None,
+    segment_plan: dict[str, Any] | None = None,
 ) -> None:
     creation_task_id = state.get("creation_task_id")
     if not creation_task_id:
@@ -100,6 +102,18 @@ def persist_resume_runtime_state(
             bridge_attempts if bridge_attempts is not None else int(state.get("bridge_attempts") or 0)
         ),
     }
+    effective_retry_floor = retry_resume_chapter
+    if effective_retry_floor is None:
+        state_floor = state.get("retry_resume_chapter")
+        if state_floor is not None:
+            effective_retry_floor = int(state_floor)
+    if effective_retry_floor is not None:
+        runtime_state["retry_resume_chapter"] = int(effective_retry_floor)
+    effective_segment_plan = segment_plan
+    if effective_segment_plan is None and isinstance(state.get("segment_plan"), dict):
+        effective_segment_plan = dict(state["segment_plan"])
+    if effective_segment_plan is not None:
+        runtime_state["segment_plan"] = effective_segment_plan
     db = SessionLocal()
     try:
         update_resume_runtime_state(db, creation_task_id=int(creation_task_id), runtime_state=runtime_state)

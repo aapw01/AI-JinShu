@@ -1,6 +1,8 @@
 """Finalize node — polishes draft, persists chapter, and commits all artifacts."""
 from __future__ import annotations
 
+import re
+
 from sqlalchemy import select
 
 from app.core.constants import DEFAULT_CHAPTER_WORD_COUNT
@@ -25,6 +27,83 @@ from app.services.generation.heuristics import aesthetic_score, chapter_progress
 from app.services.generation.policies import PacingController, PacingInput
 from app.services.generation.progress import chapter_progress, persist_resume_runtime_state, progress
 from app.services.generation.state import GenerationState
+
+_SENTENCE_SPLIT_RE = re.compile(r"[。！？!?；;…]+")
+
+
+def _paragraph_fragmentation_metrics(content: str) -> dict[str, float]:
+    paragraphs = [part.strip() for part in str(content or "").split("\n\n") if part.strip()]
+    if not paragraphs:
+        return {
+            "paragraph_count": 0,
+            "avg_paragraph_len": 0.0,
+            "short_paragraph_ratio": 0.0,
+            "single_sentence_ratio": 0.0,
+        }
+    paragraph_lengths = [len(paragraph.replace("\n", "")) for paragraph in paragraphs]
+    short_count = sum(1 for length in paragraph_lengths if length < 25)
+    single_sentence_count = 0
+    for paragraph in paragraphs:
+        sentence_count = len([part for part in _SENTENCE_SPLIT_RE.split(paragraph) if part.strip()])
+        if sentence_count <= 1:
+            single_sentence_count += 1
+    total = len(paragraphs)
+    return {
+        "paragraph_count": float(total),
+        "avg_paragraph_len": round(sum(paragraph_lengths) / total, 2),
+        "short_paragraph_ratio": round(short_count / total, 4),
+        "single_sentence_ratio": round(single_sentence_count / total, 4),
+    }
+
+
+def _should_compact_paragraphs(metrics: dict[str, float]) -> bool:
+    paragraph_count = int(metrics.get("paragraph_count") or 0)
+    avg_len = float(metrics.get("avg_paragraph_len") or 0.0)
+    short_ratio = float(metrics.get("short_paragraph_ratio") or 0.0)
+    single_ratio = float(metrics.get("single_sentence_ratio") or 0.0)
+    if paragraph_count < 18:
+        return False
+    if short_ratio >= 0.3:
+        return True
+    if single_ratio >= 0.45:
+        return True
+    return avg_len > 0 and avg_len < 42
+
+
+def _paragraph_compaction_feedback(metrics: dict[str, float]) -> str:
+    return (
+        "【段落整理】当前正文存在碎段过多问题，请在不改剧情与人物动机的前提下整理段落。\n"
+        f"- 当前段落数：{int(metrics.get('paragraph_count') or 0)}\n"
+        f"- 平均段长：{float(metrics.get('avg_paragraph_len') or 0.0):.1f}\n"
+        f"- 超短段比例：{float(metrics.get('short_paragraph_ratio') or 0.0):.2%}\n"
+        f"- 单句段比例：{float(metrics.get('single_sentence_ratio') or 0.0):.2%}\n"
+        "要求：\n"
+        "1. 合并没有必要拆开的超短段与连续情绪/动作碎段。\n"
+        "2. 保留快节奏、对话张力和章末钩子，不要改剧情走向。\n"
+        "3. 允许少量单句段强调，但不要泛滥。\n"
+        "4. 不要补写新剧情，只整理段落层次。"
+    )
+
+
+def _is_structural_replan(state: GenerationState) -> bool:
+    segment_plan = state.get("segment_plan")
+    if not isinstance(segment_plan, dict):
+        return False
+    plan_kind = str(segment_plan.get("plan_kind") or "normal")
+    return plan_kind in {"tail_rewrite", "bridge", "volume_replan"}
+
+
+def _ensure_retry_write_allowed(state: GenerationState, chapter_num: int) -> None:
+    retry_floor = int(state.get("retry_resume_chapter") or 0)
+    if retry_floor <= 0:
+        return
+    if chapter_num >= retry_floor:
+        return
+    if _is_structural_replan(state):
+        return
+    raise RuntimeError(
+        f"generation retry overwrite blocked: chapter={chapter_num} retry_resume_chapter={retry_floor}"
+    )
 
 
 def node_finalize(state: GenerationState) -> GenerationState:
@@ -63,6 +142,25 @@ def node_finalize(state: GenerationState) -> GenerationState:
             feedback_for_attempt = (
                 f"{base_feedback}\n\n{format_guardrail}" if base_feedback else format_guardrail
             )
+    final_content = normalize_chapter_content(final_content)
+    fragment_metrics = _paragraph_fragmentation_metrics(final_content)
+    if _should_compact_paragraphs(fragment_metrics):
+        try:
+            compaction_feedback = _paragraph_compaction_feedback(fragment_metrics)
+            final_content = normalize_chapter_content(
+                state["finalizer"].run(
+                    final_content,
+                    compaction_feedback,
+                    state["target_language"],
+                    f_provider,
+                    f_model,
+                    DEFAULT_CHAPTER_WORD_COUNT,
+                ).strip()
+            )
+        except Exception:
+            from app.services.generation.common import logger
+
+            logger.warning("finalizer paragraph compaction skipped after failure", exc_info=True)
     extracted_facts = state["fact_extractor"].run(
         chapter_num=chapter_num,
         content=final_content,
@@ -72,7 +170,6 @@ def node_finalize(state: GenerationState) -> GenerationState:
         model=f_model,
         inference=fact_inference,
     )
-    final_content = normalize_chapter_content(final_content)
     language_score, language_report = evaluate_language_quality(final_content, state["target_language"])
     aesthetic_score_val = aesthetic_score(final_content)
     chapter_title = resolve_chapter_title(
@@ -128,6 +225,7 @@ def node_finalize(state: GenerationState) -> GenerationState:
             ChapterVersion.chapter_num == chapter_num,
         )
         existing = db.execute(existing_stmt).scalar_one_or_none()
+        _ensure_retry_write_allowed(state, chapter_num)
         revision_count = state.get("review_attempt", 0) + 1 + (state.get("rerun_count", 0) * (MAX_RETRIES + 1))
         payload = {
             "title": chapter_title,
@@ -248,6 +346,7 @@ def node_finalize(state: GenerationState) -> GenerationState:
             segment_end_chapter=int(state.get("segment_end_chapter") or state.get("end_chapter") or chapter_num),
             book_effective_end_chapter=int(state.get("book_effective_end_chapter") or state.get("end_chapter") or chapter_num),
             volume_no=int(state.get("volume_no") or 1),
+            retry_resume_chapter=int(state.get("retry_resume_chapter") or chapter_num + 1),
         )
     factual_score = float(state.get("factual_score", 0.0) or 0.0)
     reviewer_aesthetic = float(state.get("aesthetic_review_score", 0.0) or 0.0)

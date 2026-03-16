@@ -317,6 +317,12 @@ def resume_task(db: Session, *, public_id: str, user_uuid: str) -> CreationTask:
     if next_unit is not None:
         resume_msg = f"任务已恢复并重新入队，将从第{int(next_unit)}章继续"
     transition_task_status(db, task=task, to_status="queued", phase="queued", message=resume_msg)
+    payload = dict(task.resume_cursor_json) if isinstance(task.resume_cursor_json, dict) else {}
+    runtime_state = dict(payload.get("runtime_state")) if isinstance(payload.get("runtime_state"), dict) else {}
+    if next_unit is not None:
+        runtime_state["retry_resume_chapter"] = int(next_unit)
+    payload["runtime_state"] = runtime_state
+    task.resume_cursor_json = payload
     task.worker_task_id = None
     task.worker_lease_expires_at = None
     if old_status == "failed" and task.retry_count < task.max_retries:
