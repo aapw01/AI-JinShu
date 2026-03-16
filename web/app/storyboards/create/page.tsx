@@ -12,7 +12,7 @@ import {
 } from "@/lib/api";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
-import { ErrorDialog } from "@/components/ui/ErrorDialog";
+import { ErrorDialog } from "@/components/ui";
 import { Select } from "@/components/ui/Select";
 
 function StoryboardCreateForm() {

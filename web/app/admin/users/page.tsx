@@ -24,6 +24,7 @@ import {
     formatUserStatus,
     formatPlanKey,
 } from "@/lib/display";
+import { ConfirmModal, ErrorDialog, Modal } from "@/components/ui";
 import { Select } from "@/components/ui/Select";
 
 // ─── helpers ───────────────────────────────────────────────────────────
@@ -139,59 +140,13 @@ function QuotaEditor({
     };
 
     return (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={onClose}>
-            <div
-                className="w-full max-w-md mx-4 rounded-2xl bg-white border border-[#E6DED6] shadow-[0_24px_64px_rgba(31,27,24,0.2)] p-6"
-                onClick={(e) => e.stopPropagation()}
-            >
-                <div className="flex items-center justify-between mb-5">
-                    <h3 className="text-lg font-semibold text-[#1F1B18]">调整限额</h3>
-                    <button type="button" onClick={onClose} className="p-1 rounded-lg hover:bg-[#F2EEEA] text-[#8B8379]">
-                        <X className="w-5 h-5" />
-                    </button>
-                </div>
-
-                <p className="text-sm text-[#6B635D] mb-4 truncate">
-                    用户：{user.email}
-                </p>
-
-                <div className="space-y-4">
-                    <div>
-                        <label className="block text-sm font-medium text-[#3E3833] mb-1">最大并发任务数</label>
-                        <input
-                            type="number"
-                            min={1}
-                            max={100}
-                            value={maxConcurrent}
-                            onChange={(e) => setMaxConcurrent(e.target.value)}
-                            className="w-full h-10 px-3 rounded-[10px] border border-[#DDD8D3] text-sm text-[#1F1B18] focus:outline-none focus:ring-2 focus:ring-[#C8211B]/20 focus:border-[#C8211B]"
-                        />
-                    </div>
-                    <div>
-                        <label className="block text-sm font-medium text-[#3E3833] mb-1">月章节限额</label>
-                        <input
-                            type="number"
-                            min={0}
-                            value={chapterLimit}
-                            onChange={(e) => setChapterLimit(e.target.value)}
-                            className="w-full h-10 px-3 rounded-[10px] border border-[#DDD8D3] text-sm text-[#1F1B18] focus:outline-none focus:ring-2 focus:ring-[#C8211B]/20 focus:border-[#C8211B]"
-                        />
-                    </div>
-                    <div>
-                        <label className="block text-sm font-medium text-[#3E3833] mb-1">月 Token 限额</label>
-                        <input
-                            type="number"
-                            min={0}
-                            value={tokenLimit}
-                            onChange={(e) => setTokenLimit(e.target.value)}
-                            className="w-full h-10 px-3 rounded-[10px] border border-[#DDD8D3] text-sm text-[#1F1B18] focus:outline-none focus:ring-2 focus:ring-[#C8211B]/20 focus:border-[#C8211B]"
-                        />
-                    </div>
-                </div>
-
-                {error ? <p className="mt-3 text-sm text-red-600">{error}</p> : null}
-
-                <div className="flex justify-end gap-3 mt-6">
+        <Modal
+            open
+            onClose={onClose}
+            title="调整限额"
+            maxWidthClassName="max-w-md"
+            footer={
+                <>
                     <button
                         type="button"
                         onClick={onClose}
@@ -208,9 +163,49 @@ function QuotaEditor({
                         <Save className="w-4 h-4" />
                         {saving ? "保存中..." : "保存"}
                     </button>
+                </>
+            }
+        >
+            <p className="text-sm text-[#6B635D] mb-4 truncate">
+                用户：{user.email}
+            </p>
+
+            <div className="space-y-4">
+                <div>
+                    <label className="block text-sm font-medium text-[#3E3833] mb-1">最大并发任务数</label>
+                    <input
+                        type="number"
+                        min={1}
+                        max={100}
+                        value={maxConcurrent}
+                        onChange={(e) => setMaxConcurrent(e.target.value)}
+                        className="w-full h-10 px-3 rounded-[10px] border border-[#DDD8D3] text-sm text-[#1F1B18] focus:outline-none focus:ring-2 focus:ring-[#C8211B]/20 focus:border-[#C8211B]"
+                    />
+                </div>
+                <div>
+                    <label className="block text-sm font-medium text-[#3E3833] mb-1">月章节限额</label>
+                    <input
+                        type="number"
+                        min={0}
+                        value={chapterLimit}
+                        onChange={(e) => setChapterLimit(e.target.value)}
+                        className="w-full h-10 px-3 rounded-[10px] border border-[#DDD8D3] text-sm text-[#1F1B18] focus:outline-none focus:ring-2 focus:ring-[#C8211B]/20 focus:border-[#C8211B]"
+                    />
+                </div>
+                <div>
+                    <label className="block text-sm font-medium text-[#3E3833] mb-1">月 Token 限额</label>
+                    <input
+                        type="number"
+                        min={0}
+                        value={tokenLimit}
+                        onChange={(e) => setTokenLimit(e.target.value)}
+                        className="w-full h-10 px-3 rounded-[10px] border border-[#DDD8D3] text-sm text-[#1F1B18] focus:outline-none focus:ring-2 focus:ring-[#C8211B]/20 focus:border-[#C8211B]"
+                    />
                 </div>
             </div>
-        </div>
+
+            {error ? <p className="mt-3 text-sm text-red-600">{error}</p> : null}
+        </Modal>
     );
 }
 
@@ -235,6 +230,8 @@ export default function AdminUsersPage() {
 
     // action in‑progress tracking
     const [actionLoading, setActionLoading] = useState<string | null>(null);
+    const [pendingStatusUser, setPendingStatusUser] = useState<AdminUserListItem | null>(null);
+    const [actionErrorMessage, setActionErrorMessage] = useState("");
 
     // ── auth check ──
     useEffect(() => {
@@ -293,18 +290,23 @@ export default function AdminUsersPage() {
 
     // ── actions ──
     const handleToggleStatus = async (u: AdminUserListItem) => {
-        const action = u.status === "disabled" ? "启用" : "禁用";
-        if (!confirm(`确定要${action}用户 ${u.email} 吗？`)) return;
-        setActionLoading(u.uuid);
+        setPendingStatusUser(u);
+    };
+
+    const confirmToggleStatus = async () => {
+        if (!pendingStatusUser) return;
+        const user = pendingStatusUser;
+        setActionLoading(user.uuid);
         try {
-            if (u.status === "disabled") {
-                await api.enableAdminUser(u.uuid);
+            if (user.status === "disabled") {
+                await api.enableAdminUser(user.uuid);
             } else {
-                await api.disableAdminUser(u.uuid);
+                await api.disableAdminUser(user.uuid);
             }
+            setPendingStatusUser(null);
             await loadUsers();
         } catch (err) {
-            alert(getErrorMessage(err));
+            setActionErrorMessage(getErrorMessage(err));
         } finally {
             setActionLoading(null);
         }
@@ -516,6 +518,25 @@ export default function AdminUsersPage() {
                     }}
                 />
             ) : null}
+            <ConfirmModal
+                open={Boolean(pendingStatusUser)}
+                onClose={() => setPendingStatusUser(null)}
+                onConfirm={() => void confirmToggleStatus()}
+                title={`${pendingStatusUser?.status === "disabled" ? "启用" : "禁用"}用户`}
+                message={
+                    pendingStatusUser
+                        ? `确定要${pendingStatusUser.status === "disabled" ? "启用" : "禁用"}用户 ${pendingStatusUser.email} 吗？`
+                        : ""
+                }
+                confirmText={pendingStatusUser?.status === "disabled" ? "确认启用" : "确认禁用"}
+                confirmVariant={pendingStatusUser?.status === "disabled" ? "primary" : "destructive"}
+                loading={Boolean(actionLoading)}
+            />
+            <ErrorDialog
+                open={Boolean(actionErrorMessage)}
+                message={actionErrorMessage}
+                onClose={() => setActionErrorMessage("")}
+            />
         </main>
     );
 }

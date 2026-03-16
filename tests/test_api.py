@@ -187,20 +187,28 @@ def test_generation_status_terminal_state_ignores_stale_redis_progress(client, m
             phase="completed",
             progress=100.0,
             message="db completed",
-            payload_json={"novel_id": int(novel.id), "start_chapter": 1, "num_chapters": 15},
+            payload_json={
+                "novel_id": int(novel.id),
+                "start_chapter": 1,
+                "num_chapters": 15,
+                "book_start_chapter": 1,
+                "book_target_total_chapters": 15,
+            },
             resume_cursor_json={
                 "unit_type": "chapter",
                 "partition": None,
                 "last_completed": 16,
                 "next": 17,
                 "runtime_state": {
-                    "node": "final_book_review",
-                    "resume_from_chapter": 17,
-                    "effective_end_chapter": 16,
-                    "effective_total_chapters": 16,
+                    "mode": "completed",
+                    "volume_no": 1,
+                    "segment_start_chapter": 1,
+                    "segment_end_chapter": 16,
+                    "next_chapter": 17,
+                    "book_effective_end_chapter": 16,
+                    "book_target_total_chapters": 15,
                     "tail_rewrite_attempts": 2,
                     "bridge_attempts": 1,
-                    "terminal": True,
                 },
             },
         )
@@ -255,20 +263,28 @@ def test_generation_status_prefers_resume_cursor_after_chapter_done(client, monk
             status="running",
             phase="chapter_done",
             progress=38.0,
-            payload_json={"novel_id": int(novel.id), "start_chapter": 1, "num_chapters": 15},
+            payload_json={
+                "novel_id": int(novel.id),
+                "start_chapter": 1,
+                "num_chapters": 15,
+                "book_start_chapter": 1,
+                "book_target_total_chapters": 15,
+            },
             resume_cursor_json={
                 "unit_type": "chapter",
                 "partition": None,
                 "last_completed": 1,
                 "next": 2,
                 "runtime_state": {
-                    "node": "chapter_loop",
-                    "resume_from_chapter": 2,
-                    "effective_end_chapter": 15,
-                    "effective_total_chapters": 15,
+                    "mode": "segment_running",
+                    "volume_no": 1,
+                    "segment_start_chapter": 1,
+                    "segment_end_chapter": 15,
+                    "next_chapter": 2,
+                    "book_effective_end_chapter": 15,
+                    "book_target_total_chapters": 15,
                     "tail_rewrite_attempts": 0,
                     "bridge_attempts": 0,
-                    "terminal": False,
                 },
             },
         )
@@ -653,20 +669,28 @@ def test_chapter_progress_uses_creation_task_resume_cursor_when_redis_missing(cl
                 resource_type="novel",
                 resource_id=int(novel.id),
                 status="running",
-                payload_json={"novel_id": int(novel.id), "start_chapter": 1, "num_chapters": 3},
+                payload_json={
+                    "novel_id": int(novel.id),
+                    "start_chapter": 1,
+                    "num_chapters": 3,
+                    "book_start_chapter": 1,
+                    "book_target_total_chapters": 3,
+                },
                 resume_cursor_json={
                     "unit_type": "chapter",
                     "partition": None,
                     "last_completed": 1,
                     "next": 2,
                     "runtime_state": {
-                        "node": "chapter_loop",
-                        "resume_from_chapter": 2,
-                        "effective_end_chapter": 3,
-                        "effective_total_chapters": 3,
+                        "mode": "segment_running",
+                        "volume_no": 1,
+                        "segment_start_chapter": 1,
+                        "segment_end_chapter": 3,
+                        "next_chapter": 2,
+                        "book_effective_end_chapter": 3,
+                        "book_target_total_chapters": 3,
                         "tail_rewrite_attempts": 0,
                         "bridge_attempts": 0,
-                        "terminal": False,
                     },
                 },
             )
@@ -741,20 +765,28 @@ def test_generation_tasks_list_prefers_resume_cursor_after_chapter_done(client, 
             status="running",
             phase="chapter_done",
             progress=42.0,
-            payload_json={"novel_id": int(novel.id), "start_chapter": 1, "num_chapters": 15},
+            payload_json={
+                "novel_id": int(novel.id),
+                "start_chapter": 1,
+                "num_chapters": 15,
+                "book_start_chapter": 1,
+                "book_target_total_chapters": 15,
+            },
             resume_cursor_json={
                 "unit_type": "chapter",
                 "partition": None,
                 "last_completed": 1,
                 "next": 2,
                 "runtime_state": {
-                    "node": "chapter_loop",
-                    "resume_from_chapter": 2,
-                    "effective_end_chapter": 15,
-                    "effective_total_chapters": 15,
+                    "mode": "segment_running",
+                    "volume_no": 1,
+                    "segment_start_chapter": 1,
+                    "segment_end_chapter": 15,
+                    "next_chapter": 2,
+                    "book_effective_end_chapter": 15,
+                    "book_target_total_chapters": 15,
                     "tail_rewrite_attempts": 0,
                     "bridge_attempts": 0,
-                    "terminal": False,
                 },
             },
         )
@@ -906,3 +938,262 @@ def test_observability_endpoint(client):
     assert "checkpoints" in data
     assert "closure_action_oscillation_rate" in data["summary"]
     assert "abrupt_ending_risk" in data["summary"]
+
+
+def test_generation_status_reads_public_snapshot_instead_of_worker_snapshot(client, monkeypatch):
+    created = client.post("/api/novels", json={"title": "Status Snapshot Source", "target_language": "zh"})
+    assert created.status_code == 200
+    novel_id = created.json()["id"]
+
+    db = SessionLocal()
+    try:
+        novel = resolve_novel(db, novel_id)
+        assert novel is not None
+        row = CreationTask(
+            user_uuid="test-admin-user",
+            task_type="generation",
+            resource_type="novel",
+            resource_id=int(novel.id),
+            status="running",
+            phase="chapter_writing",
+            progress=12.0,
+            worker_task_id="worker-status-stale",
+            payload_json={
+                "novel_id": int(novel.id),
+                "start_chapter": 1,
+                "num_chapters": 200,
+                "book_start_chapter": 1,
+                "book_target_total_chapters": 200,
+            },
+            resume_cursor_json={
+                "next": 5,
+                "runtime_state": {
+                    "mode": "segment_running",
+                    "volume_no": 1,
+                    "segment_start_chapter": 1,
+                    "segment_end_chapter": 30,
+                    "next_chapter": 5,
+                    "book_effective_end_chapter": 200,
+                    "book_target_total_chapters": 200,
+                },
+            },
+        )
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        task_id = row.public_id
+    finally:
+        db.close()
+
+    seen_keys: list[str] = []
+
+    def fake_get(key: str):
+        seen_keys.append(key)
+        if key.endswith(task_id):
+            return {
+                "status": "running",
+                "run_state": "running",
+                "current_phase": "chapter_writing",
+                "step": "chapter_writing",
+                "current_chapter": 5,
+                "total_chapters": 200,
+                "progress": 12,
+                "message": "public snapshot",
+            }
+        if key.endswith("worker-status-stale"):
+            return {
+                "status": "running",
+                "run_state": "running",
+                "current_phase": "chapter_writing",
+                "step": "chapter_writing",
+                "current_chapter": 1,
+                "total_chapters": 200,
+                "progress": 12,
+                "message": "worker stale snapshot",
+            }
+        return None
+
+    monkeypatch.setattr("app.api.routes.generation._redis_get_json", fake_get)
+    resp = client.get(f"/api/novels/{novel_id}/generation/status?task_id={task_id}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["current_chapter"] == 5
+    assert body["total_chapters"] == 200
+    assert seen_keys == [f"generation:{task_id}"]
+
+
+def test_generation_tasks_list_reads_public_snapshot_instead_of_worker_snapshot(client, monkeypatch):
+    created = client.post("/api/novels", json={"title": "Task List Snapshot Source", "target_language": "zh"})
+    assert created.status_code == 200
+    novel_id = created.json()["id"]
+
+    db = SessionLocal()
+    try:
+        novel = resolve_novel(db, novel_id)
+        assert novel is not None
+        row = CreationTask(
+            user_uuid="test-admin-user",
+            task_type="generation",
+            resource_type="novel",
+            resource_id=int(novel.id),
+            status="running",
+            phase="chapter_writing",
+            progress=18.0,
+            worker_task_id="worker-list-stale",
+            payload_json={
+                "novel_id": int(novel.id),
+                "start_chapter": 1,
+                "num_chapters": 200,
+                "book_start_chapter": 1,
+                "book_target_total_chapters": 200,
+            },
+            resume_cursor_json={
+                "next": 5,
+                "runtime_state": {
+                    "mode": "segment_running",
+                    "volume_no": 1,
+                    "segment_start_chapter": 1,
+                    "segment_end_chapter": 30,
+                    "next_chapter": 5,
+                    "book_effective_end_chapter": 200,
+                    "book_target_total_chapters": 200,
+                },
+            },
+        )
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        task_id = row.public_id
+    finally:
+        db.close()
+
+    def fake_get(key: str):
+        if key.endswith(task_id):
+            return {
+                "status": "running",
+                "run_state": "running",
+                "current_phase": "chapter_writing",
+                "step": "chapter_writing",
+                "current_chapter": 5,
+                "total_chapters": 200,
+                "progress": 18,
+                "message": "public snapshot",
+            }
+        if key.endswith("worker-list-stale"):
+            return {
+                "status": "running",
+                "run_state": "running",
+                "current_phase": "chapter_writing",
+                "step": "chapter_writing",
+                "current_chapter": 1,
+                "total_chapters": 200,
+                "progress": 18,
+                "message": "worker stale snapshot",
+            }
+        return None
+
+    monkeypatch.setattr("app.api.routes.generation._redis_get_json", fake_get)
+    resp = client.get(f"/api/novels/{novel_id}/generation/tasks")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body[0]["current_chapter"] == 5
+    assert body[0]["total_chapters"] == 200
+
+
+def test_chapter_progress_uses_active_task_snapshot_not_novel_cache(client, monkeypatch):
+    created = client.post("/api/novels", json={"title": "Chapter Progress Snapshot", "target_language": "zh"})
+    assert created.status_code == 200
+    novel_id = created.json()["id"]
+    version_id: int | None = None
+    task_id: str | None = None
+
+    db = SessionLocal()
+    try:
+        novel = resolve_novel(db, novel_id)
+        assert novel is not None
+        version = db.execute(
+            select(NovelVersion).where(
+                NovelVersion.novel_id == novel.id,
+                NovelVersion.is_default == 1,
+            )
+        ).scalar_one()
+        version_id = int(version.id)
+        db.add_all(
+            [
+                ChapterOutline(novel_id=novel.id, novel_version_id=version_id, chapter_num=1, title="第1章"),
+                ChapterOutline(novel_id=novel.id, novel_version_id=version_id, chapter_num=2, title="第2章"),
+                ChapterOutline(novel_id=novel.id, novel_version_id=version_id, chapter_num=3, title="第3章"),
+                ChapterOutline(novel_id=novel.id, novel_version_id=version_id, chapter_num=4, title="第4章"),
+                ChapterOutline(novel_id=novel.id, novel_version_id=version_id, chapter_num=5, title="第5章"),
+            ]
+        )
+        row = CreationTask(
+            user_uuid="test-admin-user",
+            task_type="generation",
+            resource_type="novel",
+            resource_id=int(novel.id),
+            status="running",
+            phase="chapter_writing",
+            progress=22.0,
+            worker_task_id="worker-progress-stale",
+            payload_json={
+                "novel_id": int(novel.id),
+                "start_chapter": 1,
+                "num_chapters": 5,
+                "book_start_chapter": 1,
+                "book_target_total_chapters": 5,
+            },
+            resume_cursor_json={
+                "next": 5,
+                "runtime_state": {
+                    "mode": "segment_running",
+                    "volume_no": 1,
+                    "segment_start_chapter": 1,
+                    "segment_end_chapter": 5,
+                    "next_chapter": 5,
+                    "book_effective_end_chapter": 5,
+                    "book_target_total_chapters": 5,
+                },
+            },
+        )
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        task_id = row.public_id
+    finally:
+        db.close()
+
+    def should_not_call(_novel_id: int):
+        raise AssertionError("chapter-progress should not read novel redis cache")
+
+    monkeypatch.setattr("app.api.routes.chapters._get_generating_chapter_from_redis", should_not_call)
+
+    def fake_read_generation_cache(key: str):
+        if key.endswith(task_id or ""):
+            return {
+                "status": "running",
+                "run_state": "running",
+                "current_phase": "chapter_writing",
+                "step": "chapter_writing",
+                "current_chapter": 5,
+                "total_chapters": 5,
+                "progress": 22,
+            }
+        if key.endswith(str(novel_id)):
+            return {
+                "status": "running",
+                "run_state": "running",
+                "current_phase": "chapter_writing",
+                "step": "chapter_writing",
+                "current_chapter": 1,
+                "total_chapters": 5,
+                "progress": 22,
+            }
+        return None
+
+    monkeypatch.setattr("app.services.generation.status_snapshot.read_generation_cache", fake_read_generation_cache)
+    assert version_id is not None
+    resp = client.get(f"/api/novels/{novel_id}/chapter-progress?version_id={version_id}")
+    assert resp.status_code == 200
+    by_num = {int(item["chapter_num"]): item for item in resp.json()}
+    assert by_num[5]["status"] == "generating"

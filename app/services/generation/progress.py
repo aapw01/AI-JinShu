@@ -11,8 +11,11 @@ from app.services.task_runtime.checkpoint_repo import update_resume_runtime_stat
 
 
 def volume_no_for_chapter(state: GenerationState, chapter: int) -> int:
+    explicit = int(state.get("volume_no") or 0)
+    if explicit > 0:
+        return explicit
     volume_size = max(int(state.get("volume_size") or 30), 1)
-    start = state.get("start_chapter") or 1
+    start = state.get("book_start_chapter") or state.get("start_chapter") or 1
     offset = max(0, chapter - start)
     return (offset // volume_size) + 1
 
@@ -44,8 +47,14 @@ def progress(state: GenerationState, step: str, chapter: int, pct: float, msg: s
     pct = max(pct, float(state.get("_last_reported_progress") or 0.0))
     state["_last_reported_progress"] = pct
     if cb:
+        book_total = max(
+            int(state.get("book_effective_end_chapter") or 0),
+            int(payload.get("total_chapters") or 0),
+        )
+        if book_total > 0:
+            payload["total_chapters"] = book_total
         if chapter > 0:
-            payload.setdefault("volume_no", volume_no_for_chapter(state, chapter))
+            payload["volume_no"] = volume_no_for_chapter(state, chapter)
             payload.setdefault("volume_size", int(state.get("volume_size") or 30))
         cb(step, chapter, pct, msg, payload)
 
@@ -53,33 +62,43 @@ def progress(state: GenerationState, step: str, chapter: int, pct: float, msg: s
 def persist_resume_runtime_state(
     state: GenerationState,
     *,
-    node: str,
-    resume_from_chapter: int,
-    effective_end_chapter: int,
-    effective_total_chapters: int | None = None,
-    terminal: bool = False,
+    mode: str,
+    next_chapter: int,
+    segment_start_chapter: int | None = None,
+    segment_end_chapter: int | None = None,
+    book_effective_end_chapter: int | None = None,
+    volume_no: int | None = None,
     tail_rewrite_attempts: int | None = None,
     bridge_attempts: int | None = None,
 ) -> None:
     creation_task_id = state.get("creation_task_id")
     if not creation_task_id:
         return
-    total_chapters = max(
-        int(effective_end_chapter),
-        int(effective_total_chapters) if effective_total_chapters is not None else 0,
-    )
     runtime_state: dict[str, Any] = {
-        "node": str(node),
-        "resume_from_chapter": int(resume_from_chapter),
-        "effective_end_chapter": int(effective_end_chapter),
-        "effective_total_chapters": int(total_chapters),
+        "mode": str(mode),
+        "volume_no": int(volume_no if volume_no is not None else int(state.get("volume_no") or 1)),
+        "segment_start_chapter": int(
+            segment_start_chapter if segment_start_chapter is not None else int(state.get("segment_start_chapter") or state.get("start_chapter") or 1)
+        ),
+        "segment_end_chapter": int(
+            segment_end_chapter if segment_end_chapter is not None else int(state.get("segment_end_chapter") or state.get("end_chapter") or 0)
+        ),
+        "next_chapter": int(next_chapter),
+        "book_effective_end_chapter": int(
+            book_effective_end_chapter if book_effective_end_chapter is not None else int(state.get("book_effective_end_chapter") or state.get("end_chapter") or 0)
+        ),
+        "book_target_total_chapters": int(
+            state.get("book_target_total_chapters")
+            or state.get("target_chapters")
+            or state.get("num_chapters")
+            or 0
+        ),
         "tail_rewrite_attempts": int(
             tail_rewrite_attempts if tail_rewrite_attempts is not None else int(state.get("tail_rewrite_attempts") or 0)
         ),
         "bridge_attempts": int(
             bridge_attempts if bridge_attempts is not None else int(state.get("bridge_attempts") or 0)
         ),
-        "terminal": bool(terminal),
     }
     db = SessionLocal()
     try:
@@ -93,8 +112,11 @@ def persist_resume_runtime_state(
 
 
 def chapter_progress(state: GenerationState, phase_ratio: float) -> float:
-    total = max(state["num_chapters"], 1)
-    idx = max(0, state["current_chapter"] - state["start_chapter"])
+    total = max(
+        int(state.get("book_effective_end_chapter") or 0) - int(state.get("book_start_chapter") or 1) + 1,
+        1,
+    )
+    idx = max(0, int(state["current_chapter"]) - int(state.get("book_start_chapter") or 1))
     base_pct = 20 + (idx / total) * 70
     span = 70 / total
     raw = base_pct + span * phase_ratio
@@ -103,9 +125,8 @@ def chapter_progress(state: GenerationState, phase_ratio: float) -> float:
 
 
 def is_volume_start(state: GenerationState, chapter: int) -> bool:
-    volume_size = max(int(state.get("volume_size") or 30), 1)
-    start = state.get("start_chapter") or 1
-    return (chapter - start) % volume_size == 0
+    segment_start = int(state.get("segment_start_chapter") or state.get("start_chapter") or 1)
+    return int(chapter) == segment_start
 
 
 def closure_phase_mode(remaining_ratio: float) -> str:

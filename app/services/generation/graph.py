@@ -59,7 +59,7 @@ def _route_review(state: GenerationState) -> str:
 
 def _route_after_confirmation(state: GenerationState) -> str:
     if state["current_chapter"] > state["end_chapter"]:
-        return "final_book_review"
+        return "segment_done"
     return "volume_replan" if is_volume_start(state, state["current_chapter"]) else "load_context"
 
 
@@ -78,13 +78,13 @@ def _route_after_closure_gate(state: GenerationState) -> str:
     if action == "bridge_chapter":
         return "bridge_chapter"
     if state["current_chapter"] > state["end_chapter"]:
-        return "final_book_review"
+        return "segment_done"
     return "volume_replan" if is_volume_start(state, state["current_chapter"]) else "load_context"
 
 
 def _route_after_tail_rewrite(state: GenerationState) -> str:
     if state["current_chapter"] > state["end_chapter"]:
-        return "final_book_review"
+        return "segment_done"
     return "volume_replan" if is_volume_start(state, state["current_chapter"]) else "load_context"
 
 
@@ -181,7 +181,7 @@ def _build_generation_graph():
     graph.add_edge("init", "prewrite")
     graph.add_edge("prewrite", "outline")
     graph.add_edge("outline", "confirmation_gate")
-    graph.add_conditional_edges("confirmation_gate", _route_after_confirmation, {"volume_replan": "volume_replan", "load_context": "load_context", "final_book_review": "final_book_review"})
+    graph.add_conditional_edges("confirmation_gate", _route_after_confirmation, {"volume_replan": "volume_replan", "load_context": "load_context", "segment_done": END})
     graph.add_edge("volume_replan", "load_context")
     graph.add_edge("load_context", "consistency_check")
     graph.add_conditional_edges("consistency_check", _route_consistency, {"save_blocked": "save_blocked", "beats": "beats"})
@@ -193,9 +193,9 @@ def _build_generation_graph():
     graph.add_edge("rollback_rerun", "writer")
     graph.add_conditional_edges("finalizer", _route_finalize, {"rollback_rerun": "rollback_rerun", "advance_chapter": "advance_chapter"})
     graph.add_edge("advance_chapter", "closure_gate")
-    graph.add_conditional_edges("closure_gate", _route_after_closure_gate, {"volume_replan": "volume_replan", "load_context": "load_context", "bridge_chapter": "bridge_chapter", "tail_rewrite": "tail_rewrite", "final_book_review": "final_book_review"})
-    graph.add_conditional_edges("bridge_chapter", _route_after_tail_rewrite, {"volume_replan": "volume_replan", "load_context": "load_context", "final_book_review": "final_book_review"})
-    graph.add_conditional_edges("tail_rewrite", _route_after_tail_rewrite, {"volume_replan": "volume_replan", "load_context": "load_context", "final_book_review": "final_book_review"})
+    graph.add_conditional_edges("closure_gate", _route_after_closure_gate, {"volume_replan": "volume_replan", "load_context": "load_context", "bridge_chapter": "bridge_chapter", "tail_rewrite": "tail_rewrite", "segment_done": END})
+    graph.add_conditional_edges("bridge_chapter", _route_after_tail_rewrite, {"volume_replan": "volume_replan", "load_context": "load_context", "segment_done": END})
+    graph.add_conditional_edges("tail_rewrite", _route_after_tail_rewrite, {"volume_replan": "volume_replan", "load_context": "load_context", "segment_done": END})
     graph.add_edge("final_book_review", END)
     return graph.compile()
 
@@ -210,8 +210,12 @@ _compiled_graph = _build_generation_graph()
 def run_generation_pipeline_langgraph(
     novel_id: int,
     novel_version_id: int,
-    num_chapters: int,
-    start_chapter: int,
+    segment_target_chapters: int,
+    segment_start_chapter: int,
+    book_start_chapter: int,
+    book_target_total_chapters: int,
+    book_effective_end_chapter: int,
+    volume_no: int,
     progress_callback=None,
     task_id: str | None = None,
     creation_task_id: int | None = None,
@@ -220,8 +224,15 @@ def run_generation_pipeline_langgraph(
         {
             "novel_id": novel_id,
             "novel_version_id": novel_version_id,
-            "num_chapters": num_chapters,
-            "start_chapter": start_chapter,
+            "num_chapters": segment_target_chapters,
+            "start_chapter": segment_start_chapter,
+            "book_start_chapter": book_start_chapter,
+            "book_target_total_chapters": book_target_total_chapters,
+            "book_effective_end_chapter": book_effective_end_chapter,
+            "segment_start_chapter": segment_start_chapter,
+            "segment_target_chapters": segment_target_chapters,
+            "segment_end_chapter": segment_start_chapter + segment_target_chapters - 1,
+            "volume_no": volume_no,
             "task_id": task_id,
             "creation_task_id": creation_task_id,
             "progress_callback": progress_callback or (lambda *a, **k: None),
@@ -232,8 +243,10 @@ def run_generation_pipeline_langgraph(
 def run_final_book_review_only_langgraph(
     novel_id: int,
     novel_version_id: int,
-    num_chapters: int,
-    start_chapter: int,
+    book_start_chapter: int,
+    book_target_total_chapters: int,
+    book_effective_end_chapter: int,
+    volume_no: int,
     progress_callback=None,
     task_id: str | None = None,
     creation_task_id: int | None = None,
@@ -242,11 +255,19 @@ def run_final_book_review_only_langgraph(
         {
             "novel_id": novel_id,
             "novel_version_id": novel_version_id,
-            "num_chapters": num_chapters,
-            "start_chapter": start_chapter,
+            "num_chapters": max(1, int(book_effective_end_chapter) - int(book_start_chapter) + 1),
+            "start_chapter": book_start_chapter,
+            "book_start_chapter": book_start_chapter,
+            "book_target_total_chapters": book_target_total_chapters,
+            "book_effective_end_chapter": book_effective_end_chapter,
+            "segment_start_chapter": book_start_chapter,
+            "segment_target_chapters": max(1, int(book_effective_end_chapter) - int(book_start_chapter) + 1),
+            "segment_end_chapter": book_effective_end_chapter,
+            "volume_no": volume_no,
             "task_id": task_id,
             "creation_task_id": creation_task_id,
             "progress_callback": progress_callback or (lambda *a, **k: None),
         }
     )
+    state["current_chapter"] = int(book_effective_end_chapter) + 1
     node_final_book_review(state)

@@ -46,8 +46,8 @@ def _build_bridge_outline_plan(state: GenerationState, chapter_num: int) -> dict
     ][-3:]
     return {
         "prewrite": state.get("prewrite") or {},
-        "target_chapters": int(state.get("target_chapters") or state.get("num_chapters") or chapter_num),
-        "effective_total_chapters": max(int(state.get("end_chapter") or 0), int(chapter_num)),
+        "target_chapters": int(state.get("book_target_total_chapters") or state.get("target_chapters") or state.get("num_chapters") or chapter_num),
+        "effective_total_chapters": max(int(state.get("book_effective_end_chapter") or 0), int(chapter_num)),
         "closure_state": state.get("closure_state") or {},
         "decision_state": state.get("decision_state") or {},
         "volume_plan": state.get("volume_plan") or {},
@@ -74,11 +74,11 @@ def _generate_bridge_outline(state: GenerationState, chapter_num: int) -> dict[s
 
 def build_closure_state(state: GenerationState) -> dict[str, Any]:
     chapter_num = int(state.get("current_chapter") or 1)
-    start_chapter = int(state.get("start_chapter") or 1)
-    end_chapter = int(state.get("end_chapter") or chapter_num)
-    target_chapters = int(state.get("target_chapters") or state.get("num_chapters") or 1)
-    min_total = int(state.get("min_total_chapters") or target_chapters)
-    max_total = int(state.get("max_total_chapters") or target_chapters)
+    start_chapter = int(state.get("book_start_chapter") or state.get("start_chapter") or 1)
+    end_chapter = int(state.get("book_effective_end_chapter") or state.get("end_chapter") or chapter_num)
+    target_chapters = int(state.get("book_target_total_chapters") or state.get("target_chapters") or state.get("num_chapters") or 1)
+    min_total = int(state.get("book_min_total_chapters") or state.get("min_total_chapters") or target_chapters)
+    max_total = int(state.get("book_max_total_chapters") or state.get("max_total_chapters") or target_chapters)
     generated = max(0, chapter_num - start_chapter)
     remaining = max(0, end_chapter - chapter_num + 1)
     remaining_ratio = remaining / max(target_chapters, 1)
@@ -239,10 +239,13 @@ def node_closure_gate(state: GenerationState) -> GenerationState:
     }
 
     if action == "bridge_chapter":
-        updates["end_chapter"] = int(state["end_chapter"]) + 1
+        updates["book_effective_end_chapter"] = int(state.get("book_effective_end_chapter") or state["end_chapter"]) + 1
+        updates["segment_end_chapter"] = int(state.get("segment_end_chapter") or state["end_chapter"]) + 1
+        updates["end_chapter"] = int(updates["segment_end_chapter"])
         updates["num_chapters"] = int(state["num_chapters"]) + 1
+        updates["segment_target_chapters"] = int(state.get("segment_target_chapters") or state["num_chapters"]) + 1
         updates["bridge_attempts"] = int(state.get("bridge_attempts") or 0) + 1
-        progress_meta["total_chapters"] = max(int(updates["num_chapters"]), int(updates["end_chapter"]))
+        progress_meta["total_chapters"] = int(updates["book_effective_end_chapter"])
         progress(
             state,
             "closure_gate",
@@ -256,18 +259,24 @@ def node_closure_gate(state: GenerationState) -> GenerationState:
         updates["outline"] = bridge_outline
         persist_resume_runtime_state(
             state,
-            node="bridge_chapter",
-            resume_from_chapter=chapter_num,
-            effective_end_chapter=int(updates["end_chapter"]),
-            effective_total_chapters=int(updates["end_chapter"]),
+            mode="segment_running",
+            next_chapter=chapter_num,
+            segment_start_chapter=int(state.get("segment_start_chapter") or state.get("start_chapter") or 1),
+            segment_end_chapter=int(updates["segment_end_chapter"]),
+            book_effective_end_chapter=int(updates["book_effective_end_chapter"]),
+            volume_no=int(state.get("volume_no") or 1),
             bridge_attempts=int(updates["bridge_attempts"]),
         )
     elif action in {"finalize", "force_finalize"}:
-        finalized_end = max(int(state.get("start_chapter") or 1), chapter_num - 1)
-        updates["end_chapter"] = finalized_end
-        updates["num_chapters"] = finalized_end - int(state.get("start_chapter") or 1) + 1
+        finalized_end = max(int(state.get("book_start_chapter") or state.get("start_chapter") or 1), chapter_num - 1)
+        segment_start = int(state.get("segment_start_chapter") or state.get("start_chapter") or 1)
+        updates["book_effective_end_chapter"] = finalized_end
+        updates["segment_end_chapter"] = min(int(state.get("segment_end_chapter") or state.get("end_chapter") or finalized_end), finalized_end)
+        updates["end_chapter"] = int(updates["segment_end_chapter"])
+        updates["num_chapters"] = int(updates["segment_end_chapter"]) - segment_start + 1
+        updates["segment_target_chapters"] = int(updates["num_chapters"])
         updates["current_chapter"] = finalized_end + 1
-        progress_meta["total_chapters"] = max(int(updates["num_chapters"]), int(updates["end_chapter"]))
+        progress_meta["total_chapters"] = finalized_end
         progress(
             state,
             "closure_gate",
@@ -278,10 +287,12 @@ def node_closure_gate(state: GenerationState) -> GenerationState:
         )
         persist_resume_runtime_state(
             state,
-            node="final_book_review",
-            resume_from_chapter=int(updates["current_chapter"]),
-            effective_end_chapter=int(updates["end_chapter"]),
-            effective_total_chapters=int(updates["end_chapter"]),
+            mode="book_final_review_pending",
+            next_chapter=int(updates["current_chapter"]),
+            segment_start_chapter=segment_start,
+            segment_end_chapter=int(updates["segment_end_chapter"]),
+            book_effective_end_chapter=int(finalized_end),
+            volume_no=int(state.get("volume_no") or 1),
         )
     elif action == "rewrite_tail":
         progress(
@@ -294,10 +305,12 @@ def node_closure_gate(state: GenerationState) -> GenerationState:
         )
         persist_resume_runtime_state(
             state,
-            node="tail_rewrite",
-            resume_from_chapter=max(int(state.get("start_chapter") or 1), chapter_num - 2),
-            effective_end_chapter=int(state.get("end_chapter") or chapter_num),
-            effective_total_chapters=int(state.get("end_chapter") or chapter_num),
+            mode="segment_running",
+            next_chapter=max(int(state.get("segment_start_chapter") or state.get("start_chapter") or 1), chapter_num - 2),
+            segment_start_chapter=int(state.get("segment_start_chapter") or state.get("start_chapter") or 1),
+            segment_end_chapter=int(state.get("segment_end_chapter") or state.get("end_chapter") or chapter_num),
+            book_effective_end_chapter=int(state.get("book_effective_end_chapter") or state.get("end_chapter") or chapter_num),
+            volume_no=int(state.get("volume_no") or 1),
         )
     else:
         progress(
@@ -313,8 +326,8 @@ def node_closure_gate(state: GenerationState) -> GenerationState:
         state["checkpoint_store"].save_checkpoint(
             task_id=state["task_id"],
             novel_id=state["novel_id"],
-            volume_no=volume_no_for_chapter(state, max(chapter_num - 1, int(state.get("start_chapter") or 1))),
-            chapter_num=max(chapter_num - 1, int(state.get("start_chapter") or 1)),
+            volume_no=int(state.get("volume_no") or volume_no_for_chapter(state, max(chapter_num - 1, int(state.get("segment_start_chapter") or state.get("start_chapter") or 1)))),
+            chapter_num=max(chapter_num - 1, int(state.get("segment_start_chapter") or state.get("start_chapter") or 1)),
             node="closure_gate",
             state_json=closure_state_val,
         )
@@ -322,7 +335,7 @@ def node_closure_gate(state: GenerationState) -> GenerationState:
 
 
 def node_tail_rewrite(state: GenerationState) -> GenerationState:
-    start_chapter = int(state.get("start_chapter") or 1)
+    start_chapter = int(state.get("segment_start_chapter") or state.get("start_chapter") or 1)
     current = int(state.get("current_chapter") or start_chapter)
     rewind_to = max(start_chapter, current - 2)
     attempts = int(state.get("tail_rewrite_attempts") or 0) + 1
@@ -356,10 +369,12 @@ def node_tail_rewrite(state: GenerationState) -> GenerationState:
         )
     persist_resume_runtime_state(
         state,
-        node="tail_rewrite",
-        resume_from_chapter=rewind_to,
-        effective_end_chapter=int(state.get("end_chapter") or rewind_to),
-        effective_total_chapters=int(state.get("end_chapter") or rewind_to),
+        mode="segment_running",
+        next_chapter=rewind_to,
+        segment_start_chapter=start_chapter,
+        segment_end_chapter=int(state.get("segment_end_chapter") or state.get("end_chapter") or rewind_to),
+        book_effective_end_chapter=int(state.get("book_effective_end_chapter") or state.get("end_chapter") or rewind_to),
+        volume_no=int(state.get("volume_no") or 1),
         tail_rewrite_attempts=attempts,
     )
     return {
@@ -391,10 +406,12 @@ def node_bridge_chapter(state: GenerationState) -> GenerationState:
     )
     persist_resume_runtime_state(
         state,
-        node="bridge_chapter",
-        resume_from_chapter=chapter_num,
-        effective_end_chapter=int(state.get("end_chapter") or chapter_num),
-        effective_total_chapters=int(state.get("end_chapter") or chapter_num),
+        mode="segment_running",
+        next_chapter=chapter_num,
+        segment_start_chapter=int(state.get("segment_start_chapter") or state.get("start_chapter") or 1),
+        segment_end_chapter=int(state.get("segment_end_chapter") or state.get("end_chapter") or chapter_num),
+        book_effective_end_chapter=int(state.get("book_effective_end_chapter") or state.get("end_chapter") or chapter_num),
+        volume_no=int(state.get("volume_no") or 1),
     )
     return {
         "closure_state": {**(state.get("closure_state") or {}), "action": "continue"},

@@ -4,14 +4,12 @@ import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { motion } from "framer-motion";
-import { ArrowLeft, BarChart3, ChevronDown, ChevronRight, Clapperboard, Copy, Download, Wand2 } from "lucide-react";
+import { ArrowLeft, BarChart3, ChevronDown, ChevronRight, CircleAlert, Clapperboard, Copy, Download, Wand2, X } from "lucide-react";
 import {
   api,
-  Novel,
-  NovelVersion,
   Chapter,
   ChapterProgress,
-  PresetCategory,
+  NovelVersion,
   RewriteAnnotationInput,
   getErrorMessage,
 } from "@/lib/api";
@@ -19,17 +17,28 @@ import { parseChapterContent } from "@/lib/novelContent";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { Card } from "@/components/ui/Card";
+import { ConfirmModal } from "@/components/ui";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Select } from "@/components/ui/Select";
 import { TopBar } from "@/components/ui/TopBar";
-import { formatNovelStatus } from "@/lib/display";
+import {
+  formatNovelStatus,
+  getNovelStatusVariant,
+  resolveNovelDisplayStatus,
+  shouldOpenNovelProgress,
+} from "@/lib/display";
+import { useNovelPageBaseData, useNovelVersionData } from "@/hooks/use-novel-page-data";
 
-const STATUS_MAP: Record<string, { label: string; variant: "default" | "success" | "warning" | "error" }> = {
+const STATUS_MAP: Record<string, { label: string; variant: "default" | "success" | "warning" | "error" | "info" }> = {
   draft: { label: "草稿", variant: "default" },
+  queued: { label: "排队中", variant: "warning" },
+  dispatching: { label: "调度中", variant: "warning" },
   generating: { label: "生成中", variant: "warning" },
+  awaiting_outline_confirmation: { label: "待确认大纲", variant: "info" },
+  paused: { label: "已暂停", variant: "info" },
   completed: { label: "已完成", variant: "success" },
   failed: { label: "失败", variant: "error" },
-  cancelled: { label: "已取消", variant: "default" },
+  cancelled: { label: "已取消", variant: "info" },
 };
 
 const CHAPTER_STATUS_MAP: Record<ChapterProgress["status"], { label: string; variant: "default" | "success" | "warning" | "error" }> = {
@@ -38,6 +47,9 @@ const CHAPTER_STATUS_MAP: Record<ChapterProgress["status"], { label: string; var
   completed: { label: "已完成", variant: "success" },
 };
 const GRAMMAR_SKIPPED_TEXT = "未启用语法检查（language_tool_python 不可用），跳过该项。";
+const EMPTY_VERSIONS: NovelVersion[] = [];
+const EMPTY_CHAPTERS: Chapter[] = [];
+const EMPTY_CHAPTER_PROGRESS: ChapterProgress[] = [];
 
 function getDisplayChapterTitle(chapterNum: number, title?: string) {
   const value = (title || "").trim();
@@ -56,16 +68,6 @@ function countVisibleChars(content?: string): number {
   return text.replace(/\s+/g, "").length;
 }
 
-function buildPresetLabelMap(items?: PresetCategory[string]): Record<string, string> {
-  const out: Record<string, string> = {};
-  if (!Array.isArray(items)) return out;
-  for (const item of items) {
-    if (!item?.id || !item?.label) continue;
-    out[item.id] = item.label;
-  }
-  return out;
-}
-
 function toDisplayLabel(rawValue: string | undefined, labelMap: Record<string, string>, fallback: string): string {
   if (!rawValue) return "";
   return labelMap[rawValue] || fallback;
@@ -81,19 +83,13 @@ export default function NovelPage() {
   const router = useRouter();
   const id = String(params.id);
 
-  const [novel, setNovel] = useState<Novel | null>(null);
-  const [chapters, setChapters] = useState<Chapter[]>([]);
-  const [chapterProgress, setChapterProgress] = useState<ChapterProgress[]>([]);
-  const [versions, setVersions] = useState<NovelVersion[]>([]);
   const [activeVersionId, setActiveVersionId] = useState<number | null>(null);
   const [selectedChapterNum, setSelectedChapterNum] = useState<number | null>(null);
   const [expandedVolumeNos, setExpandedVolumeNos] = useState<Set<number>>(new Set());
-  const [loading, setLoading] = useState(true);
   const [submittingRewrite, setSubmittingRewrite] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  const [genreLabelMap, setGenreLabelMap] = useState<Record<string, string>>({});
-  const [styleLabelMap, setStyleLabelMap] = useState<Record<string, string>>({});
+  const [showIncrementalOutlineHint, setShowIncrementalOutlineHint] = useState(true);
+  const [pendingVersionId, setPendingVersionId] = useState<number | null>(null);
 
   const [annotations, setAnnotations] = useState<RewriteAnnotationInput[]>([]);
   const [selectionDraft, setSelectionDraft] = useState<{
@@ -111,66 +107,46 @@ export default function NovelPage() {
   const contentRef = useRef<HTMLDivElement | null>(null);
   const selectionBubbleRef = useRef<HTMLDivElement | null>(null);
   const copyTimerRef = useRef<number | null>(null);
+  const hadIncrementalOutlineHintRef = useRef(false);
 
   const [showExport, setShowExport] = useState(false);
+  const {
+    data: baseData,
+    isLoading: baseLoading,
+    error: baseQueryError,
+  } = useNovelPageBaseData(id);
+  const novel = baseData?.novel ?? null;
+  const versions = baseData?.versions ?? EMPTY_VERSIONS;
+  const activeGenerationTask = baseData?.activeGenerationTask ?? null;
+  const genreLabelMap = baseData?.genreLabelMap ?? {};
+  const styleLabelMap = baseData?.styleLabelMap ?? {};
+  const defaultVersionId = baseData?.defaultVersion?.id ?? null;
 
   useEffect(() => {
-    void loadData();
-  }, [id]);
-
-  const loadData = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      const [novelData, presetsData] = await Promise.all([
-        api.getNovel(id),
-        api.getPresets().catch(() => null),
-      ]);
-
-      let versionsData: NovelVersion[] = [];
-      let defaultVersion: NovelVersion | null = null;
-      try {
-        versionsData = await api.getVersions(id);
-        defaultVersion = versionsData.find((v) => v.is_default) || versionsData[0] || null;
-      } catch (versionErr) {
-        console.error(versionErr);
-      }
-
-      if (!defaultVersion?.id) {
-        setNovel(novelData);
-        setVersions(versionsData);
-        setActiveVersionId(null);
-        setChapters([]);
-        setChapterProgress([]);
-        setError("未找到可用版本，请先创建版本后再查看章节。");
-        return;
-      }
-
-      const [progressData, chaptersData] = await Promise.all([
-        api.getChapterProgress(id, defaultVersion.id),
-        api.getChapters(id, defaultVersion.id),
-      ]);
-
-      const nextGenreMap = buildPresetLabelMap(presetsData?.genres);
-      const nextStyleMap = buildPresetLabelMap(presetsData?.styles);
-
-      setGenreLabelMap(nextGenreMap);
-      setStyleLabelMap(nextStyleMap);
-      setNovel(novelData);
-      setChapters(chaptersData);
-      setChapterProgress(progressData);
-      setVersions(versionsData);
-      setActiveVersionId(defaultVersion?.id || null);
-      if (progressData.length > 0 && selectedChapterNum === null) {
-        setSelectedChapterNum(progressData[0].chapter_num);
-      }
-    } catch (err) {
-      setError(getErrorMessage(err, "加载失败"));
-      console.error(err);
-    } finally {
-      setLoading(false);
+    if (!defaultVersionId) {
+      setActiveVersionId((prev) => (prev === null ? prev : null));
+      return;
     }
-  };
+    setActiveVersionId((prev) => {
+      if (prev && versions.some((item) => item.id === prev)) return prev;
+      return defaultVersionId;
+    });
+  }, [defaultVersionId, versions]);
+
+  const {
+    data: versionData,
+    isLoading: versionLoading,
+    error: versionQueryError,
+  } = useNovelVersionData(id, activeVersionId);
+  const chapters = versionData?.chapters ?? EMPTY_CHAPTERS;
+  const chapterProgress = versionData?.chapterProgress ?? EMPTY_CHAPTER_PROGRESS;
+  const loading = baseLoading || (activeVersionId !== null && versionLoading);
+  const queryErrorMessage = baseQueryError
+    ? getErrorMessage(baseQueryError, "小说详情加载失败")
+    : versionQueryError
+    ? getErrorMessage(versionQueryError, "章节内容加载失败")
+    : null;
+  const pageError = error || queryErrorMessage;
 
   const selectedChapter = selectedChapterNum !== null
     ? chapters.find((c) => c.chapter_num === selectedChapterNum) || null
@@ -219,7 +195,34 @@ export default function NovelPage() {
       }));
   }, [chapterProgress]);
 
+  const incrementalOutlineHint = useMemo(() => {
+    if (!activeGenerationTask) return null;
+    if (!shouldOpenNovelProgress(activeGenerationTask.status)) return null;
+    const targetChapters = Number(activeGenerationTask.total_chapters || 0);
+    if (!Number.isFinite(targetChapters) || targetChapters <= 0) return null;
+    const outlinedChapters = chapterProgress.reduce((max, chapter) => Math.max(max, chapter.chapter_num), 0);
+    if (outlinedChapters <= 0 || outlinedChapters >= targetChapters) return null;
+    return {
+      outlinedChapters,
+      targetChapters,
+    };
+  }, [activeGenerationTask, chapterProgress]);
+
+  useEffect(() => {
+    const hasHint = Boolean(incrementalOutlineHint);
+    if (!hasHint) {
+      setShowIncrementalOutlineHint(true);
+      hadIncrementalOutlineHintRef.current = false;
+      return;
+    }
+    if (!hadIncrementalOutlineHintRef.current) {
+      setShowIncrementalOutlineHint(true);
+    }
+    hadIncrementalOutlineHintRef.current = true;
+  }, [incrementalOutlineHint]);
+
   const novelTitle = novel?.title || "未命名小说";
+  const displayNovelStatus = resolveNovelDisplayStatus(novel?.status, activeGenerationTask);
   const selectedChapterTitleDisplay = selectedChapter
     ? getDisplayChapterTitle(selectedChapter.chapter_num, selectedChapter.title)
     : "";
@@ -542,10 +545,21 @@ export default function NovelPage() {
     );
   }
 
-  if (error || !novel) {
+  if (pageError || !novel) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center gap-4">
-        <p className="text-[#C4372D]">{error || "小说不存在"}</p>
+        <p className="text-[#C4372D]">{pageError || "小说不存在"}</p>
+        <Button variant="secondary" onClick={() => router.push("/novels")}>
+          返回列表
+        </Button>
+      </div>
+    );
+  }
+
+  if (versions.length === 0 || activeVersionId === null) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center gap-4">
+        <p className="text-[#7E756D]">未找到可用版本，请稍后重试。</p>
         <Button variant="secondary" onClick={() => router.push("/novels")}>
           返回列表
         </Button>
@@ -565,27 +579,15 @@ export default function NovelPage() {
             <div className="w-[180px]">
               <Select
                 value={String(activeVersionId ?? "")}
-                onValueChange={async (nextValue) => {
+                onValueChange={(nextValue) => {
                   const nextId = Number(nextValue);
                   if (!Number.isFinite(nextId) || nextId === activeVersionId) return;
                   if (annotations.length > 0) {
-                    const confirmed = window.confirm("切换版本会清空当前未提交的修改建议，是否继续？");
-                    if (!confirmed) return;
-                    setAnnotations([]);
-                    clearSelectionDraft();
+                    setPendingVersionId(nextId);
+                    return;
                   }
-                  try {
-                    const [nextChapters, nextProgress] = await Promise.all([
-                      api.getChapters(id, nextId),
-                      api.getChapterProgress(id, nextId),
-                    ]);
-                    setActiveVersionId(nextId);
-                    setChapters(nextChapters);
-                    setChapterProgress(nextProgress);
-                  } catch (err) {
-                    console.error(err);
-                    setError(getErrorMessage(err, "版本切换失败"));
-                  }
+                  setError(null);
+                  setActiveVersionId(nextId);
                 }}
                 className="h-9 px-3 py-2 text-sm bg-[#FFFDFB]"
                 options={versions.map((v) => ({
@@ -607,16 +609,16 @@ export default function NovelPage() {
             <div className="inline-flex h-9 items-center gap-1.5 rounded-full border border-[#E5DED7] bg-[#FFFDFB] px-3 text-sm font-medium text-[#6F665F]">
               <span
                 className={`h-1.5 w-1.5 rounded-full ${
-                  novel.status === "completed"
+                  displayNovelStatus === "completed"
                     ? "bg-[#18864B]"
-                    : novel.status === "failed"
+                    : displayNovelStatus === "failed"
                     ? "bg-[#C4372D]"
-                    : novel.status === "generating"
+                    : getNovelStatusVariant(displayNovelStatus) === "warning"
                     ? "bg-[#D08A10]"
                     : "bg-[#8E8379]"
                 }`}
               />
-              {STATUS_MAP[novel.status]?.label || formatNovelStatus(novel.status)}
+              {STATUS_MAP[displayNovelStatus]?.label || formatNovelStatus(displayNovelStatus)}
             </div>
             <div className="relative">
               <Button
@@ -662,7 +664,7 @@ export default function NovelPage() {
                 进度
               </Button>
             </Link>
-            {novel.status === "completed" ? (
+            {displayNovelStatus === "completed" ? (
               <Link href={`/storyboards/create?novel_id=${encodeURIComponent(id)}`}>
                 <Button
                   variant="secondary"
@@ -687,7 +689,11 @@ export default function NovelPage() {
               </svg>
             )}
             title="章节目录准备中"
-            description="请稍后刷新，或前往进度页查看任务状态。"
+            description={
+              incrementalOutlineHint
+                ? `当前长篇目录按卷逐步生成。第一卷大纲准备完成后会先显示，后续卷会随着任务推进自动补齐，目标共 ${incrementalOutlineHint.targetChapters} 章。`
+                : "请稍后刷新，或前往进度页查看任务状态。"
+            }
             action={(
               <Link href={`/novels/${id}/progress`}>
                 <Button>查看进度</Button>
@@ -704,6 +710,24 @@ export default function NovelPage() {
             <aside className="lg:col-span-1">
               <Card className="p-4 sticky top-24">
                 <h3 className="text-sm font-medium text-[#7E756D] mb-4">章节目录</h3>
+                {incrementalOutlineHint && showIncrementalOutlineHint ? (
+                  <div className="relative mb-4 rounded-[10px] border border-[#F3D8B3] bg-[#FFF8EE] px-3 py-2.5 text-xs leading-5 text-[#8A5A13]">
+                    <button
+                      type="button"
+                      aria-label="关闭提示"
+                      className="absolute right-2 top-2 inline-flex h-6 w-6 items-center justify-center rounded-full text-[#B07B30] transition-colors hover:bg-[#F8E8CF] hover:text-[#8A5A13]"
+                      onClick={() => setShowIncrementalOutlineHint(false)}
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                    <div className="flex items-start gap-2 pr-6">
+                      <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+                      <div>
+                        长篇目录按卷逐步生成。当前已展示至第 {incrementalOutlineHint.outlinedChapters} 章，后续卷会随着任务推进自动补齐，目标共 {incrementalOutlineHint.targetChapters} 章。
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
                 <div className="space-y-2 max-h-[60vh] overflow-y-auto pr-1">
                   {groupedVolumes.map((volume) => {
                     const expanded = expandedVolumeNos.has(volume.volumeNo);
@@ -923,6 +947,22 @@ export default function NovelPage() {
           </div>
         </div>
       ) : null}
+      <ConfirmModal
+        open={pendingVersionId !== null}
+        onClose={() => setPendingVersionId(null)}
+        onConfirm={() => {
+          if (pendingVersionId === null) return;
+          setAnnotations([]);
+          clearSelectionDraft();
+          setError(null);
+          setActiveVersionId(pendingVersionId);
+          setPendingVersionId(null);
+        }}
+        title="切换版本"
+        message="切换版本会清空当前未提交的修改建议，是否继续？"
+        confirmText="继续切换"
+        confirmVariant="primary"
+      />
     </main>
   );
 }

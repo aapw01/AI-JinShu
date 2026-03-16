@@ -17,10 +17,9 @@ from app.services.generation.state import GenerationState
 def node_volume_replan(state: GenerationState) -> GenerationState:
     """Build per-volume plan at volume boundaries."""
     chapter_num = state["current_chapter"]
-    vol_no = volume_no_for_chapter(state, chapter_num)
-    volume_size = max(int(state.get("volume_size") or 30), 1)
-    start = chapter_num
-    end = min(state["end_chapter"], start + volume_size - 1)
+    vol_no = int(state.get("volume_no") or volume_no_for_chapter(state, chapter_num))
+    start = int(state.get("segment_start_chapter") or chapter_num)
+    end = int(state.get("segment_end_chapter") or state["end_chapter"])
     outlines = [o for o in (state.get("full_outlines") or []) if start <= int(o.get("chapter_num", 0)) <= end]
 
     previous_volume = max(0, vol_no - 1)
@@ -132,7 +131,7 @@ def node_volume_replan(state: GenerationState) -> GenerationState:
         f"生成第{vol_no}卷执行计划",
         {
             "current_phase": "volume_planning",
-            "total_chapters": state["num_chapters"],
+            "total_chapters": state.get("book_effective_end_chapter") or state["num_chapters"],
             "volume_no": vol_no,
             "replan_level": replan_level,
         },

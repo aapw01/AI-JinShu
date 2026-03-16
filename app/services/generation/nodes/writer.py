@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.core.constants import DEFAULT_CHAPTER_WORD_COUNT
 from app.core.llm_usage import snapshot_usage
 from app.core.strategy import get_model_for_stage
 from app.services.generation.contracts import OutputContractError
@@ -33,6 +34,7 @@ def node_writer(state: GenerationState) -> GenerationState:
             state["native_style_profile"],
             provider_,
             model_,
+            DEFAULT_CHAPTER_WORD_COUNT,
         )
         if _is_invalid_draft(draft):
             raise RuntimeError("writer returned invalid placeholder draft")

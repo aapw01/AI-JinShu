@@ -103,6 +103,7 @@ from app.services.rewrite.service import get_default_version_id
 from app.services.storyboard.style_catalog import list_style_presets, recommend_styles
 from app.services.scheduler.scheduler_service import (
     cancel_task as cancel_creation_task,
+    dispatch_user_queue_for_user,
     pause_task as pause_creation_task,
     resume_task as resume_creation_task,
     submit_task as submit_creation_task,
@@ -547,6 +548,7 @@ def start_storyboard_run(
             raise http_error(409, "storyboard_run_active", "已有进行中的分镜运行")
         raise http_error(400, "storyboard_run_invalid", "无法启动分镜运行")
     db.commit()
+    dispatch_user_queue_for_user(user_uuid=principal.user_uuid or "")
     return _to_run_response(run, lanes)
 
 
@@ -650,6 +652,7 @@ def action_storyboard_run(
             idempotency_key=(idempotency_key or "").strip() or None,
         )
         db.commit()
+        dispatch_user_queue_for_user(user_uuid=principal.user_uuid or "")
         return StoryboardRunActionResponse(
             ok=True,
             storyboard_project_id=project_id,
@@ -754,6 +757,7 @@ def generate_storyboard(
     task.current_phase = "queued"
     project.status = "generating"
     db.commit()
+    dispatch_user_queue_for_user(user_uuid=principal.user_uuid or "")
 
     log_event(
         logger,
@@ -839,6 +843,7 @@ def pause_storyboard_task(
         raise http_error(409, "task_not_pausable", "当前任务不可暂停")
     update_task_state(db, row, status="paused", run_state="paused", phase="paused", message="分镜任务已暂停")
     db.commit()
+    dispatch_user_queue_for_user(user_uuid=principal.user_uuid or "")
     _update_storyboard_redis(row.task_id, "paused", "分镜任务已暂停", row)
     return StoryboardActionResponse(ok=True, storyboard_project_id=project_id, task_id=row.task_id, run_state=row.run_state)
 
@@ -865,6 +870,7 @@ def resume_storyboard_task(
         raise http_error(409, "task_not_resumable", "当前任务不可恢复")
     update_task_state(db, row, status="submitted", run_state="queued", phase="queued", message="分镜任务已恢复，等待调度")
     db.commit()
+    dispatch_user_queue_for_user(user_uuid=principal.user_uuid or "")
     _update_storyboard_redis(row.task_id, "queued", "分镜任务已恢复，等待调度", row)
     return StoryboardActionResponse(ok=True, storyboard_project_id=project_id, task_id=row.task_id, run_state=row.run_state)
 
@@ -894,6 +900,7 @@ def cancel_storyboard_task(
     if project:
         project.status = "cancelled"
     db.commit()
+    dispatch_user_queue_for_user(user_uuid=principal.user_uuid or "")
     _update_storyboard_redis(row.task_id, "cancelled", "分镜任务已取消", row)
     return StoryboardActionResponse(ok=True, storyboard_project_id=project_id, task_id=row.task_id, run_state=row.run_state)
 
@@ -935,6 +942,7 @@ def retry_storyboard_task(
                 update_task_state(db, latest, status="submitted", run_state="submitted", phase="queued", message="重试任务已提交（断点续传）")
             project.status = "generating"
             db.commit()
+            dispatch_user_queue_for_user(user_uuid=principal.user_uuid or "")
             return StoryboardActionResponse(
                 ok=True, storyboard_project_id=project.id,
                 task_id=resumed.public_id, run_state="queued",
@@ -979,6 +987,7 @@ def retry_storyboard_task(
     task.task_id = creation_task.public_id
     project.status = "generating"
     db.commit()
+    dispatch_user_queue_for_user(user_uuid=principal.user_uuid or "")
 
     return StoryboardActionResponse(ok=True, storyboard_project_id=project.id, task_id=task.task_id, run_state=task.run_state)
 

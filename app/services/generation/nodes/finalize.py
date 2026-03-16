@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from sqlalchemy import select
 
+from app.core.constants import DEFAULT_CHAPTER_WORD_COUNT
 from app.core.database import SessionLocal
 from app.core.i18n import evaluate_language_quality
 from app.core.llm_usage import snapshot_usage
@@ -46,6 +47,7 @@ def node_finalize(state: GenerationState) -> GenerationState:
                 state["target_language"],
                 f_provider,
                 f_model,
+                DEFAULT_CHAPTER_WORD_COUNT,
             ).strip()
             break
         except OutputContractError as exc:
@@ -225,7 +227,7 @@ def node_finalize(state: GenerationState) -> GenerationState:
         f"第{chapter_num}章完成",
         {
             "current_phase": "chapter_done",
-            "total_chapters": max(int(state.get("num_chapters") or 0), int(state.get("end_chapter") or chapter_num)),
+            "total_chapters": max(int(state.get("book_effective_end_chapter") or 0), int(state.get("end_chapter") or chapter_num)),
             "token_usage_input": total_input_tokens,
             "token_usage_output": total_output_tokens,
             "estimated_cost": estimated_cost,
@@ -235,13 +237,15 @@ def node_finalize(state: GenerationState) -> GenerationState:
             "decision_state": decision_state,
         },
     )
-    if chapter_num < int(state.get("end_chapter") or chapter_num):
+    if chapter_num < int(state.get("segment_end_chapter") or state.get("end_chapter") or chapter_num):
         persist_resume_runtime_state(
             state,
-            node="chapter_loop",
-            resume_from_chapter=chapter_num + 1,
-            effective_end_chapter=int(state.get("end_chapter") or chapter_num),
-            effective_total_chapters=int(state.get("end_chapter") or chapter_num),
+            mode="segment_running",
+            next_chapter=chapter_num + 1,
+            segment_start_chapter=int(state.get("segment_start_chapter") or state.get("start_chapter") or 1),
+            segment_end_chapter=int(state.get("segment_end_chapter") or state.get("end_chapter") or chapter_num),
+            book_effective_end_chapter=int(state.get("book_effective_end_chapter") or state.get("end_chapter") or chapter_num),
+            volume_no=int(state.get("volume_no") or 1),
         )
     factual_score = float(state.get("factual_score", 0.0) or 0.0)
     reviewer_aesthetic = float(state.get("aesthetic_review_score", 0.0) or 0.0)

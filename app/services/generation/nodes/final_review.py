@@ -12,18 +12,20 @@ from app.services.generation.state import GenerationState
 
 
 def node_final_book_review(state: GenerationState) -> GenerationState:
-    effective_end = int(state.get("end_chapter") or state.get("current_chapter") or 0)
-    effective_total = max(int(state.get("num_chapters") or 0), effective_end)
+    effective_end = int(state.get("book_effective_end_chapter") or state.get("end_chapter") or state.get("current_chapter") or 0)
+    effective_total = max(int(state.get("book_target_total_chapters") or 0), effective_end)
     persist_resume_runtime_state(
         state,
-        node="final_book_review",
-        resume_from_chapter=effective_end + 1,
-        effective_end_chapter=effective_end,
-        effective_total_chapters=effective_total,
+        mode="book_final_review_pending",
+        next_chapter=effective_end + 1,
+        segment_start_chapter=int(state.get("segment_start_chapter") or state.get("start_chapter") or 1),
+        segment_end_chapter=int(state.get("segment_end_chapter") or state.get("end_chapter") or effective_end),
+        book_effective_end_chapter=effective_end,
+        volume_no=int(state.get("volume_no") or 1),
     )
     db = SessionLocal()
     try:
-        last_chapter = state["start_chapter"] + state["num_chapters"] - 1
+        last_chapter = effective_end
         all_summaries = state["summary_mgr"].get_summaries_before(
             state["novel_id"],
             state.get("novel_version_id"),
@@ -66,8 +68,8 @@ def node_final_book_review(state: GenerationState) -> GenerationState:
         state["checkpoint_store"].save_checkpoint(
             task_id=state["task_id"],
             novel_id=state["novel_id"],
-            volume_no=volume_no_for_chapter(state, state["end_chapter"]),
-            chapter_num=state["end_chapter"],
+            volume_no=int(state.get("volume_no") or volume_no_for_chapter(state, effective_end)),
+            chapter_num=effective_end,
             node="book_done",
             state_json={"final_report": final_report},
         )
@@ -88,10 +90,11 @@ def node_final_book_review(state: GenerationState) -> GenerationState:
     )
     persist_resume_runtime_state(
         state,
-        node="final_book_review",
-        resume_from_chapter=effective_end + 1,
-        effective_end_chapter=effective_end,
-        effective_total_chapters=effective_total,
-        terminal=True,
+        mode="completed",
+        next_chapter=effective_end + 1,
+        segment_start_chapter=int(state.get("segment_start_chapter") or state.get("start_chapter") or 1),
+        segment_end_chapter=int(state.get("segment_end_chapter") or state.get("end_chapter") or effective_end),
+        book_effective_end_chapter=effective_end,
+        volume_no=int(state.get("volume_no") or 1),
     )
     return {}

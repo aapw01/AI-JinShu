@@ -34,7 +34,7 @@ def write_longform_artifacts(
     checkpoint = state["checkpoint_store"]
 
     outline = state.get("outline") or {}
-    volume_no = volume_no_for_chapter(state, chapter_num)
+    volume_no = int(state.get("volume_no") or volume_no_for_chapter(state, chapter_num))
 
     if chapter_num == state.get("start_chapter", 1):
         chars = ((state.get("prewrite") or {}).get("specification") or {}).get("characters") or []
@@ -270,8 +270,7 @@ def write_longform_artifacts(
             db=db,
         )
 
-    volume_size = max(int(state.get("volume_size") or 30), 1)
-    is_volume_end = (chapter_num - state.get("start_chapter", 1) + 1) % volume_size == 0 or chapter_num == state["end_chapter"]
+    is_volume_end = int(chapter_num) == int(state.get("segment_end_chapter") or state["end_chapter"])
     if is_volume_end:
         _write_volume_report(state, chapter_num, volume_no, quality, bible, checkpoint, db=db)
 

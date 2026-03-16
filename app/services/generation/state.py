@@ -18,6 +18,15 @@ from app.services.memory.summary_manager import SummaryManager
 class GenerationState(TypedDict, total=False):
     novel_id: int
     novel_version_id: int
+    book_start_chapter: int
+    book_target_total_chapters: int
+    book_effective_end_chapter: int
+    book_min_total_chapters: int
+    book_max_total_chapters: int
+    segment_start_chapter: int
+    segment_target_chapters: int
+    segment_end_chapter: int
+    next_chapter: int
     num_chapters: int
     target_chapters: int
     min_total_chapters: int

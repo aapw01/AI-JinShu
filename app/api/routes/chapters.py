@@ -18,6 +18,10 @@ from app.models.creation_task import CreationTask
 from app.models.novel import ChapterOutline, ChapterVersion
 from app.schemas.novel import ChapterProgressResponse, ChapterResponse
 from app.services.generation.common import is_effective_title, resolve_chapter_title
+from app.services.generation.status_snapshot import (
+    GENERATION_ACTIVE_STATUSES,
+    read_generation_snapshot_for_task,
+)
 from app.services.rewrite.service import get_chapter_version, list_chapter_versions
 
 router = APIRouter()
@@ -91,12 +95,12 @@ def _get_generating_chapter_from_creation_task(task: CreationTask) -> int | None
         chapter = int(payload.get("start_chapter") or 0)
         return chapter or None
 
-    if str(runtime_state.get("node") or "") == "final_book_review":
+    if str(runtime_state.get("mode") or "") in {"book_final_review_pending", "completed"}:
         return None
 
-    resume_from = int(runtime_state.get("resume_from_chapter") or cursor.get("next") or 0)
-    if resume_from > 0:
-        return resume_from
+    next_chapter = int(runtime_state.get("next_chapter") or cursor.get("next") or 0)
+    if next_chapter > 0:
+        return next_chapter
 
     chapter = int(payload.get("start_chapter") or 0)
     return chapter or None
@@ -207,9 +211,12 @@ def get_chapter_progress(
         .limit(1)
     )
     active_task = db.execute(active_stmt).scalar_one_or_none()
-    generating_chapter = _get_generating_chapter_from_redis(novel.id)
-    if generating_chapter is None and active_task:
-        generating_chapter = _get_generating_chapter_from_creation_task(active_task)
+    generating_chapter = None
+    if active_task:
+        active_snapshot = read_generation_snapshot_for_task(active_task)
+        if str(active_snapshot.get("status") or "") in GENERATION_ACTIVE_STATUSES:
+            chapter = int(active_snapshot.get("current_chapter") or 0)
+            generating_chapter = chapter or None
     volume_size = _resolve_volume_size(novel.config if isinstance(novel.config, dict) else None)
 
     result: list[ChapterProgressResponse] = []
