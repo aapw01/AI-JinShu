@@ -21,6 +21,20 @@ def _resume_cursor_dict(row: CreationTask) -> dict[str, Any]:
     return dict(data) if isinstance(data, dict) else {}
 
 
+def _merge_mapping(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in updates.items():
+        if value is None:
+            merged.pop(key, None)
+            continue
+        existing = merged.get(key)
+        if isinstance(existing, dict) and isinstance(value, dict):
+            merged[key] = _merge_mapping(existing, value)
+        else:
+            merged[key] = value
+    return merged
+
+
 def mark_unit_completed(
     db: Session,
     *,
@@ -161,7 +175,9 @@ def update_resume_runtime_state(
         return
     payload = _resume_cursor_dict(row)
     if runtime_state:
-        payload["runtime_state"] = dict(runtime_state)
+        existing_runtime = payload.get("runtime_state")
+        existing_runtime = dict(existing_runtime) if isinstance(existing_runtime, dict) else {}
+        payload["runtime_state"] = _merge_mapping(existing_runtime, dict(runtime_state))
     else:
         payload.pop("runtime_state", None)
     row.resume_cursor_json = payload

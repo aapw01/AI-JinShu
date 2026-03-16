@@ -76,8 +76,10 @@ class GenerationState(TypedDict, total=False):
     quality_passed: bool
     volume_no: int
     volume_plan: dict[str, Any]
+    segment_plan: dict[str, Any]
     decision_state: dict[str, Any]
     closure_state: dict[str, Any]
+    retry_resume_chapter: int
     consistency_soft_fail: bool
     tail_rewrite_attempts: int
     bridge_attempts: int

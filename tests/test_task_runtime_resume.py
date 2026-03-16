@@ -112,6 +112,8 @@ def test_resume_plan_prefers_tail_rewrite_runtime_state():
     assert plan.book_target_total_chapters == 15
     assert plan.book_effective_end_chapter == 15
     assert plan.current_volume_no == 1
+    assert plan.segment_start_chapter == 1
+    assert plan.segment_end_chapter == 15
 
 
 def test_resume_plan_prefers_bridge_runtime_state():
@@ -145,6 +147,8 @@ def test_resume_plan_prefers_bridge_runtime_state():
     assert plan.next_chapter == 16
     assert plan.book_effective_end_chapter == 16
     assert plan.book_target_total_chapters == 15
+    assert plan.segment_start_chapter == 1
+    assert plan.segment_end_chapter == 16
 
 
 def test_resume_plan_prefers_final_book_review_runtime_state():
@@ -217,6 +221,8 @@ def test_resume_plan_tail_rewrite_with_offset_range_keeps_absolute_total():
     assert plan.next_chapter == 19
     assert plan.book_target_total_chapters == 20
     assert plan.book_effective_end_chapter == 20
+    assert plan.segment_start_chapter == 18
+    assert plan.segment_end_chapter == 20
 
 
 def test_resume_plan_final_review_with_offset_range_reconstructs_full_span():
@@ -288,6 +294,44 @@ def test_resume_plan_recomputes_volume_number_after_completed_segment_boundary()
     assert plan.mode == "segment_running"
     assert plan.next_chapter == 31
     assert plan.current_volume_no == 2
+    assert plan.segment_start_chapter == 31
+    assert plan.segment_end_chapter == 60
+
+
+def test_resume_plan_preserves_runtime_segment_for_mid_segment_retry():
+    task_id = _seed_creation_task(start_chapter=1, num_chapters=200, book_total=200)
+    db = SessionLocal()
+    try:
+        row = db.execute(select(CreationTask).where(CreationTask.id == task_id)).scalar_one()
+        row.resume_cursor_json = {
+            "unit_type": "chapter",
+            "partition": None,
+            "last_completed": 24,
+            "next": 25,
+            "runtime_state": {
+                "mode": "segment_running",
+                "volume_no": 1,
+                "segment_start_chapter": 1,
+                "segment_end_chapter": 30,
+                "next_chapter": 25,
+                "book_effective_end_chapter": 200,
+                "book_target_total_chapters": 200,
+                "tail_rewrite_attempts": 0,
+                "bridge_attempts": 0,
+                "retry_resume_chapter": 25,
+            },
+        }
+        db.commit()
+    finally:
+        db.close()
+
+    plan = _resolve_generation_resume(task_id, start_chapter=1, num_chapters=200, volume_size=30)
+    assert plan.mode == "segment_running"
+    assert plan.next_chapter == 25
+    assert plan.segment_start_chapter == 1
+    assert plan.segment_end_chapter == 30
+    assert plan.current_volume_no == 1
+    assert plan.retry_resume_chapter == 25
 
 
 def test_completed_usage_totals_prefer_runtime_state_end_chapter():

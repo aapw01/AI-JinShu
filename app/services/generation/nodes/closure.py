@@ -17,6 +17,7 @@ from app.services.generation.progress import (
     progress,
     volume_no_for_chapter,
 )
+from app.services.generation.segment_plan import build_segment_plan, merge_outlines
 from app.services.generation.state import GenerationState
 
 
@@ -24,18 +25,7 @@ def _merge_full_outlines(
     outlines: list[dict[str, Any]] | None,
     new_outline: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    merged = [dict(item) for item in (outlines or []) if isinstance(item, dict)]
-    chapter_num = int(new_outline.get("chapter_num") or 0)
-    updated = False
-    for idx, item in enumerate(merged):
-        if int(item.get("chapter_num") or 0) == chapter_num:
-            merged[idx] = dict(new_outline)
-            updated = True
-            break
-    if not updated:
-        merged.append(dict(new_outline))
-    merged.sort(key=lambda item: int(item.get("chapter_num") or 0))
-    return merged
+    return merge_outlines(outlines, [new_outline])
 
 
 def _build_bridge_outline_plan(state: GenerationState, chapter_num: int) -> dict[str, Any]:
@@ -257,6 +247,13 @@ def node_closure_gate(state: GenerationState) -> GenerationState:
         bridge_outline = _generate_bridge_outline(state, chapter_num)
         updates["full_outlines"] = _merge_full_outlines(state.get("full_outlines"), bridge_outline)
         updates["outline"] = bridge_outline
+        updates["segment_plan"] = build_segment_plan(
+            start_chapter=int(state.get("segment_start_chapter") or state.get("start_chapter") or 1),
+            end_chapter=int(updates["segment_end_chapter"]),
+            volume_no=int(state.get("volume_no") or 1),
+            plan_kind="bridge",
+            outlines=updates["full_outlines"],
+        )
         persist_resume_runtime_state(
             state,
             mode="segment_running",
@@ -266,6 +263,8 @@ def node_closure_gate(state: GenerationState) -> GenerationState:
             book_effective_end_chapter=int(updates["book_effective_end_chapter"]),
             volume_no=int(state.get("volume_no") or 1),
             bridge_attempts=int(updates["bridge_attempts"]),
+            retry_resume_chapter=int(state.get("retry_resume_chapter") or chapter_num),
+            segment_plan=updates["segment_plan"],
         )
     elif action in {"finalize", "force_finalize"}:
         finalized_end = max(int(state.get("book_start_chapter") or state.get("start_chapter") or 1), chapter_num - 1)
@@ -295,6 +294,13 @@ def node_closure_gate(state: GenerationState) -> GenerationState:
             volume_no=int(state.get("volume_no") or 1),
         )
     elif action == "rewrite_tail":
+        tail_plan = build_segment_plan(
+            start_chapter=int(state.get("segment_start_chapter") or state.get("start_chapter") or 1),
+            end_chapter=int(state.get("segment_end_chapter") or state.get("end_chapter") or chapter_num),
+            volume_no=int(state.get("volume_no") or 1),
+            plan_kind="tail_rewrite",
+            outlines=state.get("full_outlines") or [],
+        )
         progress(
             state,
             "closure_gate",
@@ -311,7 +317,10 @@ def node_closure_gate(state: GenerationState) -> GenerationState:
             segment_end_chapter=int(state.get("segment_end_chapter") or state.get("end_chapter") or chapter_num),
             book_effective_end_chapter=int(state.get("book_effective_end_chapter") or state.get("end_chapter") or chapter_num),
             volume_no=int(state.get("volume_no") or 1),
+            retry_resume_chapter=int(state.get("retry_resume_chapter") or max(int(state.get("segment_start_chapter") or state.get("start_chapter") or 1), chapter_num - 2)),
+            segment_plan=tail_plan,
         )
+        updates["segment_plan"] = tail_plan
     else:
         progress(
             state,
@@ -340,6 +349,13 @@ def node_tail_rewrite(state: GenerationState) -> GenerationState:
     rewind_to = max(start_chapter, current - 2)
     attempts = int(state.get("tail_rewrite_attempts") or 0) + 1
     closure_state_val = state.get("closure_state") or {}
+    tail_plan = build_segment_plan(
+        start_chapter=start_chapter,
+        end_chapter=int(state.get("segment_end_chapter") or state.get("end_chapter") or rewind_to),
+        volume_no=int(state.get("volume_no") or 1),
+        plan_kind="tail_rewrite",
+        outlines=state.get("full_outlines") or [],
+    )
     progress(
         state,
         "tail_rewrite",
@@ -376,10 +392,13 @@ def node_tail_rewrite(state: GenerationState) -> GenerationState:
         book_effective_end_chapter=int(state.get("book_effective_end_chapter") or state.get("end_chapter") or rewind_to),
         volume_no=int(state.get("volume_no") or 1),
         tail_rewrite_attempts=attempts,
+        retry_resume_chapter=int(state.get("retry_resume_chapter") or rewind_to),
+        segment_plan=tail_plan,
     )
     return {
         "current_chapter": rewind_to,
         "tail_rewrite_attempts": attempts,
+        "segment_plan": tail_plan,
         "decision_state": {
             **(state.get("decision_state") or {}),
             "closure": {
@@ -412,6 +431,14 @@ def node_bridge_chapter(state: GenerationState) -> GenerationState:
         segment_end_chapter=int(state.get("segment_end_chapter") or state.get("end_chapter") or chapter_num),
         book_effective_end_chapter=int(state.get("book_effective_end_chapter") or state.get("end_chapter") or chapter_num),
         volume_no=int(state.get("volume_no") or 1),
+        retry_resume_chapter=int(state.get("retry_resume_chapter") or chapter_num),
+        segment_plan=build_segment_plan(
+            start_chapter=int(state.get("segment_start_chapter") or state.get("start_chapter") or 1),
+            end_chapter=int(state.get("segment_end_chapter") or state.get("end_chapter") or chapter_num),
+            volume_no=int(state.get("volume_no") or 1),
+            plan_kind="bridge",
+            outlines=state.get("full_outlines") or [],
+        ),
     )
     return {
         "closure_state": {**(state.get("closure_state") or {}), "action": "continue"},
