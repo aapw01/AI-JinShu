@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.core.strategy import get_model_for_stage
+from app.core.strategy import get_inference_for_stage, get_model_for_stage
 from app.prompts import render_prompt
 from app.services.generation.common import logger
 from app.services.generation.heuristics import build_review_gate, normalize_reviewer_payload
@@ -15,6 +15,9 @@ def node_review(state: GenerationState) -> GenerationState:
     chapter_num = state["current_chapter"]
     progress(state, "reviewer", chapter_num, chapter_progress(state, 0.55), "章节审校...", {"current_phase": "chapter_review", "total_chapters": state["num_chapters"]})
     r_provider, r_model = get_model_for_stage(state["strategy"], "reviewer")
+    struct_inference = get_inference_for_stage(state["strategy"], "reviewer.structured")
+    factual_inference = get_inference_for_stage(state["strategy"], "reviewer.factual")
+    aesthetic_inference = get_inference_for_stage(state["strategy"], "reviewer.aesthetic")
     candidates = state.get("candidate_drafts") or [{"variant": "A", "draft": state.get("draft", "")}]
     _REVIEWER_FALLBACK: dict[str, Any] = {
         "score": 0.75, "confidence": 0.3, "feedback": "审校跳过（模型输出异常）",
@@ -30,11 +33,13 @@ def node_review(state: GenerationState) -> GenerationState:
                 struct_raw = state["reviewer"].run_structured(
                     text, chapter_num, state["target_language"],
                     state["native_style_profile"], r_provider, r_model,
+                    inference=struct_inference,
                 )
             else:
                 struct_raw = state["reviewer"].run(
                     text, chapter_num, state["target_language"],
                     state["native_style_profile"], r_provider, r_model,
+                    inference=struct_inference,
                 )
         except Exception as exc:
             logger.warning("reviewer.structured failed chapter=%s error=%s", chapter_num, exc)
@@ -45,11 +50,13 @@ def node_review(state: GenerationState) -> GenerationState:
                 factual_raw = state["reviewer"].run_factual_structured(
                     text, chapter_num, state.get("context") or {},
                     state["target_language"], r_provider, r_model,
+                    inference=factual_inference,
                 )
             else:
                 factual_raw = state["reviewer"].run_factual(
                     text, chapter_num, state.get("context") or {},
                     state["target_language"], r_provider, r_model,
+                    inference=factual_inference,
                 )
         except Exception as exc:
             logger.warning("reviewer.factual failed chapter=%s error=%s", chapter_num, exc)
@@ -60,11 +67,13 @@ def node_review(state: GenerationState) -> GenerationState:
                 aesthetic_raw = state["reviewer"].run_aesthetic_structured(
                     text, chapter_num, state["target_language"],
                     r_provider, r_model,
+                    inference=aesthetic_inference,
                 )
             else:
                 aesthetic_raw = state["reviewer"].run_aesthetic(
                     text, chapter_num, state["target_language"],
                     r_provider, r_model,
+                    inference=aesthetic_inference,
                 )
         except Exception as exc:
             logger.warning("reviewer.aesthetic failed chapter=%s error=%s", chapter_num, exc)

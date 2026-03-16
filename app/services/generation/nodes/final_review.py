@@ -4,7 +4,7 @@ from __future__ import annotations
 from sqlalchemy import select
 
 from app.core.database import SessionLocal
-from app.core.strategy import get_model_for_stage
+from app.core.strategy import get_inference_for_stage, get_model_for_stage
 from app.models.novel import ChapterVersion
 from app.services.generation.common import save_prewrite_artifacts
 from app.services.generation.progress import persist_resume_runtime_state, progress, volume_no_for_chapter
@@ -54,7 +54,14 @@ def node_final_book_review(state: GenerationState) -> GenerationState:
         {"current_phase": "full_book_review", "total_chapters": effective_total},
     )
     fr_provider, fr_model = get_model_for_stage(state["strategy"], "reviewer")
-    final_report = state["final_reviewer"].run_full_book(chapter_payload, state["target_language"], fr_provider, fr_model)
+    fr_inference = get_inference_for_stage(state["strategy"], "reviewer.book")
+    final_report = state["final_reviewer"].run_full_book(
+        chapter_payload,
+        state["target_language"],
+        fr_provider,
+        fr_model,
+        inference=fr_inference,
+    )
     save_prewrite_artifacts(state["novel_id"], {"final_book_review": final_report})
     state["quality_store"].add_report(
         novel_id=state["novel_id"],

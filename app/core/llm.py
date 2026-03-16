@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import logging
 import time
 from typing import Any
@@ -9,6 +10,7 @@ from typing import Any
 from langchain_anthropic import ChatAnthropic
 from langchain_core.language_models import BaseChatModel
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_google_genai._common import HarmBlockThreshold, HarmCategory
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
 from app.core.llm_usage import record_usage_from_response
@@ -19,6 +21,8 @@ logger = logging.getLogger(__name__)
 
 _LLM_REQUEST_TIMEOUT = 120
 _VALID_ADAPTER_TYPES = frozenset({"openai_compatible", "gemini", "anthropic"})
+_GEMINI_HARM_CATEGORY_MAP = {item.value: item for item in HarmCategory}
+_GEMINI_HARM_THRESHOLD_MAP = {item.value: item for item in HarmBlockThreshold}
 
 
 def _coerce_part_text(part: Any) -> str:
@@ -99,11 +103,105 @@ def _resolve_chat_provider_and_model(provider: str | None, model: str | None) ->
     return resolved_provider, resolved_model
 
 
-def _build_chat_model(provider_key: str, model_name: str) -> BaseChatModel:
+def _normalize_temperature(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    return float(value)
+
+
+def _normalize_gemini_safety_settings(
+    value: Any,
+) -> dict[HarmCategory, HarmBlockThreshold] | None:
+    if value in (None, "", []):
+        return None
+    if isinstance(value, dict):
+        entries = [{"category": key, "threshold": item} for key, item in value.items()]
+    elif isinstance(value, list):
+        entries = value
+    else:
+        raise ValueError("gemini.safety_settings must be a list or mapping")
+
+    normalized: dict[HarmCategory, HarmBlockThreshold] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("gemini.safety_settings items must be objects")
+        category_raw = str(entry.get("category") or "").strip().upper()
+        threshold_raw = str(entry.get("threshold") or "").strip().upper()
+        category = _GEMINI_HARM_CATEGORY_MAP.get(category_raw)
+        threshold = _GEMINI_HARM_THRESHOLD_MAP.get(threshold_raw)
+        if category is None:
+            raise ValueError(f"unsupported Gemini harm category: {category_raw or entry.get('category')!r}")
+        if threshold is None:
+            raise ValueError(f"unsupported Gemini harm threshold: {threshold_raw or entry.get('threshold')!r}")
+        normalized[category] = threshold
+    return normalized or None
+
+
+def normalize_inference_for_provider(provider_key: str | None, inference: dict[str, Any] | None) -> dict[str, Any]:
+    raw = deepcopy(inference or {})
+    if not raw:
+        return {}
+
+    adapter_type, _ = resolve_effective_adapter(provider_key)
+    normalized: dict[str, Any] = {}
+    temperature = _normalize_temperature(raw.get("temperature"))
+    if temperature is not None:
+        normalized["temperature"] = temperature
+
+    gemini_cfg = raw.get("gemini")
+    if gemini_cfg not in (None, {}):
+        if adapter_type != "gemini":
+            raise ValueError("gemini inference settings require the Gemini adapter")
+        if not isinstance(gemini_cfg, dict):
+            raise ValueError("gemini inference settings must be an object")
+        safety_settings = _normalize_gemini_safety_settings(gemini_cfg.get("safety_settings"))
+        if safety_settings:
+            normalized["safety_settings"] = safety_settings
+    return normalized
+
+
+def extract_provider_block(resp: Any) -> dict[str, str] | None:
+    def _extract_meta_dict(payload: Any) -> dict[str, Any] | None:
+        if isinstance(payload, dict):
+            return payload
+        for attr in ("response_metadata", "additional_kwargs"):
+            value = getattr(payload, attr, None)
+            if isinstance(value, dict):
+                return value
+        return None
+
+    meta = _extract_meta_dict(resp) or {}
+    prompt_feedback = meta.get("promptFeedback") or meta.get("prompt_feedback")
+    if not isinstance(prompt_feedback, dict):
+        prompt_feedback = meta
+    reason = str(
+        prompt_feedback.get("blockReason")
+        or prompt_feedback.get("block_reason")
+        or prompt_feedback.get("finish_reason")
+        or ""
+    ).strip()
+    if not reason:
+        return None
+    message = str(
+        prompt_feedback.get("blockReasonMessage")
+        or prompt_feedback.get("block_reason_message")
+        or prompt_feedback.get("message")
+        or ""
+    ).strip()
+    if not message and str(reason).lower() not in {"safety", "content_filter"} and not str(reason).upper().startswith("PROHIBITED_"):
+        return None
+    return {
+        "reason": reason,
+        "message": message,
+    }
+
+
+def _build_chat_model(provider_key: str, model_name: str, *, inference: dict[str, Any] | None = None) -> BaseChatModel:
     adapter_type, adapter_source = resolve_effective_adapter(provider_key)
     primary = get_primary_chat_runtime()
     resolved_base_url = _resolve_base_url(provider_key)
     resolved_api_key = _resolve_api_key(provider_key)
+    normalized_inference = normalize_inference_for_provider(provider_key, inference)
 
     log_event(
         logger,
@@ -125,6 +223,7 @@ def _build_chat_model(provider_key: str, model_name: str) -> BaseChatModel:
             api_key=resolved_api_key,
             timeout=_LLM_REQUEST_TIMEOUT,
             max_retries=0,
+            **normalized_inference,
         )
     if adapter_type == "gemini":
         kwargs: dict[str, Any] = {
@@ -134,6 +233,7 @@ def _build_chat_model(provider_key: str, model_name: str) -> BaseChatModel:
         }
         if resolved_base_url:
             kwargs["base_url"] = resolved_base_url
+        kwargs.update(normalized_inference)
         return ChatGoogleGenerativeAI(**kwargs)
     return ChatOpenAI(
         base_url=resolved_base_url or "https://api.openai.com/v1",
@@ -141,6 +241,7 @@ def _build_chat_model(provider_key: str, model_name: str) -> BaseChatModel:
         api_key=resolved_api_key,
         request_timeout=_LLM_REQUEST_TIMEOUT,
         max_retries=0,
+        **normalized_inference,
     )
 
 
@@ -244,12 +345,17 @@ class _TrackedLLMProxy:
         return repr(self._inner)
 
 
-def get_llm(provider: str | None = None, model: str | None = None) -> BaseChatModel:
+def get_llm(
+    provider: str | None = None,
+    model: str | None = None,
+    *,
+    inference: dict[str, Any] | None = None,
+) -> BaseChatModel:
     """Get LLM from the canonical primary model connection."""
     prov, resolved_model = _resolve_chat_provider_and_model(provider, model)
     log_event(logger, "llm.call.start", provider=prov, model=resolved_model)
     started = time.perf_counter()
-    llm = _build_chat_model(prov, resolved_model)
+    llm = _build_chat_model(prov, resolved_model, inference=inference)
     log_event(
         logger,
         "llm.call.success",
@@ -261,9 +367,14 @@ def get_llm(provider: str | None = None, model: str | None = None) -> BaseChatMo
     return _TrackedLLMProxy(llm, stage_prefix=stage_prefix)  # type: ignore[return-value]
 
 
-def get_llm_with_fallback(provider: str | None, model: str | None) -> BaseChatModel:
+def get_llm_with_fallback(
+    provider: str | None,
+    model: str | None,
+    *,
+    inference: dict[str, Any] | None = None,
+) -> BaseChatModel:
     """Compatibility wrapper. The system no longer supports multi-provider fallback."""
-    return get_llm(provider, model)
+    return get_llm(provider, model, inference=inference)
 
 
 def get_embedding_model() -> OpenAIEmbeddings:
