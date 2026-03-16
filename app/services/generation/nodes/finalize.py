@@ -7,7 +7,7 @@ from app.core.constants import DEFAULT_CHAPTER_WORD_COUNT
 from app.core.database import SessionLocal
 from app.core.i18n import evaluate_language_quality
 from app.core.llm_usage import snapshot_usage
-from app.core.strategy import get_model_for_stage
+from app.core.strategy import get_inference_for_stage, get_model_for_stage
 from app.models.novel import ChapterVersion
 from app.prompts import render_prompt
 from app.services.generation.chapter_commit import write_longform_artifacts
@@ -31,6 +31,7 @@ def node_finalize(state: GenerationState) -> GenerationState:
     chapter_num = state["current_chapter"]
     progress(state, "finalizer", chapter_num, chapter_progress(state, 0.70), "定稿...", {"current_phase": "chapter_finalizing", "total_chapters": state["num_chapters"]})
     f_provider, f_model = get_model_for_stage(state["strategy"], "finalizer")
+    fact_inference = get_inference_for_stage(state["strategy"], "fact_extractor")
     base_feedback = str(state.get("feedback") or "")
     format_guardrail = (
         "【输出格式纠偏】上一次输出包含说明性前言或标题污染。\n"
@@ -69,6 +70,7 @@ def node_finalize(state: GenerationState) -> GenerationState:
         language=state["target_language"],
         provider=f_provider,
         model=f_model,
+        inference=fact_inference,
     )
     final_content = normalize_chapter_content(final_content)
     language_score, language_report = evaluate_language_quality(final_content, state["target_language"])

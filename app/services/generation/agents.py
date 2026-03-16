@@ -8,7 +8,7 @@ from typing import Any
 from pydantic import BaseModel, ValidationError
 from langchain_core.output_parsers import PydanticOutputParser
 
-from app.core.llm import get_llm_with_fallback, response_to_text, _is_retryable
+from app.core.llm import extract_provider_block, get_llm_with_fallback, response_to_text, _is_retryable
 from app.core.llm_contract import invoke_chapter_body_structured
 from app.prompts import render_prompt
 from app.services.generation.common import normalize_title_text
@@ -143,6 +143,28 @@ def _invoke_json_with_schema(
                 version,
                 prompt_hash,
             )
+            provider_block = extract_provider_block(resp)
+            if provider_block:
+                reason = str(provider_block.get("reason") or "").strip()
+                message = str(provider_block.get("message") or "").strip()
+                error = f"provider blocked response reason={reason or 'unknown'}"
+                if message:
+                    error = f"{error} message={message}"
+                last_error_code = "MODEL_PROVIDER_BLOCKED"
+                delay = _AGENT_RETRY_BACKOFF[attempt] if attempt < len(_AGENT_RETRY_BACKOFF) else 10.0
+                logger.warning(
+                    "LLM structured provider block stage=%s schema=%s attempt=%s delay=%.1fs prompt_hash=%s reason=%s message=%s",
+                    stage,
+                    schema_cls.__name__,
+                    attempt + 1,
+                    delay,
+                    prompt_hash,
+                    reason,
+                    message,
+                )
+                if attempt < retries:
+                    time.sleep(delay)
+                continue
             content = response_to_text(resp).strip()
             if not content:
                 delay = _AGENT_RETRY_BACKOFF[attempt] if attempt < len(_AGENT_RETRY_BACKOFF) else 10.0
@@ -558,9 +580,10 @@ class ReviewerAgent:
         native_style_profile: str = "",
         provider: str | None = None,
         model: str | None = None,
+        inference: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         template = "reviewer_structured"
-        llm = get_llm_with_fallback(provider, model)
+        llm = get_llm_with_fallback(provider, model, inference=inference)
         prompt = render_prompt(
             template,
             chapter_num=chapter_num,
@@ -596,6 +619,7 @@ class ReviewerAgent:
         native_style_profile: str = "",
         provider: str | None = None,
         model: str | None = None,
+        inference: dict[str, Any] | None = None,
     ) -> tuple[float, str]:
         result = self.run_structured(
             draft=draft,
@@ -604,6 +628,7 @@ class ReviewerAgent:
             native_style_profile=native_style_profile,
             provider=provider,
             model=model,
+            inference=inference,
         )
         score = float(result.get("score", 0.8))
         feedback = str(result.get("feedback", ""))
@@ -618,8 +643,9 @@ class ReviewerAgent:
         language: str = "zh",
         provider: str | None = None,
         model: str | None = None,
+        inference: dict[str, Any] | None = None,
     ) -> tuple[float, str, list[str]]:
-        result = self.run_factual_structured(draft, chapter_num, context, language, provider, model)
+        result = self.run_factual_structured(draft, chapter_num, context, language, provider, model, inference=inference)
         return (
             float(result.get("score", 0.75)),
             str(result.get("feedback", "")),
@@ -634,9 +660,10 @@ class ReviewerAgent:
         language: str = "zh",
         provider: str | None = None,
         model: str | None = None,
+        inference: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         template = "reviewer_factual_structured"
-        llm = get_llm_with_fallback(provider, model)
+        llm = get_llm_with_fallback(provider, model, inference=inference)
         prompt = render_prompt(
             template,
             chapter_num=chapter_num,
@@ -671,8 +698,9 @@ class ReviewerAgent:
         language: str = "zh",
         provider: str | None = None,
         model: str | None = None,
+        inference: dict[str, Any] | None = None,
     ) -> tuple[float, str, list[str]]:
-        result = self.run_aesthetic_structured(draft, chapter_num, language, provider, model)
+        result = self.run_aesthetic_structured(draft, chapter_num, language, provider, model, inference=inference)
         return (
             float(result.get("score", 0.75)),
             str(result.get("feedback", "")),
@@ -686,9 +714,10 @@ class ReviewerAgent:
         language: str = "zh",
         provider: str | None = None,
         model: str | None = None,
+        inference: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         template = "reviewer_aesthetic_structured"
-        llm = get_llm_with_fallback(provider, model)
+        llm = get_llm_with_fallback(provider, model, inference=inference)
         prompt = render_prompt(
             template,
             chapter_num=chapter_num,
@@ -792,9 +821,10 @@ class FinalReviewerAgent:
         language: str = "zh",
         provider: str | None = None,
         model: str | None = None,
+        inference: dict[str, Any] | None = None,
     ) -> dict:
         template = "final_book_review"
-        llm = get_llm_with_fallback(provider, model)
+        llm = get_llm_with_fallback(provider, model, inference=inference)
         prompt = render_prompt(template, chapters=chapters, language=language)
         try:
             data = _invoke_json_with_schema(
@@ -822,9 +852,10 @@ class FactExtractorAgent:
         language: str = "zh",
         provider: str | None = None,
         model: str | None = None,
+        inference: dict[str, Any] | None = None,
     ) -> dict:
         template = "fact_extractor_structured"
-        llm = get_llm_with_fallback(provider, model)
+        llm = get_llm_with_fallback(provider, model, inference=inference)
         prompt = render_prompt(
             template,
             chapter_num=chapter_num,

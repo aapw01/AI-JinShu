@@ -1,6 +1,11 @@
 """Strategy factory - load stage-to-model mapping from presets/strategies/*.yaml."""
+from __future__ import annotations
+
+from copy import deepcopy
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
+
 import yaml
 
 from app.services.system_settings.runtime import get_primary_chat_runtime
@@ -13,6 +18,33 @@ DEFAULT_STAGES = {
     "reviewer": {"provider": "__default__", "model": "__default__"},
     "finalizer": {"provider": "__default__", "model": "__default__"},
 }
+DEFAULT_INFERENCE = {
+    "fact_extractor": {
+        "temperature": 0.1,
+        "gemini": {
+            "safety_settings": [
+                {
+                    "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                    "threshold": "BLOCK_ONLY_HIGH",
+                }
+            ]
+        },
+    },
+    "reviewer.structured": {"temperature": 0.2},
+    "reviewer.factual": {"temperature": 0.1},
+    "reviewer.aesthetic": {"temperature": 0.2},
+    "reviewer.book": {"temperature": 0.2},
+}
+
+
+def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = deepcopy(base)
+    for key, value in (override or {}).items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dicts(merged[key], value)
+        else:
+            merged[key] = deepcopy(value)
+    return merged
 
 
 @lru_cache(maxsize=32)
@@ -22,11 +54,15 @@ def get_strategy_config(strategy_key: str | None) -> dict:
         strategy_key = "web-novel"
     path = STRATEGIES_DIR / f"{strategy_key}.yaml"
     if not path.exists():
-        return {"stages": DEFAULT_STAGES}
+        return {
+            "stages": deepcopy(DEFAULT_STAGES),
+            "inference": deepcopy(DEFAULT_INFERENCE),
+        }
     with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
-    stages = data.get("stages") or DEFAULT_STAGES
-    return {**data, "stages": stages}
+    stages = _deep_merge_dicts(DEFAULT_STAGES, data.get("stages") or {})
+    inference = _deep_merge_dicts(DEFAULT_INFERENCE, data.get("inference") or {})
+    return {**data, "stages": stages, "inference": inference}
 
 
 def get_model_for_stage(strategy_key: str | None, stage: str) -> tuple[str, str]:
@@ -44,3 +80,19 @@ def get_model_for_stage(strategy_key: str | None, stage: str) -> tuple[str, str]
             model = default_model
         return provider, model
     return default_provider, default_model
+
+
+def get_inference_for_stage(strategy_key: str | None, stage: str) -> dict[str, Any]:
+    """Return stage-specific inference parameters for the resolved strategy."""
+    config = get_strategy_config(strategy_key)
+    inference = config.get("inference") or {}
+    resolved: dict[str, Any] = {}
+    base_stage = stage.split(".", 1)[0]
+    if base_stage != stage:
+        base_cfg = inference.get(base_stage)
+        if isinstance(base_cfg, dict):
+            resolved = _deep_merge_dicts(resolved, base_cfg)
+    stage_cfg = inference.get(stage)
+    if isinstance(stage_cfg, dict):
+        resolved = _deep_merge_dicts(resolved, stage_cfg)
+    return resolved

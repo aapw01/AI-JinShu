@@ -150,13 +150,13 @@ class TestVolumeReplanNode:
 
 
 class _DummyReviewer:
-    def run(self, draft, chapter_num, language, native_style_profile, provider, model):
+    def run(self, draft, chapter_num, language, native_style_profile, provider, model, inference=None):
         return (0.75 if "A文" in draft else 0.7), "结构反馈"
 
-    def run_factual(self, draft, chapter_num, context, language, provider, model):
+    def run_factual(self, draft, chapter_num, context, language, provider, model, inference=None):
         return (0.9 if "A文" in draft else 0.6), "事实反馈", []
 
-    def run_aesthetic(self, draft, chapter_num, language, provider, model):
+    def run_aesthetic(self, draft, chapter_num, language, provider, model, inference=None):
         return (0.65 if "A文" in draft else 0.95), "审美反馈", []
 
 

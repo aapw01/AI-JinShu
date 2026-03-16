@@ -109,6 +109,7 @@ const ERROR_CODE_HINTS: Record<string, string> = {
   MODEL_OUTPUT_SCHEMA_INVALID: "模型输出未满足正文结构协议，请重试或切换模型。",
   MODEL_OUTPUT_POLICY_VIOLATION: "模型输出触发内容门禁（前言/标题污染或正文长度不足）。",
   MODEL_OUTPUT_CONTRACT_EXHAUSTED: "结构化输出重试与回退均失败，建议切换 Provider/模型后重试。",
+  MODEL_PROVIDER_BLOCKED: "模型提供方拦截了当前请求内容，请重试或切换模型。",
 };
 
 export default function ProgressPage() {

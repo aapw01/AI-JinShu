@@ -17,3 +17,18 @@ stages:
   finalizer:
     provider: __default__
     model: __default__
+inference:
+  fact_extractor:
+    temperature: 0.1
+    gemini:
+      safety_settings:
+        - category: HARM_CATEGORY_DANGEROUS_CONTENT
+          threshold: BLOCK_ONLY_HIGH
+  reviewer.structured:
+    temperature: 0.2
+  reviewer.factual:
+    temperature: 0.1
+  reviewer.aesthetic:
+    temperature: 0.2
+  reviewer.book:
+    temperature: 0.2
