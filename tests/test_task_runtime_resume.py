@@ -9,7 +9,7 @@ from app.models.creation_task import CreationTask
 from app.models.novel import Novel, NovelVersion, UsageLedger, User
 from app.models.storyboard import StoryboardProject, StoryboardTask, StoryboardVersion
 from app.services.quota import record_generation_usage
-from app.tasks.generation import _resolve_generation_resume
+from app.tasks.generation import _resolve_completed_usage_totals, _resolve_generation_resume
 from app.services.scheduler.scheduler_service import dispatch_user_queue, reclaim_stale_running_tasks
 from app.services.task_runtime.checkpoint_repo import get_last_completed_unit, mark_unit_completed
 from app.services.task_runtime.cursor_service import resume_from_last_completed
@@ -238,6 +238,120 @@ def test_resume_plan_final_review_with_offset_range_reconstructs_full_span():
     assert plan.start_chapter == 1
     assert plan.num_chapters == 20
     assert plan.display_total_chapters == 20
+
+
+def test_completed_usage_totals_prefer_runtime_state_end_chapter():
+    task_id = _seed_creation_task(start_chapter=1, num_chapters=15)
+    db = SessionLocal()
+    try:
+        row = db.execute(select(CreationTask).where(CreationTask.id == task_id)).scalar_one()
+        row.resume_cursor_json = {
+            "unit_type": "chapter",
+            "partition": None,
+            "last_completed": 17,
+            "next": 18,
+            "runtime_state": {
+                "node": "final_book_review",
+                "resume_from_chapter": 18,
+                "effective_end_chapter": 17,
+                "effective_total_chapters": 17,
+                "tail_rewrite_attempts": 2,
+                "bridge_attempts": 2,
+                "terminal": True,
+            },
+        }
+        db.commit()
+        db.refresh(row)
+        current, total, completed = _resolve_completed_usage_totals(
+            row=row,
+            start_chapter=1,
+            fallback_current=15,
+            fallback_total=15,
+        )
+    finally:
+        db.close()
+
+    assert current == 17
+    assert total == 17
+    assert completed == 17
+
+
+def test_completed_usage_totals_keep_absolute_total_for_offset_range():
+    task_id = _seed_creation_task(start_chapter=18, num_chapters=3)
+    db = SessionLocal()
+    try:
+        row = db.execute(select(CreationTask).where(CreationTask.id == task_id)).scalar_one()
+        row.resume_cursor_json = {
+            "unit_type": "chapter",
+            "partition": None,
+            "last_completed": 20,
+            "next": 21,
+            "runtime_state": {
+                "node": "final_book_review",
+                "resume_from_chapter": 21,
+                "effective_end_chapter": 20,
+                "effective_total_chapters": 20,
+                "tail_rewrite_attempts": 1,
+                "bridge_attempts": 0,
+                "terminal": True,
+            },
+        }
+        db.commit()
+        db.refresh(row)
+        current, total, completed = _resolve_completed_usage_totals(
+            row=row,
+            start_chapter=18,
+            fallback_current=20,
+            fallback_total=20,
+        )
+    finally:
+        db.close()
+
+    assert current == 20
+    assert total == 20
+    assert completed == 3
+
+
+def test_completed_usage_totals_do_not_promote_midrange_retry_to_book_end():
+    task_id = _seed_creation_task(start_chapter=5, num_chapters=3)
+    db = SessionLocal()
+    try:
+        row = db.execute(select(CreationTask).where(CreationTask.id == task_id)).scalar_one()
+        row.payload_json = {
+            "novel_id": 1,
+            "start_chapter": 5,
+            "num_chapters": 3,
+            "original_total_chapters": 20,
+        }
+        row.resume_cursor_json = {
+            "unit_type": "chapter",
+            "partition": None,
+            "last_completed": 7,
+            "next": 8,
+            "runtime_state": {
+                "node": "final_book_review",
+                "resume_from_chapter": 8,
+                "effective_end_chapter": 7,
+                "effective_total_chapters": 20,
+                "tail_rewrite_attempts": 0,
+                "bridge_attempts": 0,
+                "terminal": True,
+            },
+        }
+        db.commit()
+        db.refresh(row)
+        current, total, completed = _resolve_completed_usage_totals(
+            row=row,
+            start_chapter=5,
+            fallback_current=7,
+            fallback_total=20,
+        )
+    finally:
+        db.close()
+
+    assert current == 7
+    assert total == 20
+    assert completed == 3
 
 
 def test_reclaim_stale_running_task(monkeypatch):

@@ -5,8 +5,10 @@ from typing import Any
 
 from sqlalchemy import select
 
+from app.core.strategy import get_model_for_stage
 from app.core.database import SessionLocal
 from app.models.novel import StoryForeshadow
+from app.services.generation.common import upsert_chapter_outline
 from app.services.generation.policies import ClosurePolicyEngine, ClosurePolicyInput
 from app.services.generation.progress import (
     chapter_progress,
@@ -16,6 +18,58 @@ from app.services.generation.progress import (
     volume_no_for_chapter,
 )
 from app.services.generation.state import GenerationState
+
+
+def _merge_full_outlines(
+    outlines: list[dict[str, Any]] | None,
+    new_outline: dict[str, Any],
+) -> list[dict[str, Any]]:
+    merged = [dict(item) for item in (outlines or []) if isinstance(item, dict)]
+    chapter_num = int(new_outline.get("chapter_num") or 0)
+    updated = False
+    for idx, item in enumerate(merged):
+        if int(item.get("chapter_num") or 0) == chapter_num:
+            merged[idx] = dict(new_outline)
+            updated = True
+            break
+    if not updated:
+        merged.append(dict(new_outline))
+    merged.sort(key=lambda item: int(item.get("chapter_num") or 0))
+    return merged
+
+
+def _build_bridge_outline_plan(state: GenerationState, chapter_num: int) -> dict[str, Any]:
+    outlines = [dict(item) for item in (state.get("full_outlines") or []) if isinstance(item, dict)]
+    recent_outlines = [
+        item for item in outlines
+        if int(item.get("chapter_num") or 0) < chapter_num
+    ][-3:]
+    return {
+        "prewrite": state.get("prewrite") or {},
+        "target_chapters": int(state.get("target_chapters") or state.get("num_chapters") or chapter_num),
+        "effective_total_chapters": max(int(state.get("end_chapter") or 0), int(chapter_num)),
+        "closure_state": state.get("closure_state") or {},
+        "decision_state": state.get("decision_state") or {},
+        "volume_plan": state.get("volume_plan") or {},
+        "recent_outlines": recent_outlines,
+    }
+
+
+def _generate_bridge_outline(state: GenerationState, chapter_num: int) -> dict[str, Any]:
+    out_provider, out_model = get_model_for_stage(state["strategy"], "outliner")
+    raw_outline = state["outliner"].run(
+        str(state["novel_id"]),
+        chapter_num,
+        _build_bridge_outline_plan(state, chapter_num),
+        state["target_language"],
+        out_provider,
+        out_model,
+    )
+    return upsert_chapter_outline(
+        state["novel_id"],
+        {**(raw_outline or {}), "chapter_num": chapter_num},
+        novel_version_id=state.get("novel_version_id"),
+    )
 
 
 def build_closure_state(state: GenerationState) -> dict[str, Any]:
@@ -197,6 +251,9 @@ def node_closure_gate(state: GenerationState) -> GenerationState:
             "收官检查未通过，自动扩展1章进行补完",
             progress_meta,
         )
+        bridge_outline = _generate_bridge_outline(state, chapter_num)
+        updates["full_outlines"] = _merge_full_outlines(state.get("full_outlines"), bridge_outline)
+        updates["outline"] = bridge_outline
         persist_resume_runtime_state(
             state,
             node="bridge_chapter",
