@@ -1,21 +1,44 @@
-{# Chapter blueprint - detailed outline #}
-Create a detailed chapter blueprint for chapter {{ chapter_num }}.
+你是章节规划器。请为第{{ chapter_num }}章生成单章结构化大纲，只返回 JSON。
 
-**Plan from architect**:
-{{ plan | default({}) | tojson }}
+<architect_plan_json>
+{{ plan | default({}) | tojson_pretty }}
+</architect_plan_json>
 
-**Context**:
-{{ context | default({}) | tojson }}
+<context_json>
+{{ context | default({}) | tojson_pretty }}
+</context_json>
 
-**Word count target**: {{ word_count or 3000 }}
+<requirements>
+- 本章必须产生新的有效推进，不能复述上一章已完成的结论。
+- 若上一章有明确离场/转场/未完成动作，本章必须给出 `transition_mode` 与开篇承接方式。
+- `forbidden_repeats` 中的内容不可作为本章主推进。
+- 重点规划：本章目标、必须新增的信息、不可逆变化、关系变化、开篇场景与衔接方式。
+</requirements>
 
-**Style requirements**:
-- Pace: {{ pace or 'medium' }}
-- Focus: {{ focus or 'balanced' }}
-
-Output:
-1. Chapter title (compelling, not spoiler)
-2. Scene breakdown (3-4 scenes)
-3. Key dialogue moments
-4. Sensory anchors per scene
-5. POV and transitions
+<output_schema>
+{
+  "title": "章节标题",
+  "outline": "本章核心剧情概述",
+  "role": "章节功能",
+  "purpose": "章节目的",
+  "suspense_level": "低/中/高",
+  "foreshadowing": "本章埋下或承接的伏笔",
+  "plot_twist_level": "低/中/高",
+  "hook": "章末钩子",
+  "payoff": "本章兑现点",
+  "mini_climax": "本章小高潮",
+  "summary": "一句话总结",
+  "chapter_objective": "本章必须推进的核心目标",
+  "required_new_information": ["本章新增信息1"],
+  "required_irreversible_change": "本章不可逆变化",
+  "relationship_delta": "关系变化",
+  "conflict_axis": "主要冲突轴",
+  "payoff_kind": "payoff类型",
+  "reveal_kind": "reveal类型",
+  "forbidden_repeats": ["禁止重复的推进点"],
+  "opening_scene": "开篇场景",
+  "opening_character_positions": ["角色位置/站位"],
+  "opening_time_state": "开篇时间状态",
+  "transition_mode": "direct/cut/time_skip/aftermath"
+}
+</output_schema>

@@ -27,6 +27,7 @@ from app.services.generation.heuristics import aesthetic_score, chapter_progress
 from app.services.generation.policies import PacingController, PacingInput
 from app.services.generation.progress import chapter_progress, persist_resume_runtime_state, progress
 from app.services.generation.state import GenerationState
+from app.services.memory.progression_control import ProgressionPromotionService
 
 _SENTENCE_SPLIT_RE = re.compile(r"[。！？!?；;…]+")
 
@@ -106,11 +107,32 @@ def _ensure_retry_write_allowed(state: GenerationState, chapter_num: int) -> Non
     )
 
 
+def _is_quality_passed(
+    *,
+    review_score: float,
+    factual_score: float,
+    progression_score: float,
+    language_score: float,
+    reviewer_aesthetic: float,
+    aesthetic_score_val: float,
+) -> bool:
+    return bool(
+        review_score >= REVIEW_SCORE_THRESHOLD
+        and factual_score >= 0.65
+        and progression_score >= 0.62
+        and language_score >= 0.6
+        and reviewer_aesthetic >= 0.6
+        and aesthetic_score_val >= 0.6
+    )
+
+
 def node_finalize(state: GenerationState) -> GenerationState:
     chapter_num = state["current_chapter"]
     progress(state, "finalizer", chapter_num, chapter_progress(state, 0.70), "定稿...", {"current_phase": "chapter_finalizing", "total_chapters": state["num_chapters"]})
     f_provider, f_model = get_model_for_stage(state["strategy"], "finalizer")
     fact_inference = get_inference_for_stage(state["strategy"], "fact_extractor")
+    progression_inference = get_inference_for_stage(state["strategy"], "progression_memory")
+    progression_provider, progression_model = get_model_for_stage(state["strategy"], "reviewer")
     base_feedback = str(state.get("feedback") or "")
     format_guardrail = (
         "【输出格式纠偏】上一次输出包含说明性前言或标题污染。\n"
@@ -172,6 +194,18 @@ def node_finalize(state: GenerationState) -> GenerationState:
     )
     language_score, language_report = evaluate_language_quality(final_content, state["target_language"])
     aesthetic_score_val = aesthetic_score(final_content)
+    progression_memory_raw: dict[str, object] = {
+        "advancement": {},
+        "transition": {},
+        "advancement_confidence": 0.0,
+        "transition_confidence": 0.0,
+        "validation_notes": [],
+    }
+    progression_promotion: dict[str, object] = {
+        "decision": "promote_none",
+        "promotion_score": 0.0,
+        "promoted_payload": {"advancement": {}, "transition": {}},
+    }
     chapter_title = resolve_chapter_title(
         chapter_num=chapter_num,
         title=(state.get("outline") or {}).get("title"),
@@ -183,13 +217,36 @@ def node_finalize(state: GenerationState) -> GenerationState:
     try:
         progress(state, "memory_update", chapter_num, chapter_progress(state, 0.85), "生成摘要 & 更新记忆...", {"current_phase": "memory_update", "total_chapters": state["num_chapters"]})
         summary_text = generate_chapter_summary(final_content, state["outline"], chapter_num, state["target_language"], state["strategy"])
+        progression_memory_raw = state["progression_memory_extractor"].run(
+            chapter_num=chapter_num,
+            content=final_content,
+            outline=state.get("outline") or {},
+            language=state["target_language"],
+            provider=progression_provider,
+            model=progression_model,
+            inference=progression_inference,
+        )
+        progression_promotion = ProgressionPromotionService().decide(
+            chapter_num=chapter_num,
+            extraction=progression_memory_raw,
+            outline_contract=((state.get("context") or {}).get("outline_contract") if isinstance(state.get("context"), dict) else None)
+            or state.get("outline")
+            or {},
+            review_suggestions=state.get("review_suggestions") if isinstance(state.get("review_suggestions"), dict) else {},
+            review_gate=state.get("review_gate") if isinstance(state.get("review_gate"), dict) else {},
+        )
+        promoted_progression = progression_promotion.get("promoted_payload")
+        progression_memory = promoted_progression if isinstance(promoted_progression, dict) else {"advancement": {}, "transition": {}}
         factual_score = float(state.get("factual_score", 0.0) or 0.0)
+        progression_score = float(state.get("progression_score", 0.0) or 0.0)
         reviewer_aesthetic = float(state.get("aesthetic_review_score", 0.0) or 0.0)
-        quality_passed = bool(
-            state.get("score", 0.0) >= REVIEW_SCORE_THRESHOLD
-            and factual_score >= 0.65
-            and language_score >= 0.6
-            and reviewer_aesthetic >= 0.6
+        quality_passed = _is_quality_passed(
+            review_score=float(state.get("score", 0.0) or 0.0),
+            factual_score=factual_score,
+            progression_score=progression_score,
+            language_score=language_score,
+            reviewer_aesthetic=reviewer_aesthetic,
+            aesthetic_score_val=aesthetic_score_val,
         )
         state["summary_mgr"].add_summary(
             state["novel_id"],
@@ -242,7 +299,12 @@ def node_finalize(state: GenerationState) -> GenerationState:
                 "context_budget_used": state["context"].get("budget_used", 0),
                 "rerun_count": state.get("rerun_count", 0),
                 "factual_score": factual_score,
+                "progression_score": progression_score,
                 "aesthetic_review_score": reviewer_aesthetic,
+                "chapter_advancement": progression_memory.get("advancement") or {},
+                "chapter_transition": progression_memory.get("transition") or {},
+                "progression_memory_raw": progression_memory_raw,
+                "progression_promotion": progression_promotion,
             },
         }
         if existing:
@@ -265,6 +327,8 @@ def node_finalize(state: GenerationState) -> GenerationState:
             aesthetic_score_val=aesthetic_score_val,
             revision_count=revision_count,
             extracted_facts=extracted_facts,
+            progression_memory=progression_memory,
+            progression_promotion=progression_promotion,
             db=db,
         )
         db.commit()
@@ -306,16 +370,23 @@ def node_finalize(state: GenerationState) -> GenerationState:
     decision_state["quality"] = {
         "review_score": round(float(state.get("score", 0.0) or 0.0), 4),
         "factual_score": round(float(factual_score), 4),
+        "progression_score": round(float(state.get("progression_score", 0.0) or 0.0), 4),
         "language_score": round(float(language_score), 4),
         "aesthetic_score": round(float(aesthetic_score_val), 4),
         "consistency_scorecard": state.get("consistency_scorecard") or {},
         "review_gate": state.get("review_gate") or {},
+        "chapter_advancement": progression_memory.get("advancement") if isinstance(progression_memory, dict) else {},
+        "chapter_transition": progression_memory.get("transition") if isinstance(progression_memory, dict) else {},
+        "progression_promotion": progression_promotion,
         "quality_passed": bool(
-            state.get("score", 0.0) >= REVIEW_SCORE_THRESHOLD
-            and factual_score >= 0.65
-            and language_score >= 0.6
-            and float(state.get("aesthetic_review_score", 0.0) or 0.0) >= 0.6
-            and aesthetic_score_val >= 0.6
+            _is_quality_passed(
+                review_score=float(state.get("score", 0.0) or 0.0),
+                factual_score=factual_score,
+                progression_score=float(state.get("progression_score", 0.0) or 0.0),
+                language_score=language_score,
+                reviewer_aesthetic=float(state.get("aesthetic_review_score", 0.0) or 0.0),
+                aesthetic_score_val=aesthetic_score_val,
+            )
         ),
         "review_suggestions": state.get("review_suggestions") or {},
     }
@@ -350,12 +421,13 @@ def node_finalize(state: GenerationState) -> GenerationState:
         )
     factual_score = float(state.get("factual_score", 0.0) or 0.0)
     reviewer_aesthetic = float(state.get("aesthetic_review_score", 0.0) or 0.0)
-    quality_passed = bool(
-        state.get("score", 0.0) >= REVIEW_SCORE_THRESHOLD
-        and factual_score >= 0.65
-        and language_score >= 0.6
-        and reviewer_aesthetic >= 0.6
-        and aesthetic_score_val >= 0.6
+    quality_passed = _is_quality_passed(
+        review_score=float(state.get("score", 0.0) or 0.0),
+        factual_score=factual_score,
+        progression_score=float(state.get("progression_score", 0.0) or 0.0),
+        language_score=language_score,
+        reviewer_aesthetic=reviewer_aesthetic,
+        aesthetic_score_val=aesthetic_score_val,
     )
     fail_reason = ""
     if not quality_passed:
@@ -364,6 +436,8 @@ def node_finalize(state: GenerationState) -> GenerationState:
             fail_reasons.append("结构推进不足")
         if factual_score < 0.65:
             fail_reasons.append("事实一致性不足")
+        if float(state.get("progression_score", 0.0) or 0.0) < 0.62:
+            fail_reasons.append("剧情推进重复或衔接不连续")
         if language_score < 0.6:
             fail_reasons.append("语言自然度不足")
         if reviewer_aesthetic < 0.6 or aesthetic_score_val < 0.6:

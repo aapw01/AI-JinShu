@@ -13,6 +13,7 @@ from app.services.generation.agents import (
     FinalReviewerAgent,
     OutlinerAgent,
     PrewritePlannerAgent,
+    ProgressionMemoryAgent,
     ReviewerAgent,
     WriterAgent,
 )
@@ -32,6 +33,7 @@ from app.services.generation.segment_plan import (
 )
 from app.services.generation.state import GenerationState
 from app.services.memory.character_state import CharacterStateManager
+from app.services.memory.progression_state import ProgressionMemoryManager
 from app.services.memory.story_bible import CheckpointStore, QualityReportStore, StoryBibleStore
 from app.services.memory.summary_manager import SummaryManager
 from app.services.task_runtime.checkpoint_repo import get_resume_runtime_state
@@ -115,6 +117,7 @@ def node_init(state: GenerationState) -> GenerationState:
             },
             "summary_mgr": SummaryManager(),
             "char_mgr": CharacterStateManager(),
+            "progression_mgr": ProgressionMemoryManager(),
             "prewrite_agent": PrewritePlannerAgent(),
             "outliner": OutlinerAgent(),
             "writer": WriterAgent(),
@@ -122,6 +125,7 @@ def node_init(state: GenerationState) -> GenerationState:
             "finalizer": FinalizerAgent(),
             "final_reviewer": FinalReviewerAgent(),
             "fact_extractor": FactExtractorAgent(),
+            "progression_memory_extractor": ProgressionMemoryAgent(),
             "current_chapter": resume_chapter,
             "start_chapter": segment_start,
             "num_chapters": segment_target,
@@ -238,13 +242,20 @@ def node_outline(state: GenerationState) -> GenerationState:
         novel_id=state["novel_id"],
         num_chapters=state["num_chapters"],
         prewrite=state["prewrite"],
+        planning_context=state.get("volume_plan") or {},
         start_chapter=segment_start,
         language=state["target_language"],
         provider=out_provider,
         model=out_model,
     )
     is_resume = _is_resume_like(state)
-    save_full_outlines(state["novel_id"], full_outlines, novel_version_id=state.get("novel_version_id"), replace_all=not is_resume)
+    replace_all = (not is_resume) and segment_start <= int(state.get("book_start_chapter") or 1)
+    save_full_outlines(
+        state["novel_id"],
+        full_outlines,
+        novel_version_id=state.get("novel_version_id"),
+        replace_all=replace_all,
+    )
     full_outlines = load_outlines_from_db(state["novel_id"], state.get("novel_version_id"))
     plan = build_segment_plan(
         start_chapter=segment_start,

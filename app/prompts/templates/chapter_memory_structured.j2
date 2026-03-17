@@ -1,0 +1,56 @@
+你是小说章节运行记忆抽取器。请基于虚构章节内容抽取“推进记忆”和“衔接记忆”，只返回 JSON。
+
+<chapter_num>{{ chapter_num }}</chapter_num>
+
+<outline_json>
+{{ outline_json }}
+</outline_json>
+
+<chapter_text>
+{{ content }}
+</chapter_text>
+
+<rules>
+- 只抽取文本中已经明确发生或明确成立的信息，不要猜测。
+- `advancement` 强调本章新增推进，不要把背景说明当成推进。
+- 不要把 outline 中的计划、目标、预期事件直接当作已经发生的事实写入记忆。
+- `transition` 只记录本章结尾的可衔接状态。
+- 若证据不足，对应字段留空或空数组。
+</rules>
+
+<output_schema>
+{
+  "advancement": {
+    "chapter_objective": "本章目标",
+    "actual_progress": "本章实际推进",
+    "new_information": ["本章新增信息"],
+    "irreversible_change": "本章不可逆变化",
+    "relationship_delta": "关系推进",
+    "conflict_axis": "主要冲突轴",
+    "payoff_kind": "payoff类型",
+    "reveal_kind": "reveal类型",
+    "resolved_threads": ["本章已解决线程"],
+    "new_unresolved_threads": ["本章新增未解线程"],
+    "forbidden_repeats": ["下一章禁止重复的内容"],
+    "phase": "本章所在阶段",
+    "major_beats": ["本章关键桥段"]
+  },
+  "transition": {
+    "ending_scene": "本章结尾主场景",
+    "character_positions": ["主要角色位置"],
+    "physical_state": "主要角色身体/行动状态",
+    "last_action": "最后一个明确动作",
+    "time_state": "时间状态",
+    "scene_exit": "结尾离场/转场方式",
+    "unresolved_exit": "尚未完成的动作或出口"
+  },
+  "advancement_confidence": 0.0,
+  "transition_confidence": 0.0,
+  "validation_notes": ["抽取时的不确定点或校验说明"]
+}
+</output_schema>
+
+补充要求：
+- `advancement_confidence` / `transition_confidence` 使用 `0.0~1.0` 浮点数，表示你对抽取结果可靠性的判断。
+- 若某部分证据较弱，请在 `validation_notes` 中简要说明原因。
+- 置信度偏低时保持保守，不要为了填满字段而猜测。

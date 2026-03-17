@@ -15,6 +15,12 @@ from sqlalchemy.orm import Session
 from app.core.database import SessionLocal
 from app.core.tokens import estimate_tokens
 from app.models.novel import ChapterVersion, NovelSpecification
+from app.services.memory.progression_state import (
+    ProgressionMemoryManager,
+    build_anti_repeat_constraints,
+    build_transition_constraints,
+    normalize_outline_contract,
+)
 from app.services.memory.summary_manager import SummaryManager
 from app.services.memory.story_bible import StoryBibleStore
 from app.services.memory.thread_ledger import get_thread_ledger
@@ -148,18 +154,53 @@ def build_chapter_context(
     outline: dict,
     db: Optional[Session] = None,
     token_budget: int = CONTEXT_TOKEN_BUDGET,
+    volume_size: int = 30,
 ) -> dict:
     """Build layered context within token budget."""
     should_close = db is None
     db = db or SessionLocal()
     summary_mgr = SummaryManager()
     vector_store = VectorStoreWrapper()
+    progression_mgr = ProgressionMemoryManager()
 
     try:
+        outline_contract = normalize_outline_contract(outline, chapter_num)
         global_bible = _compress_global_bible(prewrite)
         thread_ledger = get_thread_ledger(novel_id, chapter_num, prewrite, db=db)
         thread_ledger_str = _format_thread_ledger(thread_ledger)
         story_bible_context = _build_story_bible_context(novel_id, novel_version_id, chapter_num, db)
+        recent_advancement_window = progression_mgr.list_recent_advancements(
+            novel_id,
+            chapter_num,
+            limit=RECENT_WINDOW_SIZE,
+            novel_version_id=novel_version_id,
+            db=db,
+        )
+        previous_transition_state = progression_mgr.get_previous_transition(
+            novel_id,
+            chapter_num,
+            novel_version_id=novel_version_id,
+            db=db,
+        ) or {}
+        current_volume_no = max(1, ((max(1, chapter_num) - 1) // max(1, volume_size)) + 1)
+        current_volume_arc_state = progression_mgr.get_volume_arc_state(
+            novel_id,
+            current_volume_no,
+            novel_version_id=novel_version_id,
+            db=db,
+        ) or {}
+        book_progression_state = progression_mgr.get_book_progression_state(
+            novel_id,
+            novel_version_id=novel_version_id,
+            db=db,
+        ) or {}
+        anti_repeat_constraints = build_anti_repeat_constraints(
+            recent_advancement_window,
+            current_volume_arc_state,
+            book_progression_state,
+            outline_contract,
+        )
+        transition_constraints = build_transition_constraints(previous_transition_state)
 
         all_before = summary_mgr.get_summaries_before(novel_id, novel_version_id, chapter_num, db=db)
         recent_summaries = all_before[-RECENT_WINDOW_SIZE:]
@@ -181,6 +222,8 @@ def build_chapter_context(
             + estimate_tokens(recent_window)
             + estimate_tokens(volume_brief)
             + estimate_tokens(story_bible_context)
+            + estimate_tokens(str(anti_repeat_constraints))
+            + estimate_tokens(str(transition_constraints))
         )
 
         knowledge_chunks: list[dict] = []
@@ -201,6 +244,13 @@ def build_chapter_context(
             "thread_ledger": thread_ledger,
             "thread_ledger_text": thread_ledger_str,
             "story_bible_context": story_bible_context,
+            "outline_contract": outline_contract,
+            "recent_advancement_window": recent_advancement_window,
+            "previous_transition_state": previous_transition_state,
+            "current_volume_arc_state": current_volume_arc_state,
+            "book_progression_state": book_progression_state,
+            "anti_repeat_constraints": anti_repeat_constraints,
+            "transition_constraints": transition_constraints,
             "recent_window": recent_window,
             "volume_brief": volume_brief,
             "knowledge_chunks": knowledge_chunks,
@@ -219,6 +269,7 @@ def get_context_for_chapter(
     prewrite: Optional[dict] = None,
     outline: Optional[dict] = None,
     novel_version_id: int | None = None,
+    volume_size: int = 30,
 ) -> dict:
     """Load relevant context for chapter generation. Backward compatible."""
     novel_id = int(novel_id)
@@ -228,7 +279,15 @@ def get_context_for_chapter(
     try:
         prewrite = prewrite if prewrite is not None else _load_prewrite_from_db(novel_id, db)
         outline = outline if outline is not None else _load_outline_from_db(novel_id, novel_version_id, chapter_num, db)
-        ctx = build_chapter_context(novel_id, novel_version_id, chapter_num, prewrite, outline, db=db)
+        ctx = build_chapter_context(
+            novel_id,
+            novel_version_id,
+            chapter_num,
+            prewrite,
+            outline,
+            db=db,
+            volume_size=volume_size,
+        )
         all_before = summary_mgr.get_summaries_before(novel_id, novel_version_id, chapter_num, db=db)
         ctx["summaries"] = all_before[-RECENT_WINDOW_SIZE:]
         from app.services.memory.character_state import CharacterStateManager

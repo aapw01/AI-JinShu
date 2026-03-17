@@ -3,12 +3,17 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.core.strategy import get_inference_for_stage, get_model_for_stage
+from app.core.strategy import get_inference_for_stage, get_model_for_stage, get_review_weights
 from app.prompts import render_prompt
 from app.services.generation.common import logger
-from app.services.generation.heuristics import build_review_gate, normalize_reviewer_payload
+from app.services.generation.heuristics import (
+    build_review_gate,
+    normalize_progression_payload,
+    normalize_reviewer_payload,
+)
 from app.services.generation.progress import chapter_progress, progress
 from app.services.generation.state import GenerationState
+from app.services.memory.progression_control import rollback_progression_range
 
 
 def node_review(state: GenerationState) -> GenerationState:
@@ -17,7 +22,9 @@ def node_review(state: GenerationState) -> GenerationState:
     r_provider, r_model = get_model_for_stage(state["strategy"], "reviewer")
     struct_inference = get_inference_for_stage(state["strategy"], "reviewer.structured")
     factual_inference = get_inference_for_stage(state["strategy"], "reviewer.factual")
+    progression_inference = get_inference_for_stage(state["strategy"], "reviewer.progression")
     aesthetic_inference = get_inference_for_stage(state["strategy"], "reviewer.aesthetic")
+    review_weights = get_review_weights(state["strategy"])
     candidates = state.get("candidate_drafts") or [{"variant": "A", "draft": state.get("draft", "")}]
     _REVIEWER_FALLBACK: dict[str, Any] = {
         "score": 0.75, "confidence": 0.3, "feedback": "审校跳过（模型输出异常）",
@@ -63,6 +70,20 @@ def node_review(state: GenerationState) -> GenerationState:
             factual_raw = dict(_REVIEWER_FALLBACK)
 
         try:
+            progression_raw = state["reviewer"].run_progression_structured(
+                text,
+                chapter_num,
+                state.get("context") or {},
+                state["target_language"],
+                r_provider,
+                r_model,
+                inference=progression_inference,
+            )
+        except Exception as exc:
+            logger.warning("reviewer.progression failed chapter=%s error=%s", chapter_num, exc)
+            progression_raw = dict(_REVIEWER_FALLBACK)
+
+        try:
             if hasattr(state["reviewer"], "run_aesthetic_structured"):
                 aesthetic_raw = state["reviewer"].run_aesthetic_structured(
                     text, chapter_num, state["target_language"],
@@ -81,12 +102,19 @@ def node_review(state: GenerationState) -> GenerationState:
 
         struct_pack = normalize_reviewer_payload(struct_raw, "结构审校结果")
         factual_pack = normalize_reviewer_payload(factual_raw, "事实审校结果")
+        progression_pack = normalize_progression_payload(progression_raw, "推进审校结果")
         aesthetic_pack = normalize_reviewer_payload(aesthetic_raw, "审美审校结果")
         struct_score = float(struct_pack.get("score", 0.75))
         factual_score = float(factual_pack.get("score", 0.75))
+        progression_score = float(progression_pack.get("score", 0.75))
         aesthetic_score_val = float(aesthetic_pack.get("score", 0.75))
-        combined = (struct_score * 0.45) + (factual_score * 0.35) + (aesthetic_score_val * 0.20)
-        review_gate = build_review_gate(text, struct_pack, factual_pack, aesthetic_pack)
+        combined = (
+            (struct_score * review_weights["structure"])
+            + (factual_score * review_weights["factual"])
+            + (progression_score * review_weights["progression"])
+            + (aesthetic_score_val * review_weights["aesthetic"])
+        )
+        review_gate = build_review_gate(text, struct_pack, factual_pack, progression_pack, aesthetic_pack)
         if review_gate.get("over_correction_risk"):
             combined = min(1.0, combined + 0.05)
         item = {
@@ -95,14 +123,20 @@ def node_review(state: GenerationState) -> GenerationState:
             "combined": combined,
             "struct_score": struct_score,
             "factual_score": factual_score,
+            "progression_score": progression_score,
             "aesthetic_score": aesthetic_score_val,
             "feedback": str(struct_pack.get("feedback") or ""),
             "factual_feedback": str(factual_pack.get("feedback") or ""),
+            "progression_feedback": str(progression_pack.get("feedback") or ""),
             "aesthetic_feedback": str(aesthetic_pack.get("feedback") or ""),
             "contradictions": factual_pack.get("contradictions") or [],
+            "duplicate_beats": progression_pack.get("duplicate_beats") or [],
+            "no_new_delta": progression_pack.get("no_new_delta") or [],
+            "transition_conflict": progression_pack.get("transition_conflict") or [],
             "highlights": aesthetic_pack.get("positives") or [],
             "struct_pack": struct_pack,
             "factual_pack": factual_pack,
+            "progression_pack": progression_pack,
             "aesthetic_pack": aesthetic_pack,
             "review_gate": review_gate,
         }
@@ -118,6 +152,7 @@ def node_review(state: GenerationState) -> GenerationState:
         "scorecards": {
             "structure": best.get("struct_pack") or {},
             "factual": best.get("factual_pack") or {},
+            "progression": best.get("progression_pack") or {},
             "aesthetic": best.get("aesthetic_pack") or {},
         },
         "review_gate": best.get("review_gate") or {},
@@ -130,6 +165,18 @@ def node_review(state: GenerationState) -> GenerationState:
     if "伏笔" in factual_fb or "回收" in factual_fb:
         suggestions["missing_payoff"].append(factual_fb[:180])
         suggestions["closure_risk"].append("存在伏笔回收风险")
+    progression_fb = str(best.get("progression_feedback") or "")
+    if progression_fb:
+        suggestions["weak_conflict"].append(progression_fb[:180])
+    duplicate_beats = [str(x) for x in (best.get("duplicate_beats") or []) if str(x).strip()]
+    no_new_delta = [str(x) for x in (best.get("no_new_delta") or []) if str(x).strip()]
+    transition_conflict = [str(x) for x in (best.get("transition_conflict") or []) if str(x).strip()]
+    if duplicate_beats:
+        suggestions["weak_conflict"].extend(duplicate_beats[:2])
+    if no_new_delta:
+        suggestions["missing_payoff"].extend(no_new_delta[:2])
+    if transition_conflict:
+        suggestions["timeline_gap"].extend(transition_conflict[:2])
     aesthetic_fb = str(best.get("aesthetic_feedback") or "")
     if any(k in aesthetic_fb for k in ["节奏", "平", "张力不足", "冲突弱"]):
         suggestions["weak_conflict"].append(aesthetic_fb[:180])
@@ -148,6 +195,7 @@ def node_review(state: GenerationState) -> GenerationState:
         [
             f"[结构] {best['feedback']}",
             f"[事实] {best['factual_feedback']}",
+            f"[推进] {best['progression_feedback']}",
             f"[审美] {best['aesthetic_feedback']}",
         ]
     ).strip()
@@ -156,8 +204,10 @@ def node_review(state: GenerationState) -> GenerationState:
         "score": best["combined"],
         "feedback": combined_feedback,
         "factual_feedback": best["factual_feedback"],
+        "progression_feedback": best.get("progression_feedback"),
         "aesthetic_feedback": best["aesthetic_feedback"],
         "factual_score": best["factual_score"],
+        "progression_score": best.get("progression_score"),
         "aesthetic_review_score": best["aesthetic_score"],
         "review_suggestions": suggestions,
         "review_gate": best.get("review_gate") or {},
@@ -203,6 +253,12 @@ def node_rollback_rerun(state: GenerationState) -> GenerationState:
     if suggestions:
         ctx["review_suggestions"] = suggestions
     progress(state, "rollback_rerun", chapter_num, chapter_progress(state, 0.60), f"第{chapter_num}章审校未通过，回滚并重跑一次...", {"current_phase": "rollback_rerun", "total_chapters": state["num_chapters"]})
+    rollback_progression_range(
+        novel_id=state["novel_id"],
+        novel_version_id=state.get("novel_version_id"),
+        from_chapter=chapter_num,
+        manager=state.get("progression_mgr"),
+    )
     return {
         "rerun_count": state.get("rerun_count", 0) + 1,
         "review_attempt": 0,

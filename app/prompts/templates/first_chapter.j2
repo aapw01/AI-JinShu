@@ -13,9 +13,33 @@
   "role": {{ (outline.role | default("")) | tojson_pretty }},
   "purpose": {{ (outline.purpose | default("")) | tojson_pretty }},
   "foreshadowing": {{ (outline.foreshadowing | default("无")) | tojson_pretty }},
-  "hook": {{ (outline.hook | default("")) | tojson_pretty }}
+  "hook": {{ (outline.hook | default("")) | tojson_pretty }},
+  "chapter_objective": {{ (outline.chapter_objective | default("")) | tojson_pretty }},
+  "required_new_information": {{ (outline.required_new_information | default([])) | tojson_pretty }},
+  "required_irreversible_change": {{ (outline.required_irreversible_change | default("")) | tojson_pretty }},
+  "relationship_delta": {{ (outline.relationship_delta | default("")) | tojson_pretty }},
+  "conflict_axis": {{ (outline.conflict_axis | default("")) | tojson_pretty }},
+  "payoff_kind": {{ (outline.payoff_kind | default("")) | tojson_pretty }},
+  "reveal_kind": {{ (outline.reveal_kind | default("")) | tojson_pretty }},
+  "forbidden_repeats": {{ (outline.forbidden_repeats | default([])) | tojson_pretty }},
+  "opening_scene": {{ (outline.opening_scene | default("")) | tojson_pretty }},
+  "opening_character_positions": {{ (outline.opening_character_positions | default([])) | tojson_pretty }},
+  "opening_time_state": {{ (outline.opening_time_state | default("")) | tojson_pretty }},
+  "transition_mode": {{ (outline.transition_mode | default("")) | tojson_pretty }}
 }
 </outline_json>
+
+{% if context.book_progression_state %}
+<book_progression_state_json>
+{{ context.book_progression_state | tojson_pretty }}
+</book_progression_state_json>
+{% endif %}
+
+{% if context.anti_repeat_constraints %}
+<anti_repeat_constraints_json>
+{{ context.anti_repeat_constraints | tojson_pretty }}
+</anti_repeat_constraints_json>
+{% endif %}
 
 <writing_goals>
 - 目标字数：{{ word_count or 3000 }}
@@ -26,6 +50,8 @@
 - 至少埋下 2 个可兑现钩子（一个章末悬念 + 一个暗线伏笔）。
 - 人物行为必须可追溯到动机，不允许"为推动剧情而行动"。
 - 短句推进 + 关键处句长变化，保持信息密度与可读性兼顾。
+- 必须完成 `chapter_objective` 指向的首章推进，至少建立一个不可逆变化或强承诺。
+- 禁止把设定说明当正文推进，必须通过冲突、行动和选择把设定带出来。
 </writing_goals>
 
 <continuity_priority>
@@ -47,6 +73,7 @@
 - 参考材料仅用于理解，不得复述标签块原文。
 - 禁止把"设定说明/创作计划/人工指令"写入正文。
 - 禁止输出章节标题行与解释性前言。
+- 禁止用大段背景说明替代有效剧情推进。
 </forbidden_behavior>
 
 {% include "chapter_body_contract.j2" %}

@@ -1,5 +1,4 @@
 """Tests for normalize_chapter_content covering multiple input formats."""
-import pytest
 
 from app.services.generation.common import normalize_chapter_content
 

@@ -10,6 +10,7 @@ from sqlalchemy import select
 
 from app.core.database import SessionLocal
 from app.models.novel import ChapterVersion
+from app.services.memory.progression_state import normalize_outline_contract, similarity_against_constraints
 
 logger = logging.getLogger(__name__)
 
@@ -370,6 +371,98 @@ def _check_thread_overload(
         )
 
 
+def _check_progression_conflicts(
+    report: ConsistencyReport,
+    outline: dict,
+    context: dict,
+    chapter_num: int,
+) -> None:
+    outline_contract = normalize_outline_contract(outline, chapter_num)
+    anti_repeat = context.get("anti_repeat_constraints") or {}
+    objective = str(outline_contract.get("chapter_objective") or "").strip()
+    recent_objectives = [str(x) for x in (anti_repeat.get("recent_objectives") or []) if str(x).strip()]
+    matched, similar_objective = similarity_against_constraints(objective, recent_objectives, threshold=0.84)
+    if objective and matched:
+        report.issues.append(
+            ConsistencyIssue(
+                "warning",
+                "plot",
+                f"本章目标与近几章已完成推进高度重叠：{similar_objective[:80]}",
+                chapter_num,
+            )
+        )
+
+    required_information = [str(x) for x in (outline_contract.get("required_new_information") or []) if str(x).strip()]
+    already_revealed = [str(x) for x in (anti_repeat.get("book_revealed_information") or []) if str(x).strip()]
+    for item in required_information[:4]:
+        revealed, matched_info = similarity_against_constraints(item, already_revealed, threshold=0.82)
+        if revealed:
+            report.issues.append(
+                ConsistencyIssue(
+                    "blocker",
+                    "plot",
+                    f"本章计划揭示的信息疑似已在前文揭示：{matched_info[:80]}",
+                    chapter_num,
+                )
+            )
+
+    relationship_delta = str(outline_contract.get("relationship_delta") or "").strip()
+    relationship_history = [str(x) for x in (anti_repeat.get("recent_relationship_deltas") or []) if str(x).strip()]
+    repeated_relationship, matched_relationship = similarity_against_constraints(
+        relationship_delta,
+        relationship_history,
+        threshold=0.82,
+    )
+    if relationship_delta and repeated_relationship:
+        report.issues.append(
+            ConsistencyIssue(
+                "warning",
+                "plot",
+                f"本章关系推进疑似重复最近章节：{matched_relationship[:80]}",
+                chapter_num,
+            )
+        )
+
+
+def _check_transition_conflicts(
+    report: ConsistencyReport,
+    outline: dict,
+    context: dict,
+    chapter_num: int,
+) -> None:
+    if chapter_num <= 1:
+        return
+    outline_contract = normalize_outline_contract(outline, chapter_num)
+    previous_transition = context.get("previous_transition_state") or {}
+    opening_scene = str(outline_contract.get("opening_scene") or "").strip()
+    transition_mode = str(outline_contract.get("transition_mode") or "").strip().lower()
+    previous_scene = str(previous_transition.get("ending_scene") or "").strip()
+    previous_action = str(previous_transition.get("last_action") or "").strip()
+    scene_exit = str(previous_transition.get("scene_exit") or previous_transition.get("unresolved_exit") or "").strip()
+
+    if previous_scene and opening_scene and transition_mode in {"direct", "continuous", ""}:
+        scene_conflict, matched_scene = similarity_against_constraints(opening_scene, [previous_scene], threshold=0.32)
+        if not scene_conflict and scene_exit:
+            report.issues.append(
+                ConsistencyIssue(
+                    "blocker",
+                    "timeline",
+                    f"上一章结束于「{previous_scene}」，且存在场景出口「{scene_exit}」，本章开场「{opening_scene}」缺少过渡",
+                    chapter_num,
+                )
+            )
+    if previous_action and any(token in previous_action for token in ["离开", "摔门", "冲出", "被带走", "昏迷", "倒下"]) and transition_mode in {"direct", "continuous", ""}:
+        if opening_scene:
+            report.issues.append(
+                ConsistencyIssue(
+                    "warning",
+                    "timeline",
+                    f"上一章以「{previous_action[:40]}」结束，本章开场需显式交代过渡到「{opening_scene}」",
+                    chapter_num,
+                )
+            )
+
+
 def check_consistency(
     novel_id: int,
     novel_version_id: int,
@@ -401,6 +494,8 @@ def check_consistency(
     _check_duplicate_content(report, novel_version_id, chapter_num)
     _check_timeline_conflicts(report, outline, context, chapter_num)
     _check_thread_overload(report, outline, prewrite, novel_id, chapter_num)
+    _check_progression_conflicts(report, outline, context, chapter_num)
+    _check_transition_conflicts(report, outline, context, chapter_num)
 
     if report.blockers:
         report.passed = False

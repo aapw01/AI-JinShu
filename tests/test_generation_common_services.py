@@ -133,6 +133,51 @@ def test_upsert_chapter_outline_updates_same_version_chapter():
         db.close()
 
 
+def test_upsert_chapter_outline_persists_progression_contract_fields():
+    novel = _create_novel("outline-contract")
+    version = _create_version(novel)
+
+    normalized = upsert_chapter_outline(
+        novel.id,
+        {
+            "chapter_num": 8,
+            "title": "第8章 真相逼近",
+            "outline": "主角发现新的证据，并决定夜探旧宅。",
+            "purpose": "推进主线",
+            "chapter_objective": "发现幕后黑手的关键证据",
+            "required_new_information": ["旧宅密室里藏有父亲留下的账册"],
+            "required_irreversible_change": "主角决定主动入局",
+            "relationship_delta": "主角开始怀疑盟友",
+            "conflict_axis": "调查",
+            "payoff_kind": "investigation",
+            "reveal_kind": "truth",
+            "forbidden_repeats": ["重复强调证据很重要但不行动"],
+            "opening_scene": "深夜旧宅门口",
+            "opening_character_positions": ["主角在门外", "盟友守在后门"],
+            "opening_time_state": "当晚",
+            "transition_mode": "aftermath",
+        },
+        novel_version_id=version.id,
+    )
+
+    db = SessionLocal()
+    try:
+        row = db.execute(
+            select(ChapterOutline).where(
+                ChapterOutline.novel_id == novel.id,
+                ChapterOutline.novel_version_id == version.id,
+                ChapterOutline.chapter_num == 8,
+            )
+        ).scalar_one()
+        assert row.metadata_["chapter_objective"] == "发现幕后黑手的关键证据"
+        assert row.metadata_["transition_mode"] == "aftermath"
+        assert row.metadata_["opening_scene"] == "深夜旧宅门口"
+        assert row.metadata_["forbidden_repeats"] == ["重复强调证据很重要但不行动"]
+        assert normalized["required_new_information"] == ["旧宅密室里藏有父亲留下的账册"]
+    finally:
+        db.close()
+
+
 def test_generate_chapter_summary_success(monkeypatch):
     monkeypatch.setattr("app.core.strategy.get_model_for_stage", lambda *_: ("openai", "mock"))
 

@@ -16,7 +16,19 @@
   "foreshadowing": outline.foreshadowing | default("无"),
   "payoff": outline.payoff | default("无"),
   "hook": outline.hook | default(""),
-  "mini_climax": outline.mini_climax | default("none")
+  "mini_climax": outline.mini_climax | default("none"),
+  "chapter_objective": outline.chapter_objective | default(""),
+  "required_new_information": outline.required_new_information | default([]),
+  "required_irreversible_change": outline.required_irreversible_change | default(""),
+  "relationship_delta": outline.relationship_delta | default(""),
+  "conflict_axis": outline.conflict_axis | default(""),
+  "payoff_kind": outline.payoff_kind | default(""),
+  "reveal_kind": outline.reveal_kind | default(""),
+  "forbidden_repeats": outline.forbidden_repeats | default([]),
+  "opening_scene": outline.opening_scene | default(""),
+  "opening_character_positions": outline.opening_character_positions | default([]),
+  "opening_time_state": outline.opening_time_state | default(""),
+  "transition_mode": outline.transition_mode | default("")
 } | tojson_pretty }}
 </outline_json>
 
@@ -32,6 +44,42 @@
 <volume_brief>
 {{ context.volume_brief }}
 </volume_brief>
+{% endif %}
+
+{% if context.recent_advancement_window %}
+<recent_advancement_window_json>
+{{ context.recent_advancement_window | tojson_pretty }}
+</recent_advancement_window_json>
+{% endif %}
+
+{% if context.previous_transition_state %}
+<previous_transition_state_json>
+{{ context.previous_transition_state | tojson_pretty }}
+</previous_transition_state_json>
+{% endif %}
+
+{% if context.current_volume_arc_state %}
+<current_volume_arc_state_json>
+{{ context.current_volume_arc_state | tojson_pretty }}
+</current_volume_arc_state_json>
+{% endif %}
+
+{% if context.book_progression_state %}
+<book_progression_state_json>
+{{ context.book_progression_state | tojson_pretty }}
+</book_progression_state_json>
+{% endif %}
+
+{% if context.anti_repeat_constraints %}
+<anti_repeat_constraints_json>
+{{ context.anti_repeat_constraints | tojson_pretty }}
+</anti_repeat_constraints_json>
+{% endif %}
+
+{% if context.transition_constraints %}
+<transition_constraints_json>
+{{ context.transition_constraints | tojson_pretty }}
+</transition_constraints_json>
 {% endif %}
 
 {% if context.consistency_warnings | default("") %}
@@ -59,6 +107,10 @@
 - 强连续性：上一章结尾的行动后果必须在本章前 2~3 段得到承接，禁止断裂跳跃。
 - 本章至少包含：1 个冲突推进点 + 1 个可兑现钩子。
 - 若处于收官阶段，优先回收主线伏笔，禁止发散新主线。
+- 本章必须完成 `chapter_objective` 指向的新增推进，不能只复述前章已得出的结论。
+- 必须产出 1~2 个新的有效变化：信息揭示、关系变化、不可逆后果、冲突升级至少其一。
+- 若 `forbidden_repeats` 命中近几章已做过的推进动作，必须换一种新的推进方式。
+- 若存在 `opening_scene/opening_time_state/transition_mode`，本章开头必须按其承接；若跳场或跳时，必须显式过渡。
 </writing_goals>
 
 <continuity_priority>
@@ -81,6 +133,8 @@
 - 标签块仅作参考，不得复制到正文。
 - 禁止出现"以下是根据反馈/重点解决如下问题"等解释性句子。
 - 禁止输出章节标题行、Markdown 结构、说明性注释。
+- 禁止把上一章已经完成的冲突、和解、身份揭示、爽点兑现原样再演一遍。
+- 禁止无过渡地让角色回到上一章已经离开的场景或状态。
 </forbidden_behavior>
 
 {% include "chapter_body_contract.j2" %}

@@ -10,6 +10,7 @@ from app.core.database import SessionLocal
 from app.models.novel import ChapterOutline, NovelSpecification
 from app.prompts import render_prompt
 from app.services.memory.character_state import CharacterStateManager
+from app.services.memory.progression_state import normalize_outline_contract
 
 logger = logging.getLogger("app.services.generation")
 
@@ -63,6 +64,18 @@ _OUTLINE_METADATA_KEYS = (
     "payoff",
     "mini_climax",
     "summary",
+    "chapter_objective",
+    "required_new_information",
+    "required_irreversible_change",
+    "relationship_delta",
+    "conflict_axis",
+    "payoff_kind",
+    "reveal_kind",
+    "forbidden_repeats",
+    "opening_scene",
+    "opening_character_positions",
+    "opening_time_state",
+    "transition_mode",
 )
 
 
@@ -157,7 +170,7 @@ def is_effective_title(title: str | None, chapter_num: int | None = None) -> boo
 
 def normalize_outline_payload(chapter_num: int, outline: dict[str, Any] | None) -> dict[str, Any]:
     """Normalize outline payloads so runtime-added chapters match full-book outline storage."""
-    item = dict(outline or {})
+    item = normalize_outline_contract(dict(outline or {}), chapter_num)
     normalized_title = normalize_title_text(item.get("title"))
     if not is_effective_title(normalized_title, chapter_num):
         normalized_title = f"第{chapter_num}章"

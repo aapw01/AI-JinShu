@@ -24,11 +24,20 @@ inference:
       safety_settings:
         - category: HARM_CATEGORY_DANGEROUS_CONTENT
           threshold: BLOCK_ONLY_HIGH
+  progression_memory:
+    temperature: 0.1
   reviewer.structured:
     temperature: 0.2
   reviewer.factual:
     temperature: 0.1
+  reviewer.progression:
+    temperature: 0.15
   reviewer.aesthetic:
     temperature: 0.2
   reviewer.book:
     temperature: 0.2
+review_weights:
+  structure: 0.28
+  factual: 0.24
+  progression: 0.28
+  aesthetic: 0.20

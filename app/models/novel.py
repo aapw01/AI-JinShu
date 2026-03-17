@@ -114,6 +114,24 @@ class NovelMemory(Base):
     updated_at = Column(DateTime, default=_utc_now, onupdate=_utc_now)
 
 
+class NovelMemoryRevision(Base):
+    """Audit log for progression memory promotion, rollback, and rebuild."""
+
+    __tablename__ = "novel_memory_revisions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    novel_id = Column(Integer, ForeignKey("novels.id", ondelete="CASCADE"), nullable=False, index=True)
+    novel_version_id = Column(Integer, ForeignKey("novel_versions.id", ondelete="CASCADE"), nullable=True, index=True)
+    memory_type = Column(String(50), nullable=False, index=True)
+    memory_key = Column(String(255), nullable=True, index=True)
+    source_chapter_num = Column(Integer, nullable=True, index=True)
+    action = Column(String(32), nullable=False)
+    old_content = Column(JSON, default=dict)
+    new_content = Column(JSON, default=dict)
+    promotion_score = Column(Float, nullable=True)
+    created_at = Column(DateTime, default=_utc_now)
+
+
 class StoryCharacterProfile(Base):
     """Incremental hard-identity profile for a character during novel generation."""
 
