@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from app.services.generation.agents import FactExtractorAgent, ReviewerAgent
@@ -102,3 +104,96 @@ def test_reviewer_structured_passes_inference_to_llm(monkeypatch):
         inference={"temperature": 0.2},
     )
     assert captured["inference"] == {"temperature": 0.2}
+
+
+def test_reviewer_progression_context_json_is_complete_json(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _fake_render_prompt(_template: str, **kwargs):
+        captured["context_json"] = kwargs["context_json"]
+        return "prompt"
+
+    monkeypatch.setattr("app.services.generation.agents.render_prompt", _fake_render_prompt)
+    monkeypatch.setattr("app.services.generation.agents.get_llm_with_fallback", lambda *_args, **_kwargs: _FakeLLM())
+    monkeypatch.setattr(
+        "app.services.generation.agents._invoke_json_with_schema",
+        lambda *_args, **_kwargs: {
+            "score": 0.8,
+            "confidence": 0.8,
+            "feedback": "ok",
+            "positives": [],
+            "must_fix": [],
+            "should_fix": [],
+            "risks": [],
+            "duplicate_beats": [],
+            "no_new_delta": [],
+            "repeated_reveal": [],
+            "repeated_relationship_turn": [],
+            "transition_conflict": [],
+        },
+    )
+    reviewer = ReviewerAgent()
+    reviewer.run_progression_structured(
+        draft="正文",
+        chapter_num=2,
+        context={
+            "outline_contract": {"chapter_objective": "推进主线调查"},
+            "recent_advancement_window": [{"chapter_objective": "揭示真相", "actual_progress": "推进了关系变化" * 100}],
+            "previous_transition_state": {"ending_scene": "别墅门外", "last_action": "摔门而出"},
+            "current_volume_arc_state": {"forbidden_repeats": ["不要重复认亲"]},
+            "book_progression_state": {"major_beats": ["认亲", "打脸", "揭秘"]},
+            "anti_repeat_constraints": {"recent_objectives": ["揭示真相" * 300]},
+            "transition_constraints": {"opening_constraints": ["必须显式交代过渡"]},
+        },
+        provider="openai",
+        model="gpt-4o-mini",
+    )
+
+    parsed = json.loads(str(captured["context_json"]))
+    assert parsed["outline_contract"]["chapter_objective"] == "推进主线调查"
+    assert parsed["previous_transition_state"]["ending_scene"] == "别墅门外"
+
+
+def test_reviewer_factual_context_json_is_complete_json(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _fake_render_prompt(_template: str, **kwargs):
+        captured["context_json"] = kwargs["context_json"]
+        return "prompt"
+
+    monkeypatch.setattr("app.services.generation.agents.render_prompt", _fake_render_prompt)
+    monkeypatch.setattr("app.services.generation.agents.get_llm_with_fallback", lambda *_args, **_kwargs: _FakeLLM())
+    monkeypatch.setattr(
+        "app.services.generation.agents._invoke_json_with_schema",
+        lambda *_args, **_kwargs: {
+            "score": 0.8,
+            "confidence": 0.8,
+            "feedback": "ok",
+            "positives": [],
+            "must_fix": [],
+            "should_fix": [],
+            "risks": [],
+            "contradictions": [],
+        },
+    )
+    reviewer = ReviewerAgent()
+    reviewer.run_factual_structured(
+        draft="正文",
+        chapter_num=2,
+        context={
+            "outline_contract": {"opening_scene": "主角卧室"},
+            "thread_ledger": {"active_plotlines": ["调查真相"]},
+            "previous_transition_state": {"ending_scene": "别墅门外"},
+            "transition_constraints": {"opening_constraints": ["需要显式过渡"]},
+            "anti_repeat_constraints": {"book_revealed_information": ["主角是云家嫡女"]},
+            "story_bible_context": "角色状态: 林初(警觉)" * 100,
+            "character_states": [{"name": "林初", "status": "警觉"}],
+            "summaries": [{"chapter_num": 1, "summary": "前情回顾" * 100}],
+        },
+        provider="openai",
+        model="gpt-4o-mini",
+    )
+
+    parsed = json.loads(str(captured["context_json"]))
+    assert parsed["outline_contract"]["opening_scene"] == "主角卧室"
+    assert parsed["previous_transition_state"]["ending_scene"] == "别墅门外"

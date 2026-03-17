@@ -40,3 +40,16 @@ inference:
 
     assert resolved["temperature"] == 0.15
     assert resolved["gemini"]["safety_settings"][0]["threshold"] == "BLOCK_ONLY_HIGH"
+
+
+def test_get_review_weights_returns_defaults():
+    strategy.get_strategy_config.cache_clear()
+
+    weights = strategy.get_review_weights("web-novel")
+
+    assert weights == {
+        "structure": 0.28,
+        "factual": 0.24,
+        "progression": 0.28,
+        "aesthetic": 0.20,
+    }

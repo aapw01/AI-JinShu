@@ -12,6 +12,7 @@ from app.models.novel import GenerationTask, Novel, NovelFeedback
 from app.services.generation.common import REVIEW_SCORE_THRESHOLD
 from app.services.generation.progress import chapter_progress, progress, volume_no_for_chapter
 from app.services.generation.state import GenerationState
+from app.services.memory.progression_state import build_anti_repeat_constraints
 
 
 def node_volume_replan(state: GenerationState) -> GenerationState:
@@ -89,6 +90,32 @@ def node_volume_replan(state: GenerationState) -> GenerationState:
         chapter_num,
         novel_version_id=state.get("novel_version_id"),
     )
+    progression_mgr = state.get("progression_mgr")
+    current_volume_arc_state: dict[str, Any] = {}
+    book_progression_state: dict[str, Any] = {}
+    recent_advancement_window: list[dict[str, Any]] = []
+    anti_repeat_constraints = ""
+    if progression_mgr:
+        current_volume_arc_state = progression_mgr.get_volume_arc_state(
+            state["novel_id"],
+            vol_no,
+            novel_version_id=state.get("novel_version_id"),
+        ) or {}
+        book_progression_state = progression_mgr.get_book_progression_state(
+            state["novel_id"],
+            novel_version_id=state.get("novel_version_id"),
+        ) or {}
+        recent_advancement_window = progression_mgr.list_recent_advancements(
+            state["novel_id"],
+            chapter_num,
+            novel_version_id=state.get("novel_version_id"),
+            limit=5,
+        )
+        anti_repeat_constraints = build_anti_repeat_constraints(
+            recent_advancement_window,
+            current_volume_arc_state,
+            book_progression_state,
+        )
     carry_over = [
         {
             "foreshadow_id": str(item.get("foreshadow_id") or ""),
@@ -122,6 +149,10 @@ def node_volume_replan(state: GenerationState) -> GenerationState:
         "replan_actions": replan_actions,
         "gate_evidence": gate_evidence,
         "previous_volume_snapshot": previous_snapshot,
+        "current_volume_arc_state": current_volume_arc_state,
+        "book_progression_state": book_progression_state,
+        "recent_advancement_window": recent_advancement_window,
+        "anti_repeat_constraints": anti_repeat_constraints,
     }
     progress(
         state,

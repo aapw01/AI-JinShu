@@ -50,8 +50,18 @@ def test_outliner_run_full_book_uses_absolute_chapter_numbers(monkeypatch):
         "app.services.generation.agents._invoke_json_with_schema",
         lambda *_args, **_kwargs: {
             "outlines": [
-                {"title": "第31章 第一卷余波", "outline": "承上启下"},
-                {"title": "第32章 新局展开", "outline": "推进第二卷"},
+                {
+                    "title": "第31章 第一卷余波",
+                    "outline": "承上启下",
+                    "chapter_objective": "处理上一卷余波",
+                    "opening_scene": "云家车队外",
+                    "transition_mode": "aftermath",
+                },
+                {
+                    "title": "第32章 新局展开",
+                    "outline": "推进第二卷",
+                    "required_new_information": ["陆家旧案与主线相连"],
+                },
             ]
         },
     )
@@ -67,6 +77,10 @@ def test_outliner_run_full_book_uses_absolute_chapter_numbers(monkeypatch):
     assert [item["chapter_num"] for item in outlines] == [31, 32]
     assert outlines[0]["title"] == "第31章 第一卷余波"
     assert outlines[1]["title"] == "第32章 新局展开"
+    assert outlines[0]["chapter_objective"] == "处理上一卷余波"
+    assert outlines[0]["opening_scene"] == "云家车队外"
+    assert outlines[0]["transition_mode"] == "aftermath"
+    assert outlines[1]["required_new_information"] == ["陆家旧案与主线相连"]
 
 
 def test_outliner_run_full_book_fallback_uses_absolute_chapter_numbers(monkeypatch):
@@ -105,11 +119,12 @@ def test_node_outline_appends_second_volume_without_overwriting_first(monkeypatc
         def __init__(self):
             self.calls: list[dict] = []
 
-        def run_full_book(self, novel_id, num_chapters, prewrite, start_chapter=1, language="zh", provider=None, model=None):
+        def run_full_book(self, novel_id, num_chapters, prewrite, planning_context=None, start_chapter=1, language="zh", provider=None, model=None):
             self.calls.append(
                 {
                     "novel_id": novel_id,
                     "num_chapters": num_chapters,
+                    "planning_context": planning_context or {},
                     "start_chapter": start_chapter,
                     "language": language,
                 }
@@ -183,7 +198,7 @@ def test_node_outline_does_not_reuse_when_count_is_enough_but_requested_range_mi
         def __init__(self):
             self.called = 0
 
-        def run_full_book(self, novel_id, num_chapters, prewrite, start_chapter=1, language="zh", provider=None, model=None):
+        def run_full_book(self, novel_id, num_chapters, prewrite, planning_context=None, start_chapter=1, language="zh", provider=None, model=None):
             self.called += 1
             return [
                 {"chapter_num": idx, "title": f"补全第{idx}章", "outline": f"补全提纲{idx}"}

@@ -182,13 +182,31 @@ def normalize_reviewer_payload(result: Any, default_feedback: str = "") -> dict[
     }
 
 
-def build_review_gate(
-    draft: str,
-    struct_payload: dict[str, Any],
-    factual_payload: dict[str, Any],
-    aesthetic_payload: dict[str, Any],
-) -> dict[str, Any]:
-    all_must_fix = list(struct_payload.get("must_fix") or []) + list(factual_payload.get("must_fix") or []) + list(aesthetic_payload.get("must_fix") or [])
+def normalize_progression_payload(result: Any, default_feedback: str = "") -> dict[str, Any]:
+    payload = normalize_reviewer_payload(result, default_feedback)
+    raw = payload.get("raw")
+    if not isinstance(raw, dict):
+        raw = result if isinstance(result, dict) else {}
+    for field in [
+        "duplicate_beats",
+        "no_new_delta",
+        "repeated_reveal",
+        "repeated_relationship_turn",
+        "transition_conflict",
+    ]:
+        payload[field] = [str(x)[:180] for x in (raw.get(field) or []) if str(x).strip()][:8]
+    return payload
+
+
+def build_review_gate(draft: str, *payloads: dict[str, Any]) -> dict[str, Any]:
+    payload_list = [p for p in payloads if isinstance(p, dict)]
+    all_must_fix: list[dict[str, Any]] = []
+    confidences: list[float] = []
+    scores: list[float] = []
+    for payload in payload_list:
+        all_must_fix.extend(list(payload.get("must_fix") or []))
+        confidences.append(float(payload.get("confidence", 0.0) or 0.0))
+        scores.append(float(payload.get("score", 0.0) or 0.0))
     validated: list[dict[str, Any]] = []
     weak: list[dict[str, Any]] = []
     for issue in all_must_fix:
@@ -199,21 +217,20 @@ def build_review_gate(
             weak.append(issue)
     evidence_coverage = len(validated) / max(1, len(all_must_fix))
     over_correction_risk = bool(len(all_must_fix) >= 3 and evidence_coverage < 0.34)
-    avg_confidence = (
-        float(struct_payload.get("confidence", 0.0) or 0.0)
-        + float(factual_payload.get("confidence", 0.0) or 0.0)
-        + float(aesthetic_payload.get("confidence", 0.0) or 0.0)
-    ) / 3.0
-    min_score = min(
-        float(struct_payload.get("score", 0.0) or 0.0),
-        float(factual_payload.get("score", 0.0) or 0.0),
-        float(aesthetic_payload.get("score", 0.0) or 0.0),
-    )
+    avg_confidence = sum(confidences) / max(1, len(confidences))
+    min_score = min(scores) if scores else 0.0
     gate_decision = "rewrite"
+    progression_blockers = False
+    for payload in payload_list:
+        if (payload.get("transition_conflict") or []) or (payload.get("no_new_delta") or []):
+            progression_blockers = True
+            break
     if len(all_must_fix) == 0 and avg_confidence >= 0.72 and min_score >= 0.68:
         gate_decision = "accept_with_minor_polish"
     elif len(validated) == 0 and evidence_coverage < 0.25 and avg_confidence >= 0.8:
         gate_decision = "accept_with_minor_polish"
+    if progression_blockers:
+        gate_decision = "rewrite"
     return {
         "must_fix_total": len(all_must_fix),
         "must_fix_validated": len(validated),
@@ -222,6 +239,7 @@ def build_review_gate(
         "avg_confidence": round(avg_confidence, 4),
         "min_score": round(min_score, 4),
         "over_correction_risk": over_correction_risk,
+        "progression_blockers": progression_blockers,
         "decision": gate_decision,
         "validated_issues": validated[:4],
         "weak_issues": weak[:4],

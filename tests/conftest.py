@@ -15,7 +15,8 @@ os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DB}"
 from app.main import app
 from app.core.database import Base, engine, SessionLocal
 from app.core.authn import create_access_token
-from app.models.novel import User
+from app.models.novel import UsageLedger, User
+from app.services.quota import ensure_user_quota
 from app import models as _models  # noqa: F401 - ensure SQLAlchemy models are registered before create_all
 
 
@@ -43,6 +44,17 @@ def setup_db():
 @pytest.fixture
 def client():
     ensure_test_user("test-admin-user", role="admin")
+    db = SessionLocal()
+    try:
+        user = db.execute(select(User).where(User.uuid == "test-admin-user")).scalar_one()
+        quota = ensure_user_quota(db, user)
+        quota.status = "active"
+        quota.monthly_chapter_limit = max(int(quota.monthly_chapter_limit or 0), 1_000_000)
+        quota.monthly_token_limit = max(int(quota.monthly_token_limit or 0), 10_000_000_000)
+        db.query(UsageLedger).filter(UsageLedger.user_id == user.id).delete(synchronize_session=False)
+        db.commit()
+    finally:
+        db.close()
     c = TestClient(app)
     token = create_access_token("test-admin-user", role="admin", status="active")
     c.headers.update({"Authorization": f"Bearer {token}"})

@@ -19,6 +19,7 @@ from app.services.generation.progress import (
 )
 from app.services.generation.segment_plan import build_segment_plan, merge_outlines
 from app.services.generation.state import GenerationState
+from app.services.memory.progression_control import rollback_progression_range
 
 
 def _merge_full_outlines(
@@ -394,6 +395,12 @@ def node_tail_rewrite(state: GenerationState) -> GenerationState:
         tail_rewrite_attempts=attempts,
         retry_resume_chapter=int(state.get("retry_resume_chapter") or rewind_to),
         segment_plan=tail_plan,
+    )
+    rollback_progression_range(
+        novel_id=state["novel_id"],
+        novel_version_id=state.get("novel_version_id"),
+        from_chapter=rewind_to,
+        manager=state.get("progression_mgr"),
     )
     return {
         "current_chapter": rewind_to,

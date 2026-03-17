@@ -7,10 +7,12 @@ from app.services.generation.agents import (
     FinalReviewerAgent,
     OutlinerAgent,
     PrewritePlannerAgent,
+    ProgressionMemoryAgent,
     ReviewerAgent,
     WriterAgent,
 )
 from app.services.memory.character_state import CharacterStateManager
+from app.services.memory.progression_state import ProgressionMemoryManager
 from app.services.memory.story_bible import CheckpointStore, QualityReportStore, StoryBibleStore
 from app.services.memory.summary_manager import SummaryManager
 
@@ -45,6 +47,7 @@ class GenerationState(TypedDict, total=False):
     full_outlines: list[dict[str, Any]]
     summary_mgr: SummaryManager
     char_mgr: CharacterStateManager
+    progression_mgr: ProgressionMemoryManager
     prewrite_agent: PrewritePlannerAgent
     outliner: OutlinerAgent
     writer: WriterAgent
@@ -52,6 +55,7 @@ class GenerationState(TypedDict, total=False):
     finalizer: FinalizerAgent
     final_reviewer: FinalReviewerAgent
     fact_extractor: FactExtractorAgent
+    progression_memory_extractor: ProgressionMemoryAgent
     outline: dict[str, Any]
     context: dict[str, Any]
     consistency_report: Any

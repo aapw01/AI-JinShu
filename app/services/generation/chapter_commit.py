@@ -15,6 +15,7 @@ from app.services.generation.common import REVIEW_SCORE_THRESHOLD
 from app.services.generation.heuristics import extract_item_mentions, extract_timeline_markers
 from app.services.generation.progress import volume_no_for_chapter
 from app.services.generation.state import GenerationState
+from app.services.memory.progression_state import ProgressionMemoryManager
 
 
 def write_longform_artifacts(
@@ -26,12 +27,15 @@ def write_longform_artifacts(
     aesthetic_score_val: float,
     revision_count: int,
     extracted_facts: dict[str, Any] | None = None,
+    progression_memory: dict[str, Any] | None = None,
+    progression_promotion: dict[str, Any] | None = None,
     db: Session | None = None,
 ) -> None:
     """Persist all post-chapter artifacts to bible/quality/checkpoint stores."""
     bible = state["bible_store"]
     quality = state["quality_store"]
     checkpoint = state["checkpoint_store"]
+    progression = state.get("progression_mgr") or ProgressionMemoryManager()
 
     outline = state.get("outline") or {}
     volume_no = int(state.get("volume_no") or volume_no_for_chapter(state, chapter_num))
@@ -166,6 +170,61 @@ def write_longform_artifacts(
             db=db,
         )
 
+    progression_payload = progression_memory if isinstance(progression_memory, dict) else {}
+    promotion_payload = progression_promotion if isinstance(progression_promotion, dict) else {}
+    promotion_score = float(promotion_payload.get("promotion_score") or 0.0)
+    advancement = progression_payload.get("advancement") if isinstance(progression_payload.get("advancement"), dict) else {}
+    transition = progression_payload.get("transition") if isinstance(progression_payload.get("transition"), dict) else {}
+    if advancement:
+        progression.save_chapter_advancement(
+            state["novel_id"],
+            chapter_num,
+            advancement,
+            novel_version_id=state.get("novel_version_id"),
+            volume_no=volume_no,
+            promotion_score=promotion_score,
+            db=db,
+        )
+        volume_arc_state = progression.merge_volume_arc_state(
+            state["novel_id"],
+            volume_no,
+            chapter_num,
+            advancement,
+            novel_version_id=state.get("novel_version_id"),
+            promotion_score=promotion_score,
+            db=db,
+        )
+        book_progression_state = progression.merge_book_progression_state(
+            state["novel_id"],
+            chapter_num,
+            advancement,
+            novel_version_id=state.get("novel_version_id"),
+            promotion_score=promotion_score,
+            db=db,
+        )
+    else:
+        volume_arc_state = progression.get_volume_arc_state(
+            state["novel_id"],
+            volume_no,
+            novel_version_id=state.get("novel_version_id"),
+            db=db,
+        ) or {}
+        book_progression_state = progression.get_book_progression_state(
+            state["novel_id"],
+            novel_version_id=state.get("novel_version_id"),
+            db=db,
+        ) or {}
+    if transition:
+        progression.save_chapter_transition(
+            state["novel_id"],
+            chapter_num,
+            transition,
+            novel_version_id=state.get("novel_version_id"),
+            volume_no=volume_no,
+            promotion_score=promotion_score,
+            db=db,
+        )
+
     for marker in extract_timeline_markers(final_content):
         bible.add_event(
             novel_id=state["novel_id"],
@@ -223,10 +282,12 @@ def write_longform_artifacts(
             )
 
     factual_score = float(state.get("factual_score", 0.0) or 0.0)
+    progression_score = float(state.get("progression_score", 0.0) or 0.0)
     reviewer_aesthetic = float(state.get("aesthetic_review_score", 0.0) or 0.0)
     verdict = "pass" if (
         state.get("score", 0.0) >= REVIEW_SCORE_THRESHOLD
         and factual_score >= 0.65
+        and progression_score >= 0.62
         and language_score >= 0.6
         and reviewer_aesthetic >= 0.6
     ) else "warning"
@@ -238,11 +299,22 @@ def write_longform_artifacts(
         metrics_json={
             "review_score": state.get("score", 0.0),
             "factual_score": factual_score,
+            "progression_score": progression_score,
             "language_score": language_score,
             "aesthetic_review_score": reviewer_aesthetic,
             "aesthetic_score": aesthetic_score_val,
             "revision_count": revision_count,
             "volume_no": volume_no,
+            "duplication_risk": round(max(0.0, 1.0 - progression_score), 4),
+            "no_new_delta": bool(advancement and not str(advancement.get("irreversible_change") or "").strip()),
+            "transition_conflict_risk": round(
+                1.0 if transition and not str(transition.get("scene_exit") or "").strip() and str(transition.get("ending_scene") or "").strip() else 0.0,
+                4,
+            ),
+            "volume_repeat_risk": round(
+                min(1.0, max(0.0, len((volume_arc_state or {}).get("forbidden_repeats") or []) / 10.0)),
+                4,
+            ),
             "consistency_scorecard": state.get("consistency_scorecard") or {},
             "review_gate": state.get("review_gate") or {},
         },
@@ -262,10 +334,14 @@ def write_longform_artifacts(
                 "volume_no": volume_no,
                 "review_score": state.get("score", 0.0),
                 "language_score": language_score,
+                "progression_score": progression_score,
                 "consistency_scorecard": state.get("consistency_scorecard") or {},
                 "review_gate": state.get("review_gate") or {},
                 "summary": summary_text[:400],
                 "content_preview": final_content[:400],
+                "chapter_advancement": advancement,
+                "chapter_transition": transition,
+                "book_progression_state": book_progression_state,
             },
             db=db,
         )
@@ -311,6 +387,18 @@ def _write_volume_report(
     avg_review = round(sum(review_scores) / max(len(review_scores), 1), 4)
     avg_language = round(sum(language_scores) / max(len(language_scores), 1), 4)
     avg_aesthetic = round(sum(aesthetic_scores) / max(len(aesthetic_scores), 1), 4)
+    progression_scores = [
+        float((r.metrics_json or {}).get("progression_score") or 0.0)
+        for r in current_volume_reports
+        if (r.metrics_json or {}).get("progression_score") is not None
+    ]
+    avg_progression = round(sum(progression_scores) / max(len(progression_scores), 1), 4)
+    duplication_risks = [
+        float((r.metrics_json or {}).get("duplication_risk") or 0.0)
+        for r in current_volume_reports
+        if (r.metrics_json or {}).get("duplication_risk") is not None
+    ]
+    avg_duplication_risk = round(sum(duplication_risks) / max(len(duplication_risks), 1), 4)
     evidence_chain: list[dict[str, Any]] = []
     if blocked_count > 0:
         evidence_chain.append({"metric": "blocked_chapters", "value": blocked_count, "threshold": 0, "status": "fail"})
@@ -341,12 +429,34 @@ def _write_volume_report(
                 "status": "warning",
             }
         )
+    if avg_progression < 0.62:
+        evidence_chain.append(
+            {
+                "metric": "avg_progression_score",
+                "value": avg_progression,
+                "threshold": 0.62,
+                "status": "warning" if avg_progression >= 0.5 else "fail",
+            }
+        )
     if blocked_count > 0 or avg_review < 0.6 or avg_language < 0.58:
         volume_verdict = "fail"
-    elif avg_review < REVIEW_SCORE_THRESHOLD or avg_language < 0.65 or avg_aesthetic < 0.62:
+    elif avg_review < REVIEW_SCORE_THRESHOLD or avg_language < 0.65 or avg_aesthetic < 0.62 or avg_progression < 0.62:
         volume_verdict = "warning"
     else:
         volume_verdict = "pass"
+
+    progression = state.get("progression_mgr") or ProgressionMemoryManager()
+    volume_arc_state = progression.get_volume_arc_state(
+        state["novel_id"],
+        volume_no,
+        novel_version_id=state.get("novel_version_id"),
+        db=db,
+    ) or {}
+    book_progression_state = progression.get_book_progression_state(
+        state["novel_id"],
+        novel_version_id=state.get("novel_version_id"),
+        db=db,
+    ) or {}
 
     bible.save_snapshot(
         novel_id=state["novel_id"],
@@ -361,8 +471,12 @@ def _write_volume_report(
             "avg_review_score": avg_review,
             "avg_language_score": avg_language,
             "avg_aesthetic_score": avg_aesthetic,
+            "avg_progression_score": avg_progression,
+            "avg_duplication_risk": avg_duplication_risk,
             "blocked_chapters": blocked_count,
             "evidence_chain": evidence_chain,
+            "volume_arc_state": volume_arc_state,
+            "book_progression_state": book_progression_state,
         },
         db=db,
     )
@@ -378,10 +492,14 @@ def _write_volume_report(
             "avg_review_score": avg_review,
             "avg_language_score": avg_language,
             "avg_aesthetic_score": avg_aesthetic,
+            "avg_progression_score": avg_progression,
+            "avg_duplication_risk": avg_duplication_risk,
             "blocked_chapters": blocked_count,
             "chapter_count": len(current_volume_reports),
             "gate_triggered": volume_verdict != "pass",
             "evidence_chain": evidence_chain,
+            "volume_arc_state": volume_arc_state,
+            "book_progression_state": book_progression_state,
         },
         verdict=volume_verdict,
         db=db,
@@ -399,6 +517,7 @@ def _write_volume_report(
                 "verdict": volume_verdict,
                 "evidence_chain": evidence_chain,
                 "next_replan_mode": "aggressive" if volume_verdict == "fail" else ("focus" if volume_verdict == "warning" else "baseline"),
+                "book_progression_state": book_progression_state,
             },
             db=db,
         )

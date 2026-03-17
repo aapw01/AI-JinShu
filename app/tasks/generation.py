@@ -43,6 +43,7 @@ from app.core.constants import CREATION_WORKER_HEARTBEAT_SECONDS
 from app.services.generation.contracts import OutputContractError
 from app.services.generation.status_snapshot import SUBTASK_LABELS, sync_generation_novel_snapshot, write_generation_cache
 from app.core.llm_contract import get_last_prompt_meta
+from app.services.memory.progression_control import rollback_progression_range
 
 logger = logging.getLogger(__name__)
 
@@ -237,6 +238,19 @@ def _get_creation_task_state(task_db_id: int) -> str | None:
         return row.status if row else None
     finally:
         db.close()
+
+
+def _rollback_progression_before_resume(
+    *,
+    novel_id: int,
+    novel_version_id: int,
+    from_chapter: int,
+) -> None:
+    rollback_progression_range(
+        novel_id=novel_id,
+        novel_version_id=novel_version_id,
+        from_chapter=from_chapter,
+    )
 
 
 def _activate_creation_task(task_db_id: int, *, current_celery_id: str) -> None:
@@ -1030,6 +1044,11 @@ def submit_book_generation_task(
                     book_effective_end_chapter=book_effective_end_chapter,
                     retry_resume_chapter=retry_resume_chapter,
                     segment_plan=None if clear_segment_plan else _KEEP_RUNTIME_VALUE,
+                )
+                _rollback_progression_before_resume(
+                    novel_id=int(novel_id),
+                    novel_version_id=int(novel_version_id),
+                    from_chapter=int(next_chapter),
                 )
             _run_volume_generation(
                 novel_id=int(novel_id),

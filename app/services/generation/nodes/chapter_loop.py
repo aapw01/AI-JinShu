@@ -34,6 +34,7 @@ def node_load_context(state: GenerationState) -> GenerationState:
             state["prewrite"],
             outline,
             db=db,
+            volume_size=int(state.get("volume_size") or 30),
         )
         ctx["prewrite"] = state["prewrite"]
         ctx["chapter_outline"] = outline
@@ -64,6 +65,8 @@ def node_load_context(state: GenerationState) -> GenerationState:
                     db=db,
                 ),
             },
+            "AntiRepeatIntent": ctx.get("anti_repeat_constraints") or {},
+            "TransitionIntent": ctx.get("transition_constraints") or {},
         }
         ctx["hard_constraints"] = ctx["prompt_contract"]["HardConstraints"]["consistency"]
         ctx["character_states"] = state["char_mgr"].get_states(

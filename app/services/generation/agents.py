@@ -5,7 +5,7 @@ import re
 import time
 import hashlib
 from typing import Any
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 from langchain_core.output_parsers import PydanticOutputParser
 
 from app.core.llm import extract_provider_block, get_llm_with_fallback, response_to_text, _is_retryable
@@ -13,11 +13,96 @@ from app.core.llm_contract import invoke_chapter_body_structured
 from app.prompts import render_prompt
 from app.services.generation.common import normalize_title_text
 from app.services.generation.contracts import OutputContractError
+from app.services.memory.progression_state import normalize_outline_contract
 
 logger = logging.getLogger(__name__)
 
 _AGENT_MAX_RETRIES = 3
 _AGENT_RETRY_BACKOFF = [2.0, 5.0, 10.0]
+
+
+def _truncate_text(value: Any, max_chars: int) -> str:
+    return str(value or "")[:max_chars]
+
+
+def _compact_jsonable(
+    value: Any,
+    *,
+    max_chars: int = 220,
+    max_items: int = 6,
+    depth: int = 0,
+    max_depth: int = 4,
+) -> Any:
+    if depth >= max_depth:
+        return _truncate_text(value, max_chars)
+    if isinstance(value, dict):
+        items = list(value.items())[: max(max_items, 1)]
+        return {
+            str(key): _compact_jsonable(
+                item,
+                max_chars=max_chars,
+                max_items=max_items,
+                depth=depth + 1,
+                max_depth=max_depth,
+            )
+            for key, item in items
+            if item not in (None, "", [], {})
+        }
+    if isinstance(value, list):
+        return [
+            _compact_jsonable(
+                item,
+                max_chars=max_chars,
+                max_items=max_items,
+                depth=depth + 1,
+                max_depth=max_depth,
+            )
+            for item in value[: max(max_items, 1)]
+            if item not in (None, "", [], {})
+        ]
+    if isinstance(value, str):
+        return value[:max_chars]
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    return _truncate_text(value, max_chars)
+
+
+def _build_reviewer_context_json(context: dict[str, Any], *, reviewer_kind: str) -> str:
+    if reviewer_kind == "progression":
+        keys = [
+            "outline_contract",
+            "recent_advancement_window",
+            "previous_transition_state",
+            "current_volume_arc_state",
+            "book_progression_state",
+            "anti_repeat_constraints",
+            "transition_constraints",
+        ]
+        max_chars = 180
+        max_items = 6
+    else:
+        keys = [
+            "outline_contract",
+            "thread_ledger",
+            "previous_transition_state",
+            "transition_constraints",
+            "anti_repeat_constraints",
+            "story_bible_context",
+            "character_states",
+            "summaries",
+        ]
+        max_chars = 180
+        max_items = 5
+    subset = {
+        key: _compact_jsonable(
+            context.get(key),
+            max_chars=max_chars,
+            max_items=max_items,
+        )
+        for key in keys
+        if key in context and context.get(key) not in (None, "", [], {})
+    }
+    return json.dumps(subset, ensure_ascii=False)
 
 
 def _timed_invoke(llm: Any, prompt: str, op: str, meta: dict[str, Any] | None = None):
@@ -254,7 +339,22 @@ class OutlineItemSchema(BaseModel):
     suspense_level: str | None = None
     foreshadowing: str | None = None
     plot_twist_level: str | None = None
+    hook: str | None = None
+    payoff: str | None = None
+    mini_climax: str | None = None
     summary: str | None = None
+    chapter_objective: str | None = None
+    required_new_information: list[str] = Field(default_factory=list)
+    required_irreversible_change: str | None = None
+    relationship_delta: str | None = None
+    conflict_axis: str | None = None
+    payoff_kind: str | None = None
+    reveal_kind: str | None = None
+    forbidden_repeats: list[str] = Field(default_factory=list)
+    opening_scene: str | None = None
+    opening_character_positions: list[str] = Field(default_factory=list)
+    opening_time_state: str | None = None
+    transition_mode: str | None = None
 
 
 class FullOutlinesSchema(BaseModel):
@@ -305,6 +405,55 @@ class FactExtractionSchema(BaseModel):
     events: list[dict[str, Any]] = []
     entities: list[dict[str, Any]] = []
     facts: list[dict[str, Any]] = []
+
+
+class ChapterAdvancementMemorySchema(BaseModel):
+    chapter_objective: str = ""
+    actual_progress: str = ""
+    new_information: list[str] = []
+    irreversible_change: str = ""
+    relationship_delta: str = ""
+    conflict_axis: str = ""
+    payoff_kind: str = ""
+    reveal_kind: str = ""
+    resolved_threads: list[str] = []
+    new_unresolved_threads: list[str] = []
+    forbidden_repeats: list[str] = []
+    phase: str = ""
+    major_beats: list[str] = []
+
+
+class ChapterTransitionMemorySchema(BaseModel):
+    ending_scene: str = ""
+    character_positions: list[str] = []
+    physical_state: str = ""
+    last_action: str = ""
+    time_state: str = ""
+    scene_exit: str = ""
+    unresolved_exit: str = ""
+
+
+class ChapterMemoryExtractionSchema(BaseModel):
+    advancement: ChapterAdvancementMemorySchema = Field(default_factory=ChapterAdvancementMemorySchema)
+    transition: ChapterTransitionMemorySchema = Field(default_factory=ChapterTransitionMemorySchema)
+    advancement_confidence: float = 0.0
+    transition_confidence: float = 0.0
+    validation_notes: list[str] = Field(default_factory=list)
+
+
+class ProgressionReviewSchema(BaseModel):
+    score: float = 0.8
+    confidence: float = 0.75
+    feedback: str = ""
+    positives: list[str] = []
+    must_fix: list[ReviewIssueSchema] = []
+    should_fix: list[ReviewIssueSchema] = []
+    risks: list[str] = []
+    duplicate_beats: list[str] = []
+    no_new_delta: list[str] = []
+    repeated_reveal: list[str] = []
+    repeated_relationship_turn: list[str] = []
+    transition_conflict: list[str] = []
 
 
 class ArchitectAgent:
@@ -399,23 +548,28 @@ class OutlinerAgent:
                 "outliner.single",
                 {"novel_id": novel_id, "chapter_num": chapter_num, "provider": provider, "model": model},
             )
-            result = _parse_json_response(response.content)
+            result = normalize_outline_contract(_parse_json_response(response.content), chapter_num)
             title = normalize_title_text(result.get("title"))
-            if title:
-                result["title"] = title
-            else:
-                result["title"] = f"Chapter {chapter_num}"
+            result["title"] = title or f"Chapter {chapter_num}"
             logger.info(f"OutlinerAgent completed for novel {novel_id} chapter {chapter_num}")
             return result
         except Exception as e:
             logger.error(f"OutlinerAgent failed: {e}")
-            return {"title": f"Chapter {chapter_num}", "outline": "auto-generated outline"}
+            return normalize_outline_contract(
+                {
+                    "title": f"Chapter {chapter_num}",
+                    "outline": "auto-generated outline",
+                    "purpose": "推进主线",
+                },
+                chapter_num,
+            )
 
     def run_full_book(
         self,
         novel_id: str,
         num_chapters: int,
         prewrite: dict,
+        planning_context: dict[str, Any] | None = None,
         start_chapter: int = 1,
         language: str = "zh",
         provider: str | None = None,
@@ -432,6 +586,7 @@ class OutlinerAgent:
             start_chapter=start_chapter,
             end_chapter=end_chapter,
             prewrite=prewrite,
+            planning_context=planning_context or {},
             language=language,
         )
         try:
@@ -443,41 +598,58 @@ class OutlinerAgent:
             for idx in range(1, num_chapters + 1):
                 item = outlines[idx - 1] if idx - 1 < len(outlines) else {}
                 chapter_no = start_chapter + idx - 1
-                normalized_title = normalize_title_text(item.get("title"))
                 normalized.append(
-                    {
-                        "chapter_num": chapter_no,
-                        "title": normalized_title or f"第{chapter_no}章",
-                        "outline": item.get("outline", ""),
-                        "role": item.get("role"),
-                        "purpose": item.get("purpose"),
-                        "suspense_level": item.get("suspense_level"),
-                        "foreshadowing": item.get("foreshadowing"),
-                        "plot_twist_level": item.get("plot_twist_level"),
-                        "hook": item.get("hook"),
-                        "payoff": item.get("payoff"),
-                        "mini_climax": item.get("mini_climax"),
-                        "summary": item.get("summary"),
-                    }
+                    normalize_outline_contract(
+                        {
+                            "chapter_num": chapter_no,
+                            "title": normalize_title_text(item.get("title")) or f"第{chapter_no}章",
+                            "outline": item.get("outline", ""),
+                            "role": item.get("role"),
+                            "purpose": item.get("purpose"),
+                            "suspense_level": item.get("suspense_level"),
+                            "foreshadowing": item.get("foreshadowing"),
+                            "plot_twist_level": item.get("plot_twist_level"),
+                            "hook": item.get("hook"),
+                            "payoff": item.get("payoff"),
+                            "mini_climax": item.get("mini_climax"),
+                            "summary": item.get("summary"),
+                            "chapter_objective": item.get("chapter_objective"),
+                            "required_new_information": item.get("required_new_information"),
+                            "required_irreversible_change": item.get("required_irreversible_change"),
+                            "relationship_delta": item.get("relationship_delta"),
+                            "conflict_axis": item.get("conflict_axis"),
+                            "payoff_kind": item.get("payoff_kind"),
+                            "reveal_kind": item.get("reveal_kind"),
+                            "forbidden_repeats": item.get("forbidden_repeats"),
+                            "opening_scene": item.get("opening_scene"),
+                            "opening_character_positions": item.get("opening_character_positions"),
+                            "opening_time_state": item.get("opening_time_state"),
+                            "transition_mode": item.get("transition_mode"),
+                        },
+                        chapter_no,
+                    )
                 )
             return normalized
         except Exception as e:
             logger.error(f"OutlinerAgent run_full_book failed: {e}")
             return [
-                {
-                    "chapter_num": i,
-                    "title": f"第{i}章",
-                    "outline": "auto-generated outline",
-                    "role": "推进剧情",
-                    "purpose": "推进主线",
-                    "suspense_level": "中",
-                    "foreshadowing": "",
-                    "plot_twist_level": "低",
-                    "hook": "",
-                    "payoff": "",
-                    "mini_climax": "none",
-                    "summary": "",
-                }
+                normalize_outline_contract(
+                    {
+                        "chapter_num": i,
+                        "title": f"第{i}章",
+                        "outline": "auto-generated outline",
+                        "role": "推进剧情",
+                        "purpose": "推进主线",
+                        "suspense_level": "中",
+                        "foreshadowing": "",
+                        "plot_twist_level": "低",
+                        "hook": "",
+                        "payoff": "",
+                        "mini_climax": "none",
+                        "summary": "",
+                    },
+                    i,
+                )
                 for i in range(start_chapter, end_chapter + 1)
             ]
 
@@ -667,7 +839,7 @@ class ReviewerAgent:
         prompt = render_prompt(
             template,
             chapter_num=chapter_num,
-            context_json=(json.dumps(context, ensure_ascii=False)[:3000]),
+            context_json=_build_reviewer_context_json(context, reviewer_kind="factual"),
             draft=(draft[:6000]),
         )
         result = _invoke_json_with_schema(
@@ -689,6 +861,52 @@ class ReviewerAgent:
         result["confidence"] = max(0.0, min(1.0, float(result.get("confidence", 0.75) or 0.75)))
         contradictions = [str(x.get("claim") or "") for x in (result.get("must_fix") or []) if isinstance(x, dict)]
         result["contradictions"] = [x for x in contradictions if x][:20]
+        return result
+
+    def run_progression_structured(
+        self,
+        draft: str,
+        chapter_num: int,
+        context: dict,
+        language: str = "zh",
+        provider: str | None = None,
+        model: str | None = None,
+        inference: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        template = "reviewer_progression_structured"
+        llm = get_llm_with_fallback(provider, model, inference=inference)
+        prompt = render_prompt(
+            template,
+            chapter_num=chapter_num,
+            language=language,
+            context_json=_build_reviewer_context_json(context, reviewer_kind="progression"),
+            draft=(draft[:6500]),
+        )
+        result = _invoke_json_with_schema(
+            llm,
+            prompt,
+            ProgressionReviewSchema,
+            strict=True,
+            stage="reviewer.progression",
+            provider=provider,
+            model=model,
+            chapter_num=chapter_num,
+            prompt_template=template,
+            prompt_version="v1",
+        )
+        score = float(result.get("score", 0.8))
+        if score > 1:
+            score = score / 100 if score <= 100 else 0.8
+        result["score"] = max(0.0, min(1.0, score))
+        result["confidence"] = max(0.0, min(1.0, float(result.get("confidence", 0.75) or 0.75)))
+        for field in [
+            "duplicate_beats",
+            "no_new_delta",
+            "repeated_reveal",
+            "repeated_relationship_turn",
+            "transition_conflict",
+        ]:
+            result[field] = [str(x)[:180] for x in (result.get(field) or []) if str(x).strip()][:8]
         return result
 
     def run_aesthetic(
@@ -876,3 +1094,56 @@ class FactExtractorAgent:
             prompt_version="v2",
         )
         return data if isinstance(data, dict) else {"events": [], "entities": [], "facts": []}
+
+
+class ProgressionMemoryAgent:
+    """Extract structured progression and continuity memory from finalized chapter text."""
+
+    def run(
+        self,
+        chapter_num: int,
+        content: str,
+        outline: dict | None = None,
+        language: str = "zh",
+        provider: str | None = None,
+        model: str | None = None,
+        inference: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        template = "chapter_memory_structured"
+        llm = get_llm_with_fallback(provider, model, inference=inference)
+        prompt = render_prompt(
+            template,
+            chapter_num=chapter_num,
+            language=language,
+            outline_json=(json.dumps(outline or {}, ensure_ascii=False)[:2200]),
+            content=(content[:7000]),
+        )
+        data = _invoke_json_with_schema(
+            llm,
+            prompt,
+            ChapterMemoryExtractionSchema,
+            strict=True,
+            stage="progression_memory",
+            provider=provider,
+            model=model,
+            chapter_num=chapter_num,
+            prompt_template=template,
+            prompt_version="v1",
+        )
+        if not isinstance(data, dict):
+            return {
+                "advancement": {},
+                "transition": {},
+                "advancement_confidence": 0.0,
+                "transition_confidence": 0.0,
+                "validation_notes": [],
+            }
+        advancement = data.get("advancement") or {}
+        transition = data.get("transition") or {}
+        return {
+            "advancement": dict(advancement) if isinstance(advancement, dict) else {},
+            "transition": dict(transition) if isinstance(transition, dict) else {},
+            "advancement_confidence": float(data.get("advancement_confidence") or 0.0),
+            "transition_confidence": float(data.get("transition_confidence") or 0.0),
+            "validation_notes": [str(x)[:180] for x in (data.get("validation_notes") or []) if str(x).strip()][:8],
+        }
