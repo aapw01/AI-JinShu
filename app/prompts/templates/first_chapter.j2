@@ -42,7 +42,7 @@
 {% endif %}
 
 <writing_goals>
-- 目标字数：{{ word_count or 3000 }}
+- 理想字数：{{ ideal_min_word_count or 2200 }}-{{ ideal_max_word_count or 2800 }}；可接受 {{ min_word_count or 2000 }}-{{ soft_max_word_count or 3000 }}；目标中心 {{ target_word_count or word_count or 2600 }}；尽量不超过 {{ hard_ceiling_word_count or 3500 }}。
 - 语言：{{ language or "zh" }}
 - 风格标签：{{ native_style_profile or "默认" }}
 - 黄金开篇：前 300 字内必须出现主角与核心困境，禁止静态背景说明开篇。
@@ -52,6 +52,7 @@
 - 短句推进 + 关键处句长变化，保持信息密度与可读性兼顾。
 - 必须完成 `chapter_objective` 指向的首章推进，至少建立一个不可逆变化或强承诺。
 - 禁止把设定说明当正文推进，必须通过冲突、行动和选择把设定带出来。
+- 若字数超出可接受区间，优先合并重复心理、动作回放和解释性复述，不要牺牲核心爽点与章末钩子。
 </writing_goals>
 
 <continuity_priority>

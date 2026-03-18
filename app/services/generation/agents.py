@@ -13,6 +13,7 @@ from app.core.llm_contract import invoke_chapter_body_structured
 from app.prompts import render_prompt
 from app.services.generation.common import normalize_title_text
 from app.services.generation.contracts import OutputContractError
+from app.services.generation.length_control import build_chapter_length_prompt_kwargs
 from app.services.memory.progression_state import normalize_outline_contract
 
 logger = logging.getLogger(__name__)
@@ -703,7 +704,7 @@ class WriterAgent:
             context=context,
             language=language,
             native_style_profile=native_style_profile,
-            word_count=word_count,
+            **build_chapter_length_prompt_kwargs(word_count),
         )
         try:
             content = invoke_chapter_body_structured(
@@ -985,7 +986,7 @@ class FinalizerAgent:
             feedback=feedback,
             draft=draft,
             language=language,
-            word_count=word_count,
+            **build_chapter_length_prompt_kwargs(word_count),
         )
 
         try:

@@ -14,11 +14,16 @@ from app.core.logging_config import bind_log_context, log_event
 from app.core.strategy import get_model_for_stage
 from app.models.novel import ChapterVersion, Novel, NovelVersion, RewriteRequest
 from app.prompts import render_prompt
+from app.services.generation.agents import FinalizerAgent
 from app.services.generation.common import (
     normalize_chapter_content,
     resolve_chapter_title,
 )
 from app.services.generation.contracts import OutputContractError
+from app.services.generation.length_control import (
+    build_chapter_length_prompt_kwargs,
+    maybe_compact_chapter_length,
+)
 from app.services.rewrite.service import group_annotations_by_chapter
 from app.services.scheduler.scheduler_service import (
     dispatch_user_queue_for_user,
@@ -258,6 +263,7 @@ def _rewrite_prompt(
         annotations_json=annotations_json,
         ann_text=ann_text,
         base_content=base_content,
+        **build_chapter_length_prompt_kwargs(),
     )
     return prompt_text, template
 
@@ -341,6 +347,8 @@ def submit_rewrite_task(
 
         strategy = novel.strategy or "web-novel"
         provider, model = get_model_for_stage(strategy, "writer")
+        finalizer_provider, finalizer_model = get_model_for_stage(strategy, "finalizer")
+        rewrite_finalizer = FinalizerAgent()
         annotations_by_chapter = group_annotations_by_chapter(db, rewrite_request_id)
 
         total = max(1, rewrite_to - rewrite_from + 1)
@@ -434,6 +442,29 @@ def submit_rewrite_task(
             if not rewritten:
                 rewritten = (base_chapter.content or "").strip()
             rewritten = normalize_chapter_content(rewritten)
+            rewritten, length_diagnostics = maybe_compact_chapter_length(
+                content=rewritten,
+                compact_fn=lambda draft, feedback: rewrite_finalizer.run(
+                    draft=draft,
+                    feedback=feedback,
+                    language=novel.target_language or "zh",
+                    provider=finalizer_provider,
+                    model=finalizer_model,
+                ),
+                normalize_fn=normalize_chapter_content,
+            )
+            if bool(length_diagnostics.get("length_compaction_attempted")):
+                log_event(
+                    logger,
+                    "rewrite.chapter.length_compaction",
+                    task_id=self.request.id,
+                    novel_id=novel_id,
+                    chapter_num=chapter_num,
+                    before=length_diagnostics.get("word_count_before_compaction"),
+                    after=length_diagnostics.get("word_count_after_compaction"),
+                    applied=length_diagnostics.get("length_compaction_applied"),
+                    reason=length_diagnostics.get("length_compaction_reason"),
+                )
             chapter_title = resolve_chapter_title(
                 chapter_num=chapter_num,
                 title=base_chapter.title,
@@ -457,6 +488,11 @@ def submit_rewrite_task(
                     **(target_chapter.metadata_ or {}),
                     "rewrite_request_id": rewrite_request_id,
                     "based_on_version": base_version_id,
+                    "word_count_before_compaction": int(length_diagnostics.get("word_count_before_compaction") or 0),
+                    "word_count_after_compaction": int(length_diagnostics.get("word_count_after_compaction") or 0),
+                    "length_compaction_attempted": bool(length_diagnostics.get("length_compaction_attempted")),
+                    "length_compaction_applied": bool(length_diagnostics.get("length_compaction_applied")),
+                    "length_compaction_reason": str(length_diagnostics.get("length_compaction_reason") or ""),
                 }
             else:
                 db.add(
@@ -471,6 +507,11 @@ def submit_rewrite_task(
                         metadata_={
                             "rewrite_request_id": rewrite_request_id,
                             "based_on_version": base_version_id,
+                            "word_count_before_compaction": int(length_diagnostics.get("word_count_before_compaction") or 0),
+                            "word_count_after_compaction": int(length_diagnostics.get("word_count_after_compaction") or 0),
+                            "length_compaction_attempted": bool(length_diagnostics.get("length_compaction_attempted")),
+                            "length_compaction_applied": bool(length_diagnostics.get("length_compaction_applied")),
+                            "length_compaction_reason": str(length_diagnostics.get("length_compaction_reason") or ""),
                         },
                     )
                 )
