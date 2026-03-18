@@ -45,10 +45,19 @@ def test_rewrite_prompt_uses_annotations_json_tag():
         context_block="上一章摘要",
         annotations_json='[{"chapter_num":3,"issue_type":"style","instruction":"收紧节奏"}]',
         base_content="原正文",
+        word_count=2600,
+        min_word_count=2000,
+        target_word_count=2600,
+        soft_max_word_count=3000,
+        hard_ceiling_word_count=3500,
+        ideal_min_word_count=2200,
+        ideal_max_word_count=2800,
     )
     assert "<annotations_json>" in prompt
     assert '"issue_type":"style"' in prompt
     assert "禁止输出章节标题行" in prompt
+    assert "2000 到 3000 字" in prompt
+    assert "3500" in prompt
 
 
 def test_storyboard_character_prompt_has_structured_contract():

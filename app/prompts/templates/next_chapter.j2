@@ -101,7 +101,7 @@
 {% endif %}
 
 <writing_goals>
-- 目标字数：{{ word_count or 3000 }}
+- 理想字数：{{ ideal_min_word_count or 2200 }}-{{ ideal_max_word_count or 2800 }}；可接受 {{ min_word_count or 2000 }}-{{ soft_max_word_count or 3000 }}；目标中心 {{ target_word_count or word_count or 2600 }}；尽量不超过 {{ hard_ceiling_word_count or 3500 }}。
 - 语言：{{ language or "zh" }}
 - 风格标签：{{ native_style_profile or "默认" }}
 - 强连续性：上一章结尾的行动后果必须在本章前 2~3 段得到承接，禁止断裂跳跃。
@@ -111,6 +111,7 @@
 - 必须产出 1~2 个新的有效变化：信息揭示、关系变化、不可逆后果、冲突升级至少其一。
 - 若 `forbidden_repeats` 命中近几章已做过的推进动作，必须换一种新的推进方式。
 - 若存在 `opening_scene/opening_time_state/transition_mode`，本章开头必须按其承接；若跳场或跳时，必须显式过渡。
+- 若字数超出可接受区间，优先压缩重复心理、动作回放和解释性复述，不要削弱核心冲突与章末钩子。
 </writing_goals>
 
 <continuity_priority>

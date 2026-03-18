@@ -17,6 +17,8 @@
 6. 若正文存在大量不必要的极短段，优先通过合并碎段来整理节奏，而不是删掉有效情节。
 7. 若正文重复了上一章或近几章已完成的推进，应改成新的有效变化，而不是机械复述。
 8. 若章节开头与上一章结尾状态不连续，必须补出清晰过渡，不得让人物无解释地回到不可能状态。
+9. 本章理想区间为 {{ ideal_min_word_count or 2200 }}-{{ ideal_max_word_count or 2800 }} 字，可接受区间为 {{ min_word_count or 2000 }}-{{ soft_max_word_count or 3000 }} 字，尽量不要超过 {{ hard_ceiling_word_count or 3500 }} 字。
+10. 若正文过长，只允许压缩重复心理描写、重复动作回放与解释性复述；禁止删主冲突、关键兑现、章末钩子，禁止改变剧情走向。
 </editing_policy>
 
 {% include "chapter_body_contract.j2" %}

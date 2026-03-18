@@ -10,6 +10,10 @@ def test_writer_agent_passes_word_count_to_render_prompt(monkeypatch):
     def _fake_render(template: str, **kwargs):
         captured["template"] = template
         captured["word_count"] = kwargs.get("word_count")
+        captured["min_word_count"] = kwargs.get("min_word_count")
+        captured["target_word_count"] = kwargs.get("target_word_count")
+        captured["soft_max_word_count"] = kwargs.get("soft_max_word_count")
+        captured["hard_ceiling_word_count"] = kwargs.get("hard_ceiling_word_count")
         return "writer-prompt"
 
     def _fake_invoke(**_kwargs):
@@ -33,6 +37,10 @@ def test_writer_agent_passes_word_count_to_render_prompt(monkeypatch):
     assert out == "生成正文"
     assert captured["template"] == "next_chapter"
     assert captured["word_count"] == 2800
+    assert captured["min_word_count"] == 2000
+    assert captured["target_word_count"] == 2800
+    assert captured["soft_max_word_count"] == 3000
+    assert captured["hard_ceiling_word_count"] == 3500
 
 
 def test_finalizer_agent_passes_word_count_to_render_prompt(monkeypatch):
@@ -41,6 +49,10 @@ def test_finalizer_agent_passes_word_count_to_render_prompt(monkeypatch):
     def _fake_render(template: str, **kwargs):
         captured["template"] = template
         captured["word_count"] = kwargs.get("word_count")
+        captured["min_word_count"] = kwargs.get("min_word_count")
+        captured["target_word_count"] = kwargs.get("target_word_count")
+        captured["soft_max_word_count"] = kwargs.get("soft_max_word_count")
+        captured["hard_ceiling_word_count"] = kwargs.get("hard_ceiling_word_count")
         return "finalizer-prompt"
 
     def _fake_invoke(**_kwargs):
@@ -61,6 +73,10 @@ def test_finalizer_agent_passes_word_count_to_render_prompt(monkeypatch):
     assert out == "定稿正文"
     assert captured["template"] == "finalizer_polish"
     assert captured["word_count"] == 2800
+    assert captured["min_word_count"] == 2000
+    assert captured["target_word_count"] == 2800
+    assert captured["soft_max_word_count"] == 3000
+    assert captured["hard_ceiling_word_count"] == 3500
 
 
 def test_node_writer_passes_default_word_count(monkeypatch):
@@ -135,6 +151,16 @@ def test_node_finalize_passes_default_word_count(monkeypatch):
         def add_summary(self, *_args, **_kwargs):
             return None
 
+    class _ProgressionExtractor:
+        def run(self, **_kwargs):
+            return {
+                "advancement": {},
+                "transition": {},
+                "advancement_confidence": 1.0,
+                "transition_confidence": 1.0,
+                "validation_notes": [],
+            }
+
     class _CharMgr:
         def get_states(self, *_args, **_kwargs):
             return []
@@ -190,6 +216,7 @@ def test_node_finalize_passes_default_word_count(monkeypatch):
         "feedback": "收紧节奏",
         "finalizer": finalizer,
         "fact_extractor": _FactExtractor(),
+        "progression_memory_extractor": _ProgressionExtractor(),
         "outline": {"chapter_num": 2, "title": "第2章"},
         "summary_mgr": _SummaryMgr(),
         "char_mgr": _CharMgr(),
@@ -197,6 +224,7 @@ def test_node_finalize_passes_default_word_count(monkeypatch):
         "context": {"budget_used": 0},
         "score": 0.8,
         "factual_score": 0.8,
+        "progression_score": 0.8,
         "aesthetic_review_score": 0.8,
         "consistency_report": _ConsistencyReport(),
         "review_attempt": 0,

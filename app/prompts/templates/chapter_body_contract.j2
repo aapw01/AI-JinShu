@@ -13,8 +13,10 @@
 6) 输出 HTML 标签（如 <p>、<br>）或 Markdown 语法。
 
 字数要求（必须达标）：
-- 本章正文不得少于 {{ word_count or 2000 }} 字，目标 {{ word_count or 3000 }} 字。
-- 不足 {{ word_count or 2000 }} 字视为未完成，必须继续扩写直到达标。
+- 理想区间：{{ ideal_min_word_count or 2200 }} 到 {{ ideal_max_word_count or 2800 }} 字；可接受区间：{{ min_word_count or 2000 }} 到 {{ soft_max_word_count or 3000 }} 字。
+- 本章正文不得少于 {{ min_word_count or 2000 }} 字；不足视为未完成，必须继续扩写直到达标。
+- 若超过 {{ soft_max_word_count or 3000 }} 字，应优先压缩重复心理描写、重复动作回放与解释性复述。
+- 尽量不要超过 {{ hard_ceiling_word_count or 3500 }} 字；收紧字数时禁止删主冲突、关键兑现、章末钩子或改变剧情走向。
 
 排版格式（严格遵守）：
 - 所有段落之间统一使用两个换行符（\n\n）分隔，无一例外。

@@ -8,12 +8,14 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+import httpx
 import yaml
 from pydantic import BaseModel
 
 from app.core.llm import get_llm_with_fallback, response_to_text
 from app.core.strategy import get_model_for_stage
 from app.prompts import render_prompt
+from app.services.system_settings.runtime import get_primary_chat_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +115,32 @@ def _coerce_framework_payload(raw: Any) -> dict[str, Any]:
     raise TypeError("idea framework response must be a JSON object")
 
 
+def _direct_chat_completion(model: str, prompt: str) -> str:
+    """Bypass LangChain and call the OpenAI-compatible endpoint directly via httpx.
+
+    Some local LLM servers return responses with non-standard Content-Type headers
+    that confuse the OpenAI SDK's response parser (returns raw text instead of a
+    ChatCompletion object, causing AttributeError in LangChain). This function
+    makes the same request at the HTTP level and extracts the assistant content.
+    """
+    primary = get_primary_chat_runtime()
+    base_url = str(primary.get("base_url") or "").strip().rstrip("/")
+    api_key = str(primary.get("api_key") or "")
+    url = f"{base_url}/chat/completions" if base_url else "https://api.openai.com/v1/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    body = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.7,
+    }
+    resp = httpx.post(url, json=body, headers=headers, timeout=60)
+    resp.raise_for_status()
+    data = resp.json()
+    return data["choices"][0]["message"]["content"]
+
+
 def _fallback_framework(title: str) -> dict[str, str]:
     t = title.strip() or "未命名故事"
     one_liner = f"{t}：主角在巨变中被迫踏上逆转命运的道路，并在代价与选择中完成蜕变。"
@@ -153,9 +181,31 @@ def generate_idea_framework(
         genre_options=genre_options,
         style_options=style_options,
     )
+
+    raw_text: str | None = None
     try:
         resp = llm.invoke(prompt)
         payload = _coerce_framework_payload(resp)
+    except AttributeError:
+        # LangChain / OpenAI SDK failed to parse the response object
+        # (common with local OpenAI-compatible servers that return
+        # non-standard Content-Type headers). Fall back to direct HTTP.
+        logger.info("idea framework: LangChain parse failed, retrying via direct HTTP")
+        try:
+            raw_text = _direct_chat_completion(model, prompt)
+            payload = _extract_json(raw_text)
+            if isinstance(payload, str):
+                payload = _extract_json(payload)
+            if not isinstance(payload, dict):
+                raise TypeError("direct call response is not a JSON object")
+        except Exception as inner:
+            logger.warning("idea framework direct HTTP fallback failed: %s", inner)
+            return _fallback_framework(clean_title)
+    except Exception as exc:
+        logger.warning("idea framework generation fallback: %s", exc)
+        return _fallback_framework(clean_title)
+
+    try:
         parsed = IdeaFrameworkSchema.model_validate(payload)
         result = parsed.model_dump()
         if genre:
@@ -168,5 +218,5 @@ def generate_idea_framework(
             result["recommended_style"] = None
         return result
     except Exception as exc:
-        logger.warning("idea framework generation fallback: %s", exc)
+        logger.warning("idea framework validation fallback: %s", exc)
         return _fallback_framework(clean_title)

@@ -18,12 +18,14 @@ from app.services.generation.common import (
     MAX_RETRIES,
     REVIEW_SCORE_THRESHOLD,
     generate_chapter_summary,
+    logger,
     normalize_chapter_content,
     resolve_chapter_title,
     update_character_states_from_content,
 )
 from app.services.generation.contracts import OutputContractError
 from app.services.generation.heuristics import aesthetic_score, chapter_progress_signal
+from app.services.generation.length_control import maybe_compact_chapter_length
 from app.services.generation.policies import PacingController, PacingInput
 from app.services.generation.progress import chapter_progress, persist_resume_runtime_state, progress
 from app.services.generation.state import GenerationState
@@ -155,7 +157,6 @@ def node_finalize(state: GenerationState) -> GenerationState:
         except OutputContractError as exc:
             if exc.code != "MODEL_OUTPUT_POLICY_VIOLATION" or attempt >= 1:
                 raise
-            from app.services.generation.common import logger
             logger.warning(
                 "finalizer contract violation chapter=%s attempt=%s applying format guardrail",
                 chapter_num,
@@ -180,9 +181,29 @@ def node_finalize(state: GenerationState) -> GenerationState:
                 ).strip()
             )
         except Exception:
-            from app.services.generation.common import logger
-
             logger.warning("finalizer paragraph compaction skipped after failure", exc_info=True)
+    final_content, length_diagnostics = maybe_compact_chapter_length(
+        content=final_content,
+        word_count=DEFAULT_CHAPTER_WORD_COUNT,
+        compact_fn=lambda draft, feedback: state["finalizer"].run(
+            draft,
+            feedback,
+            state["target_language"],
+            f_provider,
+            f_model,
+            DEFAULT_CHAPTER_WORD_COUNT,
+        ),
+        normalize_fn=normalize_chapter_content,
+    )
+    if bool(length_diagnostics.get("length_compaction_attempted")):
+        logger.info(
+            "finalizer length compaction chapter=%s before=%s after=%s applied=%s reason=%s",
+            chapter_num,
+            length_diagnostics.get("word_count_before_compaction"),
+            length_diagnostics.get("word_count_after_compaction"),
+            length_diagnostics.get("length_compaction_applied"),
+            length_diagnostics.get("length_compaction_reason"),
+        )
     extracted_facts = state["fact_extractor"].run(
         chapter_num=chapter_num,
         content=final_content,
@@ -305,6 +326,11 @@ def node_finalize(state: GenerationState) -> GenerationState:
                 "chapter_transition": progression_memory.get("transition") or {},
                 "progression_memory_raw": progression_memory_raw,
                 "progression_promotion": progression_promotion,
+                "word_count_before_compaction": int(length_diagnostics.get("word_count_before_compaction") or 0),
+                "word_count_after_compaction": int(length_diagnostics.get("word_count_after_compaction") or 0),
+                "length_compaction_attempted": bool(length_diagnostics.get("length_compaction_attempted")),
+                "length_compaction_applied": bool(length_diagnostics.get("length_compaction_applied")),
+                "length_compaction_reason": str(length_diagnostics.get("length_compaction_reason") or ""),
             },
         }
         if existing:
