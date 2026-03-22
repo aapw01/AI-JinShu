@@ -963,6 +963,88 @@ class ReviewerAgent:
         result["highlights"] = [x for x in highlights if x][:20]
         return result
 
+    def run_cross_chapter_check(
+        self,
+        draft: str,
+        chapter_num: int,
+        recent_summaries: list,
+        char_states: list,
+        target_language: str,
+        provider: str | None = None,
+        model: str | None = None,
+        inference: dict | None = None,
+    ) -> dict:
+        """Check cross-chapter consistency: draft vs recent summaries and character states."""
+        template = "cross_chapter_check"
+        llm = get_llm_with_fallback(provider, model, inference=inference)
+        prompt = render_prompt(
+            template,
+            draft=draft,
+            chapter_num=chapter_num,
+            recent_summaries=recent_summaries,
+            char_states=char_states,
+            target_language=target_language,
+        )
+        try:
+            result = _invoke_json_with_schema(
+                llm,
+                prompt,
+                ReviewScorecardSchema,
+                strict=False,
+                stage="reviewer.cross_chapter",
+                provider=provider,
+                model=model,
+                chapter_num=chapter_num,
+                prompt_template=template,
+                prompt_version="v1",
+            )
+            return result if isinstance(result, dict) else {"contradictions": []}
+        except Exception as exc:
+            logger.warning("run_cross_chapter_check failed: %s", exc)
+            return {"contradictions": []}
+
+    def run_unknown_character_check(
+        self,
+        draft: str,
+        chapter_num: int,
+        unknown_names: list,
+        roster: list,
+        recent_summaries: list,
+        target_language: str,
+        provider: str | None = None,
+        model: str | None = None,
+        inference: dict | None = None,
+    ) -> dict:
+        """Classify unknown characters as unreasonable, new_reasonable, or minor."""
+        template = "unknown_character_check"
+        llm = get_llm_with_fallback(provider, model, inference=inference)
+        prompt = render_prompt(
+            template,
+            draft=draft,
+            chapter_num=chapter_num,
+            unknown_names=unknown_names,
+            roster=roster,
+            recent_summaries=recent_summaries,
+            target_language=target_language,
+        )
+        try:
+            result = _invoke_json_with_schema(
+                llm,
+                prompt,
+                ReviewScorecardSchema,
+                strict=False,
+                stage="reviewer.unknown_character",
+                provider=provider,
+                model=model,
+                chapter_num=chapter_num,
+                prompt_template=template,
+                prompt_version="v1",
+            )
+            return result if isinstance(result, dict) else {"verdicts": []}
+        except Exception as exc:
+            logger.warning("run_unknown_character_check failed: %s", exc)
+            return {"verdicts": []}
+
 
 class FinalizerAgent:
     """Polish and finalize content."""

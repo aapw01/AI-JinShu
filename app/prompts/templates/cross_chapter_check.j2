@@ -1,0 +1,32 @@
+你是专业的小说连续性审校员。请比对以下内容，找出本章正文与前序章节的矛盾之处。
+
+# 前序章节摘要（最近{{ recent_summaries|length }}章）
+{% for s in recent_summaries %}
+第{{ s.chapter_num }}章：{{ s.content | default(s.summary | default("")) }}
+{% endfor %}
+
+# 当前角色状态
+{% for cs in char_states %}
+- {{ cs.key | default("") }}：{{ cs.content | tojson }}
+{% endfor %}
+
+# 本章正文（第{{ chapter_num }}章，节选）
+{{ draft[:3000] }}
+
+请输出以下格式的 JSON，只报告有明确文本证据的矛盾：
+{
+  "contradictions": [
+    {
+      "category": "character|timeline|location|item",
+      "severity": "must_fix|should_fix",
+      "claim": "具体矛盾描述",
+      "evidence": "正文中的具体引文（原文片段，10字以内）",
+      "confidence": 0.0到1.0之间的数字
+    }
+  ]
+}
+
+注意：
+- confidence < 0.65 的不确定情况不要输出
+- 只报告有明确文本证据的矛盾，不要推测
+- 最多输出 6 条

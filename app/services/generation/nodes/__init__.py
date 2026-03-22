@@ -10,6 +10,7 @@ from app.services.generation.nodes.chapter_loop import (  # noqa: F401
 )
 from app.services.generation.nodes.writer import node_writer  # noqa: F401
 from app.services.generation.nodes.review import node_review, node_revise, node_rollback_rerun  # noqa: F401
+from app.services.generation.nodes.cross_chapter_check import node_cross_chapter_check  # noqa: F401
 from app.services.generation.nodes.finalize import node_finalize  # noqa: F401
 from app.services.generation.nodes.closure import (  # noqa: F401
     build_closure_state,

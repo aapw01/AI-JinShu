@@ -19,6 +19,61 @@ _NAME_EXCLUDE = frozenset(
     {"可以", "已经", "不是", "这个", "那个", "什么", "怎么", "等等", "因为", "所以", "如果", "但是"}
 )
 
+_NAME_CONTEXT_PATTERNS = [
+    r"([\u4e00-\u9fff]{2,4})[说道问答喝叫嗤冷哼]",
+    r"([\u4e00-\u9fff]{2,4})[看望转瞥盯扫]向",
+    r"叫(?:做|作)?([\u4e00-\u9fff]{2,4})",
+    r"名(?:叫|为)([\u4e00-\u9fff]{2,4})",
+]
+
+
+def _extract_names_by_context(text: str) -> set[str]:
+    """Extract character names by grammatical context patterns (higher precision)."""
+    names = set()
+    for pattern in _NAME_CONTEXT_PATTERNS:
+        for m in re.finditer(pattern, text):
+            name = m.group(1)
+            if name and name not in _NAME_EXCLUDE:
+                names.add(name)
+    return names
+
+
+def _extract_character_names_freq(text: str, min_count: int = 3) -> set[str]:
+    """Extract names appearing >= min_count times (filters out common words)."""
+    if not text or not isinstance(text, str):
+        return set()
+    matches = re.findall(r"[\u4e00-\u9fff]{2,4}", text)
+    counter: dict[str, int] = {}
+    for m in matches:
+        if m not in _NAME_EXCLUDE:
+            counter[m] = counter.get(m, 0) + 1
+    return {name for name, cnt in counter.items() if cnt >= min_count}
+
+
+def _build_full_roster(prewrite: dict) -> set[str]:
+    """Extract all known name variants (name, alias, title, nickname) from prewrite spec."""
+    roster: set[str] = set()
+    spec = prewrite.get("specification") or prewrite.get("spec") or {}
+    for c in (spec.get("characters") or []):
+        if not isinstance(c, dict):
+            continue
+        for field in ("name", "alias", "title", "nickname"):
+            val = c.get(field)
+            if isinstance(val, str) and val.strip():
+                roster.add(val.strip())
+            elif isinstance(val, list):
+                roster.update(v.strip() for v in val if isinstance(v, str) and v.strip())
+    return roster
+
+
+def extract_unknown_characters(draft: str, prewrite: dict) -> set[str]:
+    """Two-phase extraction: context patterns + frequency filter, minus known roster."""
+    context_names = _extract_names_by_context(draft)
+    freq_names = _extract_character_names_freq(draft, min_count=3)
+    candidates = context_names | freq_names
+    full_roster = _build_full_roster(prewrite)
+    return candidates - full_roster - _NAME_EXCLUDE
+
 
 @dataclass
 class ConsistencyIssue:
