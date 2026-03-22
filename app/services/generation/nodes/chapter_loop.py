@@ -177,22 +177,13 @@ def node_consistency_check(state: GenerationState) -> GenerationState:
         state["prewrite"],
     )
     scorecard = build_consistency_scorecard(report)
-    if report.passed:
-        return {
-            "consistency_report": report,
-            "consistency_scorecard": scorecard,
-            "context": inject_consistency_context(state["context"], report),
-            "consistency_soft_fail": False,
-        }
-    closure_phase = str((state.get("closure_state") or {}).get("phase_mode") or "")
-    if closure_phase in {"closing", "finale"}:
-        return {
-            "consistency_report": report,
-            "consistency_scorecard": scorecard,
-            "context": inject_consistency_context(state["context"], report),
-            "consistency_soft_fail": True,
-        }
-    return {"consistency_report": report, "consistency_scorecard": scorecard, "consistency_soft_fail": False}
+    ctx = inject_consistency_context(state["context"], report)
+    return {
+        "consistency_report": report,
+        "consistency_scorecard": scorecard,
+        "context": ctx,
+        "consistency_soft_fail": True,  # always soft-fail: never skip chapters
+    }
 
 
 def node_save_blocked(state: GenerationState) -> GenerationState:

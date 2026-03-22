@@ -39,9 +39,7 @@ from app.services.generation.state import GenerationState
 # ---------------------------------------------------------------------------
 
 def _route_consistency(state: GenerationState) -> str:
-    if not state["consistency_report"].passed and not state.get("consistency_soft_fail"):
-        return "save_blocked"
-    return "beats"
+    return "beats"  # always proceed; consistency issues injected into writer context
 
 
 def _route_review(state: GenerationState) -> str:

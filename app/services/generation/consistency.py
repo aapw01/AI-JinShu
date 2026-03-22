@@ -509,7 +509,13 @@ def check_consistency(
 
 
 def inject_consistency_context(context: dict, report: ConsistencyReport) -> dict:
-    """Add consistency warnings to context so the writer agent can see them."""
+    """Add consistency warnings and blockers to context so the writer agent can see them."""
     if report.warnings:
-        context["consistency_warnings"] = report.summary()
+        context["consistency_warnings"] = "\n".join(
+            f"⚠️ [{i.category}] {i.message}" for i in report.warnings
+        )
+    if report.blockers:
+        context["consistency_blockers"] = "\n".join(
+            f"🚫 [{i.category}] {i.message}" for i in report.blockers
+        )
     return context
