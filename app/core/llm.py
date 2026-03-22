@@ -13,7 +13,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_google_genai._common import HarmBlockThreshold, HarmCategory
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
-from app.core.llm_usage import record_usage_from_response
+from app.core.llm_usage import record_embedding_call, record_usage_from_response
 from app.core.logging_config import log_event
 from app.services.system_settings.runtime import get_embedding_runtime, get_primary_chat_runtime
 
@@ -351,6 +351,47 @@ class _TrackedLLMProxy:
     def __repr__(self) -> str:
         return repr(self._inner)
 
+    def with_structured_output(self, schema: Any, **kwargs: Any) -> Any:
+        """Return a proxy chain that auto-records token usage from structured output calls.
+
+        Forces include_raw=True internally to always capture usage metadata from the
+        raw AIMessage. If the caller did not request include_raw, the raw field is
+        stripped from the returned result so the caller sees what it expected.
+        """
+        caller_wants_raw = bool(kwargs.get("include_raw", False))
+        inner_chain = self._inner.with_structured_output(schema, **{**kwargs, "include_raw": True})
+        stage = self._stage_prefix
+
+        class _StructuredOutputProxy:
+            def invoke(self_, input_: Any, *args: Any, **kw: Any) -> Any:
+                result = inner_chain.invoke(input_, *args, **kw)
+                if isinstance(result, dict) and "raw" in result:
+                    raw = result.get("raw")
+                    if raw is not None:
+                        record_usage_from_response(raw, stage=stage)
+                    if not caller_wants_raw:
+                        if isinstance(result.get("parsing_error"), Exception):
+                            raise result["parsing_error"]
+                        return result.get("parsed")
+                return result
+
+            async def ainvoke(self_, input_: Any, *args: Any, **kw: Any) -> Any:
+                result = await inner_chain.ainvoke(input_, *args, **kw)
+                if isinstance(result, dict) and "raw" in result:
+                    raw = result.get("raw")
+                    if raw is not None:
+                        record_usage_from_response(raw, stage=stage)
+                    if not caller_wants_raw:
+                        if isinstance(result.get("parsing_error"), Exception):
+                            raise result["parsing_error"]
+                        return result.get("parsed")
+                return result
+
+            def __getattr__(self_, item: str) -> Any:
+                return getattr(inner_chain, item)
+
+        return _StructuredOutputProxy()
+
 
 def get_llm(
     provider: str | None = None,
@@ -429,6 +470,7 @@ def embed_query(text: str) -> list[float] | None:
             model=str(runtime.get("model") or ""),
             latency_ms=round((time.perf_counter() - started) * 1000, 2),
         )
+        record_embedding_call()
         return embedding
     except Exception as exc:
         runtime = get_embedding_runtime()
