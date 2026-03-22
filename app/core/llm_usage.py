@@ -20,14 +20,26 @@ class UsageSession:
     output_tokens: int = 0
     total_tokens: int = 0
     calls: int = 0
+    embedding_calls: int = 0
     stages: dict[str, dict[str, int]] = field(default_factory=dict)
 
 
 _usage_session_var: ContextVar[UsageSession | None] = ContextVar("llm_usage_session", default=None)
 
 
-def begin_usage_session(session_id: str) -> None:
-    _usage_session_var.set(UsageSession(session_id=session_id))
+def begin_usage_session(
+    session_id: str,
+    *,
+    base_input: int = 0,
+    base_output: int = 0,
+) -> None:
+    """Start a new usage session. Pass base_input/base_output when resuming a task
+    that already consumed tokens in a prior Celery execution."""
+    session = UsageSession(session_id=session_id)
+    session.input_tokens = max(0, int(base_input or 0))
+    session.output_tokens = max(0, int(base_output or 0))
+    session.total_tokens = session.input_tokens + session.output_tokens
+    _usage_session_var.set(session)
 
 
 def end_usage_session() -> dict[str, Any]:
@@ -40,6 +52,7 @@ def end_usage_session() -> dict[str, Any]:
             "output_tokens": 0,
             "total_tokens": 0,
             "calls": 0,
+            "embedding_calls": 0,
             "estimated_cost": 0.0,
             "stages": {},
         }
@@ -49,6 +62,7 @@ def end_usage_session() -> dict[str, Any]:
         "output_tokens": int(session.output_tokens),
         "total_tokens": int(session.total_tokens),
         "calls": int(session.calls),
+        "embedding_calls": int(session.embedding_calls),
         "estimated_cost": estimate_cost(session.input_tokens, session.output_tokens),
         "stages": session.stages,
     }
@@ -63,6 +77,7 @@ def snapshot_usage() -> dict[str, Any]:
             "output_tokens": 0,
             "total_tokens": 0,
             "calls": 0,
+            "embedding_calls": 0,
             "estimated_cost": 0.0,
             "stages": {},
         }
@@ -72,6 +87,7 @@ def snapshot_usage() -> dict[str, Any]:
         "output_tokens": int(session.output_tokens),
         "total_tokens": int(session.total_tokens),
         "calls": int(session.calls),
+        "embedding_calls": int(session.embedding_calls),
         "estimated_cost": estimate_cost(session.input_tokens, session.output_tokens),
         "stages": dict(session.stages),
     }
@@ -134,3 +150,11 @@ def record_usage_from_response(response: Any, *, stage: str | None = None) -> di
         bucket["total_tokens"] += total_t if total_t > 0 else (in_t + out_t)
     return {"input_tokens": in_t, "output_tokens": out_t, "total_tokens": total_t}
 
+
+def record_embedding_call() -> None:
+    """Record one embedding API call. Token counts for embeddings are not
+    extractable from LangChain's OpenAIEmbeddings response, so only call count
+    is tracked here."""
+    session = _usage_session_var.get()
+    if session:
+        session.embedding_calls += 1
