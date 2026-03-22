@@ -34,6 +34,7 @@ from app.services.scheduler.scheduler_service import (
     mark_task_running as mark_creation_task_running,
     update_task_progress as update_creation_task_progress,
 )
+from app.models.creation_task import CreationTask
 from app.services.task_runtime.checkpoint_repo import (
     get_completed_units,
     mark_unit_completed,
@@ -221,7 +222,20 @@ def run_storyboard_pipeline(
     version_ids: list[int],
     creation_task_id: int | None = None,
 ):
-    begin_usage_session(f"storyboard:{self.request.id}")
+    # Load prior token totals so resume continues from the correct baseline.
+    _prior_in, _prior_out = 0, 0
+    if creation_task_id is not None:
+        _db_tmp = SessionLocal()
+        try:
+            _ct_row = _db_tmp.execute(
+                select(CreationTask).where(CreationTask.id == creation_task_id)
+            ).scalar_one_or_none()
+            if _ct_row and isinstance(_ct_row.result_json, dict):
+                _prior_in = int(_ct_row.result_json.get("token_usage_input") or 0)
+                _prior_out = int(_ct_row.result_json.get("token_usage_output") or 0)
+        finally:
+            _db_tmp.close()
+    begin_usage_session(f"storyboard:{self.request.id}", base_input=_prior_in, base_output=_prior_out)
     from app.core.constants import CREATION_WORKER_HEARTBEAT_SECONDS
     hb_ctx = background_heartbeat(creation_task_id, heartbeat_fn=_heartbeat_creation, interval_seconds=CREATION_WORKER_HEARTBEAT_SECONDS)
     hb_ctx.__enter__()
@@ -841,7 +855,20 @@ def run_storyboard_lane(
     novel_version_id: int,
     creation_task_id: int | None = None,
 ):
-    begin_usage_session(f"storyboard-lane:{self.request.id}")
+    # Load prior token totals so resume continues from the correct baseline.
+    _prior_in, _prior_out = 0, 0
+    if creation_task_id is not None:
+        _db_tmp = SessionLocal()
+        try:
+            _ct_row = _db_tmp.execute(
+                select(CreationTask).where(CreationTask.id == creation_task_id)
+            ).scalar_one_or_none()
+            if _ct_row and isinstance(_ct_row.result_json, dict):
+                _prior_in = int(_ct_row.result_json.get("token_usage_input") or 0)
+                _prior_out = int(_ct_row.result_json.get("token_usage_output") or 0)
+        finally:
+            _db_tmp.close()
+    begin_usage_session(f"storyboard-lane:{self.request.id}", base_input=_prior_in, base_output=_prior_out)
     from app.core.constants import CREATION_WORKER_HEARTBEAT_SECONDS as _HB_SEC
     hb_ctx = background_heartbeat(
         creation_task_id,
