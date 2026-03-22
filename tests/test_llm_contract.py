@@ -106,3 +106,87 @@ def test_invoke_contract_strict_exhausted_raises(monkeypatch):
             max_provider_fallbacks=0,
         )
     assert exc_info.value.code == "MODEL_OUTPUT_CONTRACT_EXHAUSTED"
+
+
+from types import SimpleNamespace
+from app.core.llm import _TrackedLLMProxy
+from app.core.llm_usage import begin_usage_session, end_usage_session, snapshot_usage
+
+
+class _FakeRaw:
+    usage_metadata = {"input_tokens": 200, "output_tokens": 80, "total_tokens": 280}
+
+
+class _FakeStructuredChain:
+    def __init__(self, raw, parsed, parsing_error=None):
+        self._result = {"raw": raw, "parsed": parsed, "parsing_error": parsing_error}
+
+    def invoke(self, _prompt, **_kw):
+        return self._result
+
+    async def ainvoke(self, _prompt, **_kw):
+        return self._result
+
+
+class _FakeInnerLLM:
+    def __init__(self, chain):
+        self._chain = chain
+        self.received_include_raw: bool | None = None
+
+    def with_structured_output(self, _schema, *, include_raw: bool = False, **_kw):
+        self.received_include_raw = include_raw
+        return self._chain
+
+
+def test_proxy_with_structured_output_records_tokens_include_raw_true():
+    """Proxy override: caller passes include_raw=True, tokens auto-recorded, full dict returned."""
+    raw = _FakeRaw()
+    chain = _FakeStructuredChain(raw=raw, parsed={"chapter_body": "ok"})
+    inner = _FakeInnerLLM(chain)
+    proxy = _TrackedLLMProxy(inner, stage_prefix="test.writer")
+
+    begin_usage_session("proxy-test-1")
+    structured = proxy.with_structured_output(object, include_raw=True)
+    assert inner.received_include_raw is True
+    result = structured.invoke("prompt")
+    assert result["parsed"] == {"chapter_body": "ok"}
+    snap = snapshot_usage()
+    assert snap["input_tokens"] == 200
+    assert snap["output_tokens"] == 80
+    assert snap["calls"] == 1
+    end_usage_session()
+
+
+def test_proxy_with_structured_output_records_tokens_include_raw_false():
+    """Caller omits include_raw (default False): proxy forces True internally, records tokens,
+    returns only the parsed object (not the full dict)."""
+    raw = _FakeRaw()
+    chain = _FakeStructuredChain(raw=raw, parsed={"chapter_body": "hello"})
+    inner = _FakeInnerLLM(chain)
+    proxy = _TrackedLLMProxy(inner, stage_prefix="test.reviewer")
+
+    begin_usage_session("proxy-test-2")
+    structured = proxy.with_structured_output(object)
+    assert inner.received_include_raw is True
+    result = structured.invoke("prompt")
+    assert result == {"chapter_body": "hello"}   # parsed only, not full dict
+    snap = snapshot_usage()
+    assert snap["input_tokens"] == 200
+    end_usage_session()
+
+
+def test_proxy_with_structured_output_no_double_count():
+    """One invoke = one token record. Two invokes = two records."""
+    raw = _FakeRaw()
+    chain = _FakeStructuredChain(raw=raw, parsed={"chapter_body": "x" * 300})
+    inner = _FakeInnerLLM(chain)
+    proxy = _TrackedLLMProxy(inner, stage_prefix="test.double")
+
+    begin_usage_session("proxy-test-3")
+    structured = proxy.with_structured_output(object, include_raw=True)
+    structured.invoke("p1")
+    structured.invoke("p2")
+    snap = snapshot_usage()
+    assert snap["input_tokens"] == 400   # 200 * 2
+    assert snap["calls"] == 2
+    end_usage_session()
