@@ -224,11 +224,13 @@ def _check_foreshadowing_continuity(
     ledger = get_thread_ledger(novel_id, chapter_num, prewrite)
     active = ledger.get("active_foreshadowing") or []
 
-    # No foreshadowing was ever planted
+    # No foreshadowing was ever planted — warning only; on a fresh first-pass run
+    # no prior chapter has completed yet, so active_foreshadowing is always empty.
+    # Blocking here would prevent all early chapters from being written.
     if not active:
         report.issues.append(
             ConsistencyIssue(
-                "blocker",
+                "warning",
                 "plot",
                 f"第{chapter_num}章试图回收伏笔「{payoff[:50]}...」但此前未埋设任何伏笔",
                 chapter_num,
@@ -261,9 +263,12 @@ def _check_foreshadowing_continuity(
         payoff_lower = payoff.lower()
         any_match = any(pt and (pt in payoff or payoff_lower in pt.lower()) for pt in planted_texts)
         if not any_match and len(payoff) > 10:
+            # Downgraded to warning: substring matching between outline texts is
+            # too unreliable for a hard block (paraphrasing or slight wording
+            # differences cause false positives).
             report.issues.append(
                 ConsistencyIssue(
-                    "blocker",
+                    "warning",
                     "plot",
                     f"第{chapter_num}章试图回收伏笔「{payoff[:50]}...」，但该伏笔此前未埋设",
                     chapter_num,
