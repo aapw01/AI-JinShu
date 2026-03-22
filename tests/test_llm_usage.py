@@ -42,6 +42,7 @@ def test_begin_session_with_base_tokens():
     assert snap["input_tokens"] == 1100   # 1000 base + 100 new
     assert snap["output_tokens"] == 550   # 500 base + 50 new
     assert snap["calls"] == 1             # only new calls counted
+    assert snap["total_tokens"] == 1650   # (1000+500) base + (100+50) new
     end_usage_session()
 
 
