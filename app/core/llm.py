@@ -151,7 +151,14 @@ def normalize_inference_for_provider(provider_key: str | None, inference: dict[s
     gemini_cfg = raw.get("gemini")
     if gemini_cfg not in (None, {}):
         if adapter_type != "gemini":
-            raise ValueError("gemini inference settings require the Gemini adapter")
+            log_event(
+                logger,
+                "llm.inference.gemini_ignored",
+                level=logging.DEBUG,
+                provider=provider_key,
+                effective_adapter=adapter_type,
+            )
+            return normalized
         if not isinstance(gemini_cfg, dict):
             raise ValueError("gemini inference settings must be an object")
         safety_settings = _normalize_gemini_safety_settings(gemini_cfg.get("safety_settings"))

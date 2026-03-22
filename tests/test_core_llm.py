@@ -121,23 +121,23 @@ def test_build_chat_model_gemini_applies_temperature_and_safety(monkeypatch):
     assert threshold.value == "BLOCK_ONLY_HIGH"
 
 
-def test_normalize_inference_rejects_gemini_settings_on_non_gemini(monkeypatch):
+def test_normalize_inference_ignores_gemini_settings_on_non_gemini(monkeypatch):
     monkeypatch.setattr(llm, "resolve_effective_adapter", lambda provider: ("openai_compatible", "override"))
-    with pytest.raises(ValueError, match="Gemini adapter"):
-        llm.normalize_inference_for_provider(
-            "openai",
-            {
-                "temperature": 0.2,
-                "gemini": {
-                    "safety_settings": [
-                        {
-                            "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-                            "threshold": "BLOCK_ONLY_HIGH",
-                        }
-                    ]
-                },
+    normalized = llm.normalize_inference_for_provider(
+        "openai",
+        {
+            "temperature": 0.2,
+            "gemini": {
+                "safety_settings": [
+                    {
+                        "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                        "threshold": "BLOCK_ONLY_HIGH",
+                    }
+                ]
             },
-        )
+        },
+    )
+    assert normalized == {"temperature": 0.2}
 
 
 def test_extract_provider_block_reads_gemini_prompt_feedback():
