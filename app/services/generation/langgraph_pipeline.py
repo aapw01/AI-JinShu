@@ -11,7 +11,9 @@ The original monolithic implementation has been split into focused modules:
 All public symbols are re-exported here so existing imports continue to work.
 """
 from app.services.generation.graph import (  # noqa: F401
+    _route_after_advance_chapter,
     _route_after_confirmation,
+    _route_after_final_review,
     _route_consistency,
     _route_finalize,
     _route_review,

@@ -104,4 +104,36 @@ def node_final_book_review(state: GenerationState) -> GenerationState:
         book_effective_end_chapter=effective_end,
         volume_no=int(state.get("volume_no") or 1),
     )
-    return {}
+
+    # Scan for quality_blocked chapters to feed into rewrite queue
+    db_scan = SessionLocal()
+    try:
+        blocked_stmt = (
+            select(ChapterVersion)
+            .where(
+                ChapterVersion.novel_version_id == state.get("novel_version_id"),
+                ChapterVersion.status == "quality_blocked",
+            )
+            .order_by(ChapterVersion.chapter_num)
+        )
+        blocked_rows = db_scan.execute(blocked_stmt).scalars().all()
+        quality_blocked_chapters = [c.chapter_num for c in blocked_rows]
+    finally:
+        db_scan.close()
+
+    return {"quality_blocked_chapters": quality_blocked_chapters}
+
+
+def node_quality_rewrite_init(state: GenerationState) -> dict:
+    """Set up rewrite of the next quality_blocked chapter."""
+    blocked = list(state.get("quality_blocked_chapters") or [])
+    if not blocked:
+        return {"quality_blocked_chapters": []}
+    target = blocked[0]
+    remaining = blocked[1:]
+    return {
+        "current_chapter": target,
+        "quality_blocked_chapters": remaining,
+        "review_attempt": 0,
+        "rerun_count": 0,
+    }

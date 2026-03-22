@@ -18,4 +18,4 @@ from app.services.generation.nodes.closure import (  # noqa: F401
     node_closure_gate,
     node_tail_rewrite,
 )
-from app.services.generation.nodes.final_review import node_final_book_review  # noqa: F401
+from app.services.generation.nodes.final_review import node_final_book_review, node_quality_rewrite_init  # noqa: F401
