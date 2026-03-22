@@ -63,6 +63,7 @@ def end_usage_session() -> dict[str, Any]:
         "total_tokens": int(session.total_tokens),
         "calls": int(session.calls),
         "embedding_calls": int(session.embedding_calls),
+        # Note: includes base tokens from prior runs — this is cumulative lifetime cost.
         "estimated_cost": estimate_cost(session.input_tokens, session.output_tokens),
         "stages": session.stages,
     }
