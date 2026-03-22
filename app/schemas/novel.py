@@ -91,7 +91,7 @@ class ChapterResponse(BaseModel):
 class ChapterProgressResponse(BaseModel):
     chapter_num: int
     title: str | None = None
-    status: str  # pending | generating | completed
+    status: str  # pending | generating | completed | blocked
     volume_no: int
     volume_size: int
 

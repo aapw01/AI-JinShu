@@ -226,7 +226,12 @@ def get_chapter_progress(
             chapter_row = generated_map.get(o.chapter_num)
             if o.chapter_num in generated_map:
                 raw = chapter_row.status or "completed"
-                status = "completed" if raw in ("completed", "quality_blocked") else "generating"
+                if raw in ("completed", "quality_blocked"):
+                    status = "completed"
+                elif raw == "consistency_blocked":
+                    status = "blocked"
+                else:
+                    status = "generating"
             elif generating_chapter is not None and o.chapter_num == generating_chapter:
                 status = "generating"
             result.append(
