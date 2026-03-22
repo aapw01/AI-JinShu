@@ -277,6 +277,26 @@ def _activate_creation_task(task_db_id: int, *, current_celery_id: str) -> None:
         db.close()
 
 
+def _load_prior_tokens(creation_task_id: int | None) -> tuple[int, int]:
+    """Load token totals from the creation_task's result_json for resume scenarios.
+    Returns (input_tokens, output_tokens). Safe to call with None."""
+    if creation_task_id is None:
+        return 0, 0
+    db = SessionLocal()
+    try:
+        row = db.execute(
+            select(CreationTask).where(CreationTask.id == creation_task_id)
+        ).scalar_one_or_none()
+        if row and isinstance(row.result_json, dict):
+            return (
+                int(row.result_json.get("token_usage_input") or 0),
+                int(row.result_json.get("token_usage_output") or 0),
+            )
+        return 0, 0
+    finally:
+        db.close()
+
+
 def _update_creation_progress(task_db_id: int, *, progress: float, phase: str, message: str) -> None:
     db = SessionLocal()
     try:
@@ -825,7 +845,6 @@ def submit_book_generation_task(
 
     task_id = self.request.id
     set_trace_id(trace_id)
-    begin_usage_session(f"generation:{task_id}")
     db: Any = None
     resume_mode = "segment_running"
     creation_public_id: str | None = None
@@ -882,6 +901,12 @@ def submit_book_generation_task(
             db.close()
             db = None
 
+        prior_input, prior_output = _load_prior_tokens(creation_task_id)
+        begin_usage_session(
+            f"generation:{task_id}",
+            base_input=prior_input,
+            base_output=prior_output,
+        )
         if creation_task_id is not None:
             _activate_creation_task(creation_task_id, current_celery_id=task_id)
             resume_plan = _resolve_generation_resume(
