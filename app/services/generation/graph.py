@@ -19,6 +19,7 @@ from app.services.generation.nodes import (
     node_cross_chapter_check,
     node_final_book_review,
     node_finalize,
+    node_quality_rewrite_init,
     node_init,
     node_load_context,
     node_outline,
@@ -85,6 +86,24 @@ def _route_after_tail_rewrite(state: GenerationState) -> str:
     if state["current_chapter"] > state["end_chapter"]:
         return "segment_done"
     return "volume_replan" if is_volume_start(state, state["current_chapter"]) else "load_context"
+
+
+def _route_after_final_review(state: GenerationState) -> str:
+    blocked = state.get("quality_blocked_chapters") or []
+    if blocked:
+        return "quality_rewrite_init"
+    return "done"
+
+
+def _route_after_advance_chapter(state: GenerationState) -> str:
+    # If in quality-rewrite mode (key set by final_book_review), route accordingly
+    blocked = state.get("quality_blocked_chapters")
+    if blocked is not None:
+        if blocked:
+            return "quality_rewrite_init"
+        return "done"
+    # Normal flow
+    return "closure_gate"
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +195,7 @@ def _build_generation_graph():
     graph.add_node("bridge_chapter", _timed_node("bridge_chapter", node_bridge_chapter))
     graph.add_node("tail_rewrite", _timed_node("tail_rewrite", node_tail_rewrite))
     graph.add_node("final_book_review", _timed_node("final_book_review", node_final_book_review))
+    graph.add_node("quality_rewrite_init", _timed_node("quality_rewrite_init", node_quality_rewrite_init))
 
     graph.set_entry_point("init")
     graph.add_edge("init", "prewrite")
@@ -193,11 +213,20 @@ def _build_generation_graph():
     graph.add_edge("revise", "writer")
     graph.add_edge("rollback_rerun", "writer")
     graph.add_conditional_edges("finalizer", _route_finalize, {"rollback_rerun": "rollback_rerun", "advance_chapter": "advance_chapter"})
-    graph.add_edge("advance_chapter", "closure_gate")
+    graph.add_conditional_edges(
+        "advance_chapter",
+        _route_after_advance_chapter,
+        {"closure_gate": "closure_gate", "quality_rewrite_init": "quality_rewrite_init", "done": END},
+    )
     graph.add_conditional_edges("closure_gate", _route_after_closure_gate, {"volume_replan": "volume_replan", "load_context": "load_context", "bridge_chapter": "bridge_chapter", "tail_rewrite": "tail_rewrite", "segment_done": END})
     graph.add_conditional_edges("bridge_chapter", _route_after_tail_rewrite, {"volume_replan": "volume_replan", "load_context": "load_context", "segment_done": END})
     graph.add_conditional_edges("tail_rewrite", _route_after_tail_rewrite, {"volume_replan": "volume_replan", "load_context": "load_context", "segment_done": END})
-    graph.add_edge("final_book_review", END)
+    graph.add_conditional_edges(
+        "final_book_review",
+        _route_after_final_review,
+        {"quality_rewrite_init": "quality_rewrite_init", "done": END},
+    )
+    graph.add_edge("quality_rewrite_init", "load_context")
     return graph.compile()
 
 
@@ -272,3 +301,11 @@ def run_final_book_review_only_langgraph(
     )
     state["current_chapter"] = int(book_effective_end_chapter) + 1
     node_final_book_review(state)
+
+    # Log quality-blocked chapters found during standalone final review
+    q_blocked = state.get("quality_blocked_chapters") or []
+    if q_blocked:
+        logger.warning(
+            "quality_blocked chapters found during standalone final review (not auto-rewritten): %s",
+            q_blocked,
+        )

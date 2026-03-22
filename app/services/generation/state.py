@@ -92,3 +92,4 @@ class GenerationState(TypedDict, total=False):
     review_suggestions: dict[str, Any]
     consistency_scorecard: dict[str, Any]
     review_gate: dict[str, Any]
+    quality_blocked_chapters: list[int]
