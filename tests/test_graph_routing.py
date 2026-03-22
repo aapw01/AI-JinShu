@@ -34,12 +34,13 @@ class TestRouteConsistency:
         report = ConsistencyReport(passed=True)
         assert _route_consistency(_base_state(consistency_report=report)) == "beats"
 
-    def test_save_blocked_when_not_passed(self):
+    def test_beats_when_not_passed(self):
+        # P0-A: consistency failures are always soft-failed; never route to save_blocked
         report = ConsistencyReport(
             issues=[ConsistencyIssue("blocker", "character", "角色已死亡")],
             passed=False,
         )
-        assert _route_consistency(_base_state(consistency_report=report)) == "save_blocked"
+        assert _route_consistency(_base_state(consistency_report=report)) == "beats"
 
 
 # ---- _route_review -----------------------------------------------------------

@@ -82,6 +82,12 @@
 </transition_constraints_json>
 {% endif %}
 
+{% if context.consistency_blockers | default("") %}
+<consistency_constraints>
+以下硬性约束本章写作必须严格遵守，不得违反：
+{{ context.consistency_blockers }}
+</consistency_constraints>
+{% endif %}
 {% if context.consistency_warnings | default("") %}
 <consistency_warnings>
 {{ context.consistency_warnings }}
