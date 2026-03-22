@@ -34,6 +34,7 @@ from app.services.scheduler.scheduler_service import (
     update_task_progress as update_creation_task_progress,
 )
 from app.core.constants import CREATION_WORKER_HEARTBEAT_SECONDS
+from app.models.creation_task import CreationTask
 from app.services.task_runtime.checkpoint_repo import (
     get_last_completed_unit,
     mark_unit_completed,
@@ -300,7 +301,20 @@ def submit_rewrite_task(
     rewrite_to: int,
     creation_task_id: int | None = None,
 ):
-    begin_usage_session(f"rewrite:{self.request.id}")
+    # Load prior token totals so resume continues from the correct baseline.
+    _prior_in, _prior_out = 0, 0
+    if creation_task_id is not None:
+        _db_tmp = SessionLocal()
+        try:
+            _ct_row = _db_tmp.execute(
+                select(CreationTask).where(CreationTask.id == creation_task_id)
+            ).scalar_one_or_none()
+            if _ct_row and isinstance(_ct_row.result_json, dict):
+                _prior_in = int(_ct_row.result_json.get("token_usage_input") or 0)
+                _prior_out = int(_ct_row.result_json.get("token_usage_output") or 0)
+        finally:
+            _db_tmp.close()
+    begin_usage_session(f"rewrite:{self.request.id}", base_input=_prior_in, base_output=_prior_out)
     hb_ctx = background_heartbeat(creation_task_id, heartbeat_fn=_heartbeat_creation, interval_seconds=CREATION_WORKER_HEARTBEAT_SECONDS)
     hb_ctx.__enter__()
     _worker_superseded = False
