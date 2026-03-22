@@ -391,6 +391,30 @@ class FactualReviewSchema(BaseModel):
     contradictions: list[str] = []
 
 
+class CrossChapterContradictionSchema(BaseModel):
+    category: str = "character"
+    severity: str = "should_fix"
+    claim: str = ""
+    evidence: str = ""
+    confidence: float = 0.7
+
+
+class CrossChapterCheckSchema(BaseModel):
+    contradictions: list[CrossChapterContradictionSchema] = []
+
+
+class UnknownCharacterVerdictSchema(BaseModel):
+    name: str = ""
+    result: str = "minor"  # unreasonable | new_reasonable | minor
+    reason: str = ""
+    evidence: str = ""
+    confidence: float = 0.7
+
+
+class UnknownCharacterCheckSchema(BaseModel):
+    verdicts: list[UnknownCharacterVerdictSchema] = []
+
+
 class AestheticReviewSchema(BaseModel):
     score: float = 0.8
     feedback: str = ""
@@ -989,7 +1013,7 @@ class ReviewerAgent:
             result = _invoke_json_with_schema(
                 llm,
                 prompt,
-                ReviewScorecardSchema,
+                CrossChapterCheckSchema,
                 strict=False,
                 stage="reviewer.cross_chapter",
                 provider=provider,
@@ -1031,7 +1055,7 @@ class ReviewerAgent:
             result = _invoke_json_with_schema(
                 llm,
                 prompt,
-                ReviewScorecardSchema,
+                UnknownCharacterCheckSchema,
                 strict=False,
                 stage="reviewer.unknown_character",
                 provider=provider,
