@@ -116,7 +116,11 @@ def node_review(state: GenerationState) -> GenerationState:
         )
         review_gate = build_review_gate(text, struct_pack, factual_pack, progression_pack, aesthetic_pack)
         if review_gate.get("over_correction_risk"):
-            combined = min(1.0, combined + 0.05)
+            combined = max(0.0, combined - 0.02)
+            logger.info(
+                "over_correction_risk chapter=%s evidence_coverage=%.2f combined_adjusted=%.3f",
+                chapter_num, review_gate.get("evidence_coverage", 0), combined,
+            )
         item = {
             "variant": c.get("variant"),
             "draft": text,
