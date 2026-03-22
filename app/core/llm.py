@@ -363,7 +363,12 @@ class _TrackedLLMProxy:
         stage = self._stage_prefix
 
         class _StructuredOutputProxy:
-            def invoke(self_, input_: Any, *args: Any, **kw: Any) -> Any:
+            """Proxy for a with_structured_output chain.
+            Intercepts invoke/ainvoke to record token usage from the raw AIMessage.
+            Note: stream/astream are not intercepted — token recording applies to
+            invoke/ainvoke only."""
+
+            def invoke(self, input_: Any, *args: Any, **kw: Any) -> Any:
                 result = inner_chain.invoke(input_, *args, **kw)
                 if isinstance(result, dict) and "raw" in result:
                     raw = result.get("raw")
@@ -375,7 +380,7 @@ class _TrackedLLMProxy:
                         return result.get("parsed")
                 return result
 
-            async def ainvoke(self_, input_: Any, *args: Any, **kw: Any) -> Any:
+            async def ainvoke(self, input_: Any, *args: Any, **kw: Any) -> Any:
                 result = await inner_chain.ainvoke(input_, *args, **kw)
                 if isinstance(result, dict) and "raw" in result:
                     raw = result.get("raw")
@@ -387,7 +392,7 @@ class _TrackedLLMProxy:
                         return result.get("parsed")
                 return result
 
-            def __getattr__(self_, item: str) -> Any:
+            def __getattr__(self, item: str) -> Any:
                 return getattr(inner_chain, item)
 
         return _StructuredOutputProxy()
