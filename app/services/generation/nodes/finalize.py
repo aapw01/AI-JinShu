@@ -34,6 +34,17 @@ from app.services.memory.progression_control import ProgressionPromotionService
 _SENTENCE_SPLIT_RE = re.compile(r"[。！？!?；;…]+")
 
 
+def _build_fallback_facts_from_summary(summary_text: str, chapter_num: int) -> dict:
+    """Minimal facts from summary when fact_extractor fails completely."""
+    return {
+        "events": [{"title": f"第{chapter_num}章事件", "description": (summary_text or "")[:200]}] if summary_text else [],
+        "characters": [],
+        "items": [],
+        "locations": [],
+        "_fallback": True,
+    }
+
+
 def _paragraph_fragmentation_metrics(content: str) -> dict[str, float]:
     paragraphs = [part.strip() for part in str(content or "").split("\n\n") if part.strip()]
     if not paragraphs:
@@ -204,15 +215,42 @@ def node_finalize(state: GenerationState) -> GenerationState:
             length_diagnostics.get("length_compaction_applied"),
             length_diagnostics.get("length_compaction_reason"),
         )
-    extracted_facts = state["fact_extractor"].run(
-        chapter_num=chapter_num,
-        content=final_content,
-        outline=state.get("outline") or {},
-        language=state["target_language"],
-        provider=f_provider,
-        model=f_model,
-        inference=fact_inference,
-    )
+    extracted_facts = None
+
+    # First attempt
+    try:
+        extracted_facts = state["fact_extractor"].run(
+            chapter_num=chapter_num,
+            content=final_content,
+            outline=state.get("outline") or {},
+            language=state["target_language"],
+            provider=f_provider,
+            model=f_model,
+            inference=fact_inference,
+        )
+    except Exception as exc:
+        logger.warning("fact_extractor first attempt failed chapter=%s error=%s", chapter_num, exc)
+
+    # Retry once
+    if not extracted_facts:
+        try:
+            extracted_facts = state["fact_extractor"].run(
+                chapter_num=chapter_num,
+                content=final_content,
+                outline=state.get("outline") or {},
+                language=state["target_language"],
+                provider=f_provider,
+                model=f_model,
+                inference=fact_inference,
+            )
+        except Exception as exc:
+            logger.warning("fact_extractor retry failed chapter=%s error=%s", chapter_num, exc)
+
+    # Fallback: minimal facts when both attempts fail
+    if not extracted_facts:
+        extracted_facts = _build_fallback_facts_from_summary("", chapter_num)
+        logger.warning("fact_extractor using fallback facts chapter=%s", chapter_num)
+
     language_score, language_report = evaluate_language_quality(final_content, state["target_language"])
     aesthetic_score_val = aesthetic_score(final_content)
     progression_memory_raw: dict[str, object] = {
@@ -276,17 +314,23 @@ def node_finalize(state: GenerationState) -> GenerationState:
             summary_text,
             db=db,
         )
-        update_character_states_from_content(
-            state["novel_id"],
-            chapter_num,
-            final_content,
-            state["prewrite"],
-            state["char_mgr"],
-            state["target_language"],
-            state["strategy"],
-            db=db,
-            novel_version_id=state.get("novel_version_id"),
-        )
+        if not (extracted_facts or {}).get("_fallback"):
+            try:
+                update_character_states_from_content(
+                    state["novel_id"],
+                    chapter_num,
+                    final_content,
+                    state["prewrite"],
+                    state["char_mgr"],
+                    state["target_language"],
+                    state["strategy"],
+                    db=db,
+                    novel_version_id=state.get("novel_version_id"),
+                )
+            except Exception as exc:
+                logger.warning("character_state update failed chapter=%s error=%s", chapter_num, exc)
+        else:
+            logger.info("character_state update skipped (fallback facts) chapter=%s", chapter_num)
         update_character_profiles_incremental(
             db=db,
             novel_id=state["novel_id"],
