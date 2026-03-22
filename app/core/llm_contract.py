@@ -10,7 +10,6 @@ from pydantic import ValidationError
 
 from app.core.constants import LLM_OUTPUT_MAX_SCHEMA_RETRIES, LLM_OUTPUT_MIN_CHARS
 from app.core.llm import get_llm, resolve_effective_adapter
-from app.core.llm_usage import record_usage_from_response
 from app.services.generation.contracts import ChapterBodySchema, OutputContractError, validate_chapter_body
 
 logger = logging.getLogger(__name__)
@@ -112,11 +111,6 @@ def invoke_chapter_body_structured(
                         parsing_error = result.get("parsing_error")
                     else:
                         parsed = result
-                    if raw_resp is not None:
-                        record_usage_from_response(
-                            raw_resp,
-                            stage=f"llm.{candidate_provider or 'default'}.{candidate_model or 'default'}.structured.{stage}",
-                        )
                     if parsing_error is not None:
                         raise OutputContractError(
                             code="MODEL_OUTPUT_PARSE_FAILED",
