@@ -16,6 +16,7 @@ from app.services.generation.nodes import (
     node_closure_gate,
     node_confirmation_gate,
     node_consistency_check,
+    node_cross_chapter_check,
     node_final_book_review,
     node_finalize,
     node_init,
@@ -166,6 +167,7 @@ def _build_generation_graph():
     graph.add_node("beats", _timed_node("beats", node_beats))
     graph.add_node("writer", _timed_node("writer", node_writer))
     graph.add_node("reviewer", _timed_node("reviewer", node_review))
+    graph.add_node("cross_chapter_check", _timed_node("cross_chapter_check", node_cross_chapter_check))
     graph.add_node("revise", _timed_node("revise", node_revise))
     graph.add_node("rollback_rerun", _timed_node("rollback_rerun", node_rollback_rerun))
     graph.add_node("finalizer", _timed_node("finalizer", node_finalize))
@@ -186,7 +188,8 @@ def _build_generation_graph():
     graph.add_edge("beats", "writer")
     graph.add_edge("save_blocked", "advance_chapter")
     graph.add_edge("writer", "reviewer")
-    graph.add_conditional_edges("reviewer", _route_review, {"revise": "revise", "rollback_rerun": "rollback_rerun", "finalizer": "finalizer"})
+    graph.add_edge("reviewer", "cross_chapter_check")
+    graph.add_conditional_edges("cross_chapter_check", _route_review, {"revise": "revise", "rollback_rerun": "rollback_rerun", "finalizer": "finalizer"})
     graph.add_edge("revise", "writer")
     graph.add_edge("rollback_rerun", "writer")
     graph.add_conditional_edges("finalizer", _route_finalize, {"rollback_rerun": "rollback_rerun", "advance_chapter": "advance_chapter"})
