@@ -228,6 +228,48 @@ class StoryBibleStore:
             if should_close:
                 db.close()
 
+    def resolve_foreshadow(
+        self,
+        novel_id: int,
+        foreshadow_id: str,
+        chapter_resolved: int,
+        novel_version_id: int | None = None,
+        db: Optional[Session] = None,
+    ) -> StoryForeshadow | None:
+        """Mark a foreshadow as resolved in the given chapter."""
+        should_close = db is None
+        db = db or SessionLocal()
+        try:
+            stmt = select(StoryForeshadow).where(StoryForeshadow.novel_id == novel_id)
+            if novel_version_id is not None:
+                stmt = stmt.where(StoryForeshadow.novel_version_id == novel_version_id)
+            stmt = stmt.where(StoryForeshadow.foreshadow_id == foreshadow_id)
+            row = db.execute(stmt).scalar_one_or_none()
+            if row is None:
+                return None
+            row.state = "resolved"
+            row.resolved_chapter = chapter_resolved
+            if should_close:
+                db.commit()
+            else:
+                db.flush()
+            db.refresh(row)
+            return row
+        except Exception as exc:
+            import logging as _logging
+            _logging.getLogger("app.services.memory").warning(
+                "resolve_foreshadow failed novel_id=%s foreshadow_id=%s error=%s", novel_id, foreshadow_id, exc
+            )
+            if should_close:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+            return None
+        finally:
+            if should_close:
+                db.close()
+
     def save_snapshot(
         self,
         novel_id: int,

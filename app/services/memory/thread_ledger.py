@@ -65,6 +65,29 @@ def get_thread_ledger(
         else:
             active_plotlines = [str(plotlines)] if plotlines else []
 
+        # Supplement with DB-tracked foreshadows (best-effort)
+        try:
+            from app.models.novel import StoryForeshadow
+            db_stmt = select(StoryForeshadow).where(
+                StoryForeshadow.novel_id == novel_id,
+                StoryForeshadow.planted_chapter < chapter_num,
+                StoryForeshadow.state == "planted",
+            )
+            db_foreshadows = db.execute(db_stmt).scalars().all()
+            for f in db_foreshadows:
+                entry = {
+                    "chapter_num": getattr(f, "planted_chapter", chapter_num),
+                    "foreshadowing": getattr(f, "title", None) or "",
+                    "id": getattr(f, "foreshadow_id", ""),
+                }
+                if entry["foreshadowing"] and entry not in active_foreshadowing:
+                    active_foreshadowing.append(entry)
+        except Exception as exc:
+            import logging as _logging
+            _logging.getLogger("app.services.memory").warning(
+                "thread_ledger DB foreshadow query failed: %s", exc
+            )
+
         return {
             "active_foreshadowing": active_foreshadowing,
             "active_plotlines": active_plotlines,
