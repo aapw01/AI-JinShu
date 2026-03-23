@@ -401,6 +401,40 @@ def node_finalize(state: GenerationState) -> GenerationState:
             progression_promotion=progression_promotion,
             db=db,
         )
+        # Foreshadow extraction (best-effort, never breaks flow)
+        try:
+            f_provider, f_model = get_model_for_stage(state["strategy"], "fact_extractor")
+            foreshadow_result = state["fact_extractor"].run_foreshadow_extraction(
+                content=final_content,
+                chapter_num=chapter_num,
+                outline=state.get("outline") or {},
+                target_language=state["target_language"],
+                provider=f_provider,
+                model=f_model,
+            )
+            for i, item in enumerate((foreshadow_result.get("planted") or [])[:5]):
+                state["bible_store"].upsert_foreshadow(
+                    novel_id=state["novel_id"],
+                    novel_version_id=state.get("novel_version_id"),
+                    planted_chapter=chapter_num,
+                    title=str(item.get("text") or ""),
+                    foreshadow_id=str(item.get("id") or f"F-{chapter_num}-{i + 1}"),
+                    state="planted",
+                    payload={"evidence": str(item.get("evidence") or "")},
+                    db=db,
+                )
+            for item in (foreshadow_result.get("resolved") or [])[:5]:
+                fid = str(item.get("id") or "")
+                if fid:
+                    state["bible_store"].resolve_foreshadow(
+                        novel_id=state["novel_id"],
+                        novel_version_id=state.get("novel_version_id"),
+                        foreshadow_id=fid,
+                        chapter_resolved=chapter_num,
+                        db=db,
+                    )
+        except Exception as exc:
+            logger.warning("foreshadow_extraction failed chapter=%s error=%s", chapter_num, exc)
         db.commit()
     except Exception:
         db.rollback()

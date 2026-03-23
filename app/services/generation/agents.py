@@ -1202,6 +1202,36 @@ class FactExtractorAgent:
         )
         return data if isinstance(data, dict) else {"events": [], "entities": [], "facts": []}
 
+    def run_foreshadow_extraction(
+        self,
+        content: str,
+        chapter_num: int,
+        outline: dict,
+        target_language: str,
+        provider: str | None = None,
+        model: str | None = None,
+        inference: dict[str, Any] | None = None,
+    ) -> dict:
+        from app.prompts import render_prompt as _render
+        prompt = _render(
+            "foreshadow_extraction",
+            content=content[:4000],
+            chapter_num=chapter_num,
+            outline_foreshadowing=str(outline.get("foreshadowing") or "无"),
+            outline_payoff=str(outline.get("payoff") or "无"),
+            target_language=target_language,
+        )
+        try:
+            llm = get_llm_with_fallback(provider, model, inference=inference)
+            resp = llm.invoke(prompt)
+            text = response_to_text(resp)
+            text = _extract_json_block(text)
+            result = json.loads(text)
+            return result if isinstance(result, dict) else {"planted": [], "resolved": []}
+        except Exception as exc:
+            logger.warning("run_foreshadow_extraction failed chapter=%s error=%s", chapter_num, exc)
+            return {"planted": [], "resolved": []}
+
 
 class ProgressionMemoryAgent:
     """Extract structured progression and continuity memory from finalized chapter text."""

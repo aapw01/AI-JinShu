@@ -1,0 +1,28 @@
+分析以下第{{ chapter_num }}章正文，提取伏笔埋设和回收信息。
+
+大纲中计划的伏笔埋设：{{ outline_foreshadowing | default("无") }}
+大纲中计划的伏笔回收：{{ outline_payoff | default("无") }}
+
+正文内容：
+{{ content }}
+
+输出以下格式的 JSON（只提取正文中实际体现的内容，不要推测）：
+{
+  "planted": [
+    {
+      "id": "F-{{ chapter_num }}-1",
+      "text": "伏笔内容描述（20字以内）",
+      "evidence": "正文中的原文片段（15字以内）"
+    }
+  ],
+  "resolved": [
+    {
+      "id": "对应伏笔的id（若能匹配）",
+      "text": "回收内容描述（20字以内）",
+      "evidence": "正文中的原文片段（15字以内）"
+    }
+  ]
+}
+
+planted 是本章新埋入的伏笔，resolved 是本章回收/揭示了之前埋的伏笔。
+没有则输出空列表。各最多 5 条。
