@@ -130,12 +130,14 @@ DEFAULT_PIPELINE_OPTIONS: dict[str, Any] = {
 def get_pipeline_options(strategy_key: str | None) -> dict[str, Any]:
     """Return pipeline_options for the given strategy, merged over defaults."""
     config = get_strategy_config(strategy_key)
-    opts = config.get("pipeline_options") or {}
+    raw_opts = config.get("pipeline_options")
+    opts: dict = raw_opts if isinstance(raw_opts, dict) else {}
+    defs = DEFAULT_PIPELINE_OPTIONS
     return {
-        "combined_reviewer": bool(opts.get("combined_reviewer", DEFAULT_PIPELINE_OPTIONS["combined_reviewer"])),
-        "max_retries": int(opts.get("max_retries", DEFAULT_PIPELINE_OPTIONS["max_retries"])),
-        "enable_cross_chapter_check": bool(opts.get("enable_cross_chapter_check", DEFAULT_PIPELINE_OPTIONS["enable_cross_chapter_check"])),
-        "enable_refine_outline": bool(opts.get("enable_refine_outline", DEFAULT_PIPELINE_OPTIONS["enable_refine_outline"])),
+        "combined_reviewer": bool(opts.get("combined_reviewer", defs["combined_reviewer"])),
+        "max_retries": int(opts.get("max_retries") or defs["max_retries"]),
+        "enable_cross_chapter_check": bool(opts.get("enable_cross_chapter_check", defs["enable_cross_chapter_check"])),
+        "enable_refine_outline": bool(opts.get("enable_refine_outline", defs["enable_refine_outline"])),
     }
 
 
