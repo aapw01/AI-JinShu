@@ -117,3 +117,28 @@ def get_review_weights(strategy_key: str | None) -> dict[str, float]:
         "progression": float(weights.get("progression", DEFAULT_REVIEW_WEIGHTS["progression"]) or DEFAULT_REVIEW_WEIGHTS["progression"]),
         "aesthetic": float(weights.get("aesthetic", DEFAULT_REVIEW_WEIGHTS["aesthetic"]) or DEFAULT_REVIEW_WEIGHTS["aesthetic"]),
     }
+
+
+DEFAULT_PIPELINE_OPTIONS: dict[str, Any] = {
+    "combined_reviewer": False,
+    "max_retries": 2,
+    "enable_cross_chapter_check": True,
+    "enable_refine_outline": True,
+}
+
+
+def get_pipeline_options(strategy_key: str | None) -> dict[str, Any]:
+    """Return pipeline_options for the given strategy, merged over defaults."""
+    config = get_strategy_config(strategy_key)
+    opts = config.get("pipeline_options") or {}
+    return {
+        "combined_reviewer": bool(opts.get("combined_reviewer", DEFAULT_PIPELINE_OPTIONS["combined_reviewer"])),
+        "max_retries": int(opts.get("max_retries", DEFAULT_PIPELINE_OPTIONS["max_retries"])),
+        "enable_cross_chapter_check": bool(opts.get("enable_cross_chapter_check", DEFAULT_PIPELINE_OPTIONS["enable_cross_chapter_check"])),
+        "enable_refine_outline": bool(opts.get("enable_refine_outline", DEFAULT_PIPELINE_OPTIONS["enable_refine_outline"])),
+    }
+
+
+def get_max_retries(strategy_key: str | None) -> int:
+    """Return max_retries for the given strategy."""
+    return get_pipeline_options(strategy_key)["max_retries"]
