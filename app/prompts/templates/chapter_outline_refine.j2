@@ -1,0 +1,25 @@
+{# chapter_outline_refine.j2: 章前大纲精化（基于真实写作摘要） #}
+你是资深网文编辑。当前正在创作第{{ chapter_num }}章，请根据前几章的真实写作内容，精化本章大纲的衔接字段。
+
+<current_outline>
+{{ outline | tojson_pretty }}
+</current_outline>
+
+<recent_actual_summaries>
+{% for s in recent_summaries %}
+第{{ s.chapter_num }}章（已写）：{{ s.summary }}
+{% endfor %}
+</recent_actual_summaries>
+
+<task>
+请在不改变本章核心目标（chapter_objective、outline、conflict_axis）的前提下，精化以下字段使其与实际写作内容衔接：
+- opening_scene: 根据上章结尾调整开场场景
+- transition_mode: 根据上章实际结尾确定过渡方式
+- hook: 确保钩子与上章遗留悬念呼应
+- payoff: 若上章有未兑现伏笔，优先在此兑现
+- forbidden_repeats: 补充上几章已用过的推进手法，避免重复
+
+只输出需要修改的字段（JSON 对象）。若某字段无需修改则不包含该键。
+若整体大纲已经准确无需修改，输出空 JSON 对象 {}。
+不得修改：chapter_num, chapter_objective, outline, conflict_axis, title
+</task>
