@@ -94,12 +94,14 @@ def invoke_chapter_body_structured(
                         "method": method,
                         "include_raw": True,
                     }
-                    if adapter == "openai_compatible":
+                    # strict=True only applies to json_schema / function_calling;
+                    # json_mode does not support it.
+                    if adapter == "openai_compatible" and method != "json_mode":
                         kwargs["strict"] = True
                     try:
                         structured = llm.with_structured_output(ChapterBodySchema, **kwargs)
                     except (TypeError, ValueError):
-                        # json_mode does not accept strict=True; drop it and retry
+                        # Safety net for unexpected strict-incompatible combinations
                         kwargs.pop("strict", None)
                         structured = llm.with_structured_output(ChapterBodySchema, **kwargs)
                     result = structured.invoke(prompt)
