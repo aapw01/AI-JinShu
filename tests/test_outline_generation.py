@@ -157,3 +157,75 @@ class TestRunVolumeOutlines:
         assert len(result) == 3
         for item in result:
             assert item.get("outline", "") == ""
+
+
+class TestNodeOutlineFirstVolumeOnly:
+    """node_outline 在全新生成时只应生成第一卷数量的大纲，而不是全书"""
+
+    def _make_minimal_state(self, num_chapters=60, volume_size=30):
+        from app.services.memory.character_state import CharacterStateManager
+        from app.services.memory.progression_state import ProgressionMemoryManager
+        from app.services.memory.story_bible import CheckpointStore, QualityReportStore, StoryBibleStore
+        from app.services.memory.summary_manager import SummaryManager
+        return {
+            "novel_id": 1,
+            "novel_version_id": 1,
+            "start_chapter": 1,
+            "end_chapter": num_chapters,
+            "num_chapters": num_chapters,
+            "segment_start_chapter": 1,
+            "segment_end_chapter": num_chapters,
+            "segment_target_chapters": num_chapters,
+            "book_start_chapter": 1,
+            "book_target_total_chapters": num_chapters,
+            "book_effective_end_chapter": num_chapters,
+            "strategy": "web-novel",
+            "target_language": "zh",
+            "native_style_profile": "default",
+            "volume_size": volume_size,
+            "volume_no": 1,
+            "prewrite": {"global_bible": "test"},
+            "volume_plan": {},
+            "segment_plan": None,
+            "retry_resume_chapter": 1,
+            "current_chapter": 1,
+            "next_chapter": 1,
+            "creation_task_id": None,
+            "outliner": MagicMock(),
+            "writer": MagicMock(),
+            "reviewer": MagicMock(),
+            "finalizer": MagicMock(),
+            "fact_extractor": MagicMock(),
+            "progression_agent": MagicMock(),
+            "final_reviewer": MagicMock(),
+            "summary_mgr": SummaryManager(),
+            "char_mgr": CharacterStateManager(),
+            "progression_mgr": ProgressionMemoryManager(),
+            "bible_store": StoryBibleStore(),
+            "quality_store": QualityReportStore(),
+            "checkpoint_store": CheckpointStore(),
+        }
+
+    def test_calls_run_volume_outlines_not_run_full_book(self):
+        """node_outline 生成新大纲时应调用 run_volume_outlines，不调用 run_full_book"""
+        from app.services.generation.nodes.init_node import node_outline
+        state = self._make_minimal_state(num_chapters=60, volume_size=30)
+
+        mock_outlines = [
+            {"chapter_num": i, "outline": "主角发现了关键线索并决定采取行动推进剧情", "title": f"第{i}章：测试"}
+            for i in range(1, 31)
+        ]
+        state["outliner"].run_volume_outlines.return_value = mock_outlines
+
+        with patch("app.services.generation.nodes.init_node.load_outlines_from_db", return_value=[]):
+            with patch("app.services.generation.nodes.init_node.save_full_outlines"):
+                with patch("app.services.generation.nodes.init_node.build_segment_plan", return_value={}):
+                    with patch("app.services.generation.nodes.init_node.persist_resume_runtime_state"):
+                        with patch("app.services.generation.nodes.init_node.progress"):
+                            node_outline(state)
+
+        state["outliner"].run_volume_outlines.assert_called_once()
+        call_kwargs = state["outliner"].run_volume_outlines.call_args[1]
+        assert call_kwargs["num_chapters"] == 30, f"Expected 30, got {call_kwargs['num_chapters']}"
+        assert call_kwargs["volume_no"] == 1
+        state["outliner"].run_full_book.assert_not_called()
