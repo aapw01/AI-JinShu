@@ -589,6 +589,87 @@ class OutlinerAgent:
                 chapter_num,
             )
 
+    def run_volume_outlines(
+        self,
+        novel_id: str,
+        volume_no: int,
+        start_chapter: int,
+        num_chapters: int,
+        prewrite: dict,
+        previous_summaries: list[dict] | None = None,
+        planning_context: dict[str, Any] | None = None,
+        language: str = "zh",
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> list[dict]:
+        """Generate outlines for one volume (num_chapters chapters starting at start_chapter)."""
+        llm = get_llm_with_fallback(provider, model)
+        end_chapter = start_chapter + num_chapters - 1
+        prompt = render_prompt(
+            "volume_outline",
+            novel_id=novel_id,
+            volume_no=volume_no,
+            start_chapter=start_chapter,
+            end_chapter=end_chapter,
+            num_chapters=num_chapters,
+            prewrite=prewrite,
+            previous_summaries=previous_summaries or [],
+            planning_context=planning_context or {},
+            language=language,
+        )
+        try:
+            data = _invoke_json_with_schema(llm, prompt, FullOutlinesSchema)
+            outlines = data.get("outlines", []) if isinstance(data, dict) else []
+            if not isinstance(outlines, list) or not outlines:
+                raise ValueError("empty outlines from LLM")
+            normalized = []
+            for idx in range(num_chapters):
+                chapter_no = start_chapter + idx
+                item = outlines[idx] if idx < len(outlines) else {}
+                normalized.append(
+                    normalize_outline_contract(
+                        {
+                            "chapter_num": chapter_no,
+                            "title": normalize_title_text(item.get("title")) or f"第{chapter_no}章",
+                            "outline": item.get("outline", ""),
+                            "role": item.get("role"),
+                            "purpose": item.get("purpose"),
+                            "suspense_level": item.get("suspense_level"),
+                            "foreshadowing": item.get("foreshadowing"),
+                            "plot_twist_level": item.get("plot_twist_level"),
+                            "hook": item.get("hook"),
+                            "payoff": item.get("payoff"),
+                            "mini_climax": item.get("mini_climax"),
+                            "summary": item.get("summary"),
+                            "chapter_objective": item.get("chapter_objective"),
+                            "required_new_information": item.get("required_new_information"),
+                            "required_irreversible_change": item.get("required_irreversible_change"),
+                            "relationship_delta": item.get("relationship_delta"),
+                            "conflict_axis": item.get("conflict_axis"),
+                            "payoff_kind": item.get("payoff_kind"),
+                            "reveal_kind": item.get("reveal_kind"),
+                            "forbidden_repeats": item.get("forbidden_repeats"),
+                            "opening_scene": item.get("opening_scene"),
+                            "opening_character_positions": item.get("opening_character_positions"),
+                            "opening_time_state": item.get("opening_time_state"),
+                            "transition_mode": item.get("transition_mode"),
+                        },
+                        chapter_no,
+                    )
+                )
+            return normalized
+        except Exception as e:
+            logger.error(
+                f"OutlinerAgent.run_volume_outlines vol={volume_no} ch={start_chapter}-{end_chapter} failed: {e}"
+            )
+            return [
+                normalize_outline_contract(
+                    {"chapter_num": start_chapter + i, "title": f"第{start_chapter + i}章", "outline": ""},
+                    start_chapter + i,
+                )
+                for i in range(num_chapters)
+            ]
+
     def run_full_book(
         self,
         novel_id: str,
