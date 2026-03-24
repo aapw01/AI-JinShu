@@ -1724,7 +1724,9 @@ class FinalReviewerAgent:
 
     def run_full_book(
         self,
-        chapters: list[dict],
+        volume_reports: list[dict],
+        recent_summaries: list[dict],
+        unresolved_foreshadows: list[dict],
         language: str = "zh",
         provider: str | None = None,
         model: str | None = None,
@@ -1732,8 +1734,13 @@ class FinalReviewerAgent:
     ) -> dict:
         template = "final_book_review"
         llm = get_llm_with_fallback(provider, model, inference=inference)
-        compacted_chapters = _compact_final_review_chapters(chapters)
-        prompt = render_prompt(template, chapters=compacted_chapters, language=language)
+        prompt = render_prompt(
+            template,
+            volume_reports=volume_reports,
+            recent_summaries=recent_summaries,
+            unresolved_foreshadows=unresolved_foreshadows,
+            language=language,
+        )
         try:
             data = _invoke_json_with_schema(
                 llm,

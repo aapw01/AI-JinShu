@@ -1,17 +1,40 @@
-请对整本小说做终审，给出可执行改进建议。
+{# final_book_review.j2: 全书终审 #}
+你是专业网文终审编辑。请对整本小说做终审，给出可执行改进建议。
 
 语言：{{ language }}
-输入载荷（已做压缩，可能是逐章摘要，也可能是按章节窗口聚合后的摘要）：
-{{ chapters | tojson }}
 
+<volume_quality_reports>
+以下是各卷质量评审报告（从生成阶段产生，按卷号排序）：
+{% for r in volume_reports %}
+卷{{ r.volume_no }}：verdict={{ r.verdict }}，avg_review={{ r.metrics.avg_review_score | default('n/a') }}，avg_language={{ r.metrics.avg_language_score | default('n/a') }}
+{% endfor %}
+</volume_quality_reports>
+
+<recent_chapters>
+以下是最近章节的真实写作摘要（覆盖结局段落）：
+{% for s in recent_summaries %}
+第{{ s.chapter_num }}章：{{ s.summary }}
+{% endfor %}
+</recent_chapters>
+
+{% if unresolved_foreshadows %}
+<unresolved_foreshadows>
+以下伏笔在全书结束时仍未回收（可能是遗漏）：
+{% for f in unresolved_foreshadows %}
+- {{ f.title | default(f.foreshadow_id) }}（埋于第{{ f.planted_chapter }}章）
+{% endfor %}
+</unresolved_foreshadows>
+{% endif %}
+
+<task>
 评审维度：
 1) 全局一致性（设定、人物、时间线）
-2) 结构与节奏（开篇抓力、中段推进、结尾收束）
-3) 角色弧光与动机合理性
-4) 伏笔埋设/回收完成度
-5) 语言自然度与风格稳定性
-6) 是否存在跨卷复用同一种揭秘/爽点/关系变化模板
-7) 是否存在相邻章节或跨卷衔接冲突
+2) 结构与节奏（各卷质量趋势，是否有明显下滑卷）
+3) 角色弧光与动机合理性（基于最近章节判断结局）
+4) 伏笔回收完成度（参考未回收伏笔列表）
+5) 语言自然度与风格稳定性（基于各卷语言评分趋势）
+6) 是否存在跨卷复用同一种揭秘/爽点模板
+7) 结局是否有力收束
 
 输出 JSON：
 {
@@ -24,5 +47,6 @@
 }
 
 要求：
-- 只根据输入载荷进行评审，不要臆造未提供的情节。
+- 只根据输入进行评审，不要臆造未提供的情节。
 - `must_fix` 最多 5 条，`should_improve` 最多 5 条。
+</task>
