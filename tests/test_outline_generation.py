@@ -229,3 +229,74 @@ class TestNodeOutlineFirstVolumeOnly:
         assert call_kwargs["num_chapters"] == 30, f"Expected 30, got {call_kwargs['num_chapters']}"
         assert call_kwargs["volume_no"] == 1
         state["outliner"].run_full_book.assert_not_called()
+
+
+class TestGenerateNextVolumeOutlinesIfNeeded:
+    """Tests for the _generate_next_volume_outlines_if_needed helper"""
+
+    def _make_state(self, volume_size=30, book_end=60):
+        summary_mgr = MagicMock()
+        summary_mgr.get_summaries_before.return_value = []
+        return {
+            "novel_id": 1,
+            "novel_version_id": 1,
+            "volume_size": volume_size,
+            "book_effective_end_chapter": book_end,
+            "end_chapter": book_end,
+            "strategy": "web-novel",
+            "target_language": "zh",
+            "prewrite": {},
+            "outliner": MagicMock(),
+            "summary_mgr": summary_mgr,
+        }
+
+    def test_skips_when_last_volume(self):
+        """Should not generate when next_vol_start > book_end (already on last volume)"""
+        from app.services.generation.nodes.volume import _generate_next_volume_outlines_if_needed
+
+        state = self._make_state(volume_size=30, book_end=30)
+        current_vol_end = 30  # last chapter = book end
+
+        with patch("app.services.generation.common.load_outlines_from_db", return_value=[]):
+            with patch("app.services.generation.common.save_full_outlines") as mock_save:
+                _generate_next_volume_outlines_if_needed(state, 1, current_vol_end, {})
+
+        state["outliner"].run_volume_outlines.assert_not_called()
+        mock_save.assert_not_called()
+
+    def test_skips_when_outlines_already_valid(self):
+        """Should not generate when next volume outlines already exist and are valid"""
+        from app.services.generation.nodes.volume import _generate_next_volume_outlines_if_needed
+
+        state = self._make_state(volume_size=30, book_end=60)
+        existing_outlines = [
+            {"chapter_num": i, "outline": "这是已有的有效大纲内容超过十个字符"}
+            for i in range(31, 61)
+        ]
+
+        with patch("app.services.generation.common.load_outlines_from_db", return_value=existing_outlines):
+            with patch("app.services.generation.common.save_full_outlines") as mock_save:
+                _generate_next_volume_outlines_if_needed(state, 1, 30, {})
+
+        state["outliner"].run_volume_outlines.assert_not_called()
+        mock_save.assert_not_called()
+
+    def test_generates_when_outlines_missing(self):
+        """Should generate next volume outlines when they are missing"""
+        from app.services.generation.nodes.volume import _generate_next_volume_outlines_if_needed
+
+        state = self._make_state(volume_size=30, book_end=60)
+        state["outliner"].run_volume_outlines.return_value = [
+            {"chapter_num": i, "outline": "生成的大纲内容测试数据"}
+            for i in range(31, 61)
+        ]
+
+        with patch("app.services.generation.common.load_outlines_from_db", return_value=[]):
+            with patch("app.services.generation.common.save_full_outlines") as mock_save:
+                _generate_next_volume_outlines_if_needed(state, 1, 30, {})
+
+        state["outliner"].run_volume_outlines.assert_called_once()
+        call_kwargs = state["outliner"].run_volume_outlines.call_args[1]
+        assert call_kwargs["start_chapter"] == 31
+        assert call_kwargs["volume_no"] == 2
+        mock_save.assert_called_once()

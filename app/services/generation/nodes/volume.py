@@ -177,7 +177,11 @@ def node_volume_replan(state: GenerationState) -> GenerationState:
             state_json=volume_plan,
         )
     # --- 生成下一卷大纲（如尚未生成或已过期） ---
-    _generate_next_volume_outlines_if_needed(state, vol_no, end, volume_plan)
+    try:
+        _generate_next_volume_outlines_if_needed(state, vol_no, end, volume_plan)
+    except Exception as _e:
+        from app.services.generation.common import logger
+        logger.error("node_volume_replan: next volume outline generation failed: %s", _e)
     return {"volume_no": vol_no, "volume_plan": volume_plan}
 
 
@@ -224,8 +228,8 @@ def _generate_next_volume_outlines_if_needed(
             state["novel_id"],
             state.get("novel_version_id"),
             next_vol_start,
-            limit=5,
         ) or []
+        raw = raw[-5:]  # take last 5 summaries
         recent_summaries = [
             {"chapter_num": s.get("chapter_num"), "summary": s.get("summary", "")}
             for s in raw
