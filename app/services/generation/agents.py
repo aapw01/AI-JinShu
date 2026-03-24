@@ -643,6 +643,19 @@ class ProgressionReviewSchema(BaseModel):
     transition_conflict: list[str] = []
 
 
+class FactualSubReviewSchema(ReviewScorecardSchema):
+    """Factual sub-review within combined mode — adds explicit contradictions list."""
+    contradictions: list[str] = Field(default_factory=list)
+
+
+class ReviewCombinedSchema(BaseModel):
+    """Single-call combined review replacing 4 separate reviewer calls."""
+    structure: ReviewScorecardSchema = Field(default_factory=ReviewScorecardSchema)
+    factual: FactualSubReviewSchema = Field(default_factory=FactualSubReviewSchema)
+    progression: ProgressionReviewSchema = Field(default_factory=ProgressionReviewSchema)
+    aesthetic: ReviewScorecardSchema = Field(default_factory=ReviewScorecardSchema)
+
+
 def _normalize_outline_item(item: dict[str, Any], chapter_no: int) -> dict[str, Any]:
     return normalize_outline_contract(
         {
