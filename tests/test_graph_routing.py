@@ -87,7 +87,7 @@ class _DummySnapshot:
 
 
 class _DummyQualityStore:
-    def list_reports(self, novel_id, scope, scope_id=None, novel_version_id=None):
+    def list_reports(self, novel_id, scope, scope_id=None, novel_version_id=None, db=None, limit=None):
         if scope == "volume" and scope_id == "1":
             return [
                 _DummyReport(
