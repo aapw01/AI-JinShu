@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import json
 import logging
+import logging.handlers
 import os
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Iterator
 
 from app.core.trace import get_trace_id
@@ -156,10 +158,30 @@ def setup_logging() -> None:
     root.handlers.clear()
     root.setLevel(level)
 
-    handler = logging.StreamHandler()
-    handler.addFilter(ContextFilter())
-    handler.setFormatter(JsonFormatter() if fmt == "json" else TextFormatter())
-    root.addHandler(handler)
+    formatter = JsonFormatter() if fmt == "json" else TextFormatter()
+    ctx_filter = ContextFilter()
+
+    # Console handler (always on)
+    console = logging.StreamHandler()
+    console.addFilter(ctx_filter)
+    console.setFormatter(formatter)
+    root.addHandler(console)
+
+    # File handler (rotating, ~50 MB per file, keep 10)
+    log_dir = Path(os.getenv("LOG_DIR", "log"))
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.handlers.RotatingFileHandler(
+            log_dir / "app.log",
+            maxBytes=50 * 1024 * 1024,
+            backupCount=10,
+            encoding="utf-8",
+        )
+        file_handler.addFilter(ctx_filter)
+        file_handler.setFormatter(JsonFormatter())  # always JSON in files
+        root.addHandler(file_handler)
+    except OSError as e:
+        root.warning("setup_logging: cannot create log dir %s: %s", log_dir, e)
 
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "celery", "celery.app.trace"):
         lg = logging.getLogger(name)
