@@ -1,0 +1,42 @@
+import pytest
+from app.services.generation.common import _looks_like_meta_text, is_effective_title
+
+
+class TestLooksLikeMetaText:
+    def test_catches_auto_generated(self):
+        assert _looks_like_meta_text("auto-generated outline") is True
+
+    def test_catches_auto_generated_out(self):
+        assert _looks_like_meta_text("auto-generated out") is True
+
+    def test_catches_placeholder(self):
+        assert _looks_like_meta_text("placeholder") is True
+
+    def test_catches_todo(self):
+        assert _looks_like_meta_text("TODO: fill in") is True
+
+    def test_catches_tbd(self):
+        assert _looks_like_meta_text("TBD") is True
+
+    def test_allows_real_title(self):
+        assert _looks_like_meta_text("铁幕之下") is False
+
+    def test_allows_english_real_title(self):
+        assert _looks_like_meta_text("The Storm Breaks") is False
+
+    def test_empty_string(self):
+        assert _looks_like_meta_text("") is False
+
+
+class TestIsEffectiveTitle:
+    def test_rejects_auto_generated_out(self):
+        assert is_effective_title("第1章：auto-generated out", 1) is False
+
+    def test_rejects_bare_chapter_num(self):
+        assert is_effective_title("第5章", 5) is False
+
+    def test_accepts_real_title(self):
+        assert is_effective_title("第1章：铁幕之下", 1) is True
+
+    def test_rejects_chapter_with_placeholder_suffix(self):
+        assert is_effective_title("第1章：auto-generated", 1) is False
