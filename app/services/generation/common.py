@@ -177,6 +177,8 @@ def is_effective_title(title: str | None, chapter_num: int | None = None) -> boo
 
 def is_outline_content_valid(item: dict) -> bool:
     """Return True if the outline item has real (non-placeholder) content."""
+    if not isinstance(item, dict):
+        return False
     outline = str(item.get("outline") or "").strip()
     if not outline:
         return False
