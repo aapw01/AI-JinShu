@@ -176,7 +176,90 @@ def node_volume_replan(state: GenerationState) -> GenerationState:
             node="volume_replan",
             state_json=volume_plan,
         )
+    # --- 生成下一卷大纲（如尚未生成或已过期） ---
+    _generate_next_volume_outlines_if_needed(state, vol_no, end, volume_plan)
     return {"volume_no": vol_no, "volume_plan": volume_plan}
+
+
+def _generate_next_volume_outlines_if_needed(
+    state: GenerationState,
+    current_vol_no: int,
+    current_vol_end: int,
+    volume_plan: dict,
+) -> None:
+    """Generate next volume outlines if they are missing or stale."""
+    from app.services.generation.agents import OutlinerAgent
+    from app.services.generation.common import (
+        is_outline_content_valid,
+        load_outlines_from_db,
+        logger,
+        save_full_outlines,
+    )
+    from app.core.strategy import get_model_for_stage
+
+    volume_size = int(state.get("volume_size") or 30)
+    book_end = int(state.get("book_effective_end_chapter") or state.get("end_chapter") or current_vol_end)
+    next_vol_start = current_vol_end + 1
+
+    if next_vol_start > book_end:
+        return  # 已是最后一卷，无需生成
+
+    next_vol_end = min(next_vol_start + volume_size - 1, book_end)
+    next_vol_no = current_vol_no + 1
+
+    # 检查下一卷大纲是否已有效
+    existing = load_outlines_from_db(state["novel_id"], state.get("novel_version_id"))
+    existing_map = {int(o.get("chapter_num", 0)): o for o in existing if isinstance(o, dict)}
+    needs_generation = any(
+        not is_outline_content_valid(existing_map.get(ch, {}))
+        for ch in range(next_vol_start, next_vol_end + 1)
+    )
+    if not needs_generation:
+        return
+
+    # 获取最近 5 章真实摘要
+    recent_summaries = []
+    try:
+        raw = state["summary_mgr"].get_summaries_before(
+            state["novel_id"],
+            state.get("novel_version_id"),
+            next_vol_start,
+            limit=5,
+        ) or []
+        recent_summaries = [
+            {"chapter_num": s.get("chapter_num"), "summary": s.get("summary", "")}
+            for s in raw
+            if s.get("summary")
+        ]
+    except Exception as _e:
+        logger.warning("node_volume_replan: failed to load summaries: %s", _e)
+
+    out_provider, out_model = get_model_for_stage(state.get("strategy", "web-novel"), "outliner")
+    outliner = state.get("outliner") or OutlinerAgent()
+    next_vol_outlines = outliner.run_volume_outlines(
+        novel_id=str(state["novel_id"]),
+        volume_no=next_vol_no,
+        start_chapter=next_vol_start,
+        num_chapters=next_vol_end - next_vol_start + 1,
+        prewrite=state.get("prewrite") or {},
+        previous_summaries=recent_summaries,
+        planning_context=volume_plan,
+        language=state.get("target_language", "zh"),
+        provider=out_provider,
+        model=out_model,
+    )
+    save_full_outlines(
+        state["novel_id"],
+        next_vol_outlines,
+        novel_version_id=state.get("novel_version_id"),
+        replace_all=False,
+    )
+    logger.info(
+        "node_volume_replan: generated outlines for vol=%s ch=%s-%s",
+        next_vol_no,
+        next_vol_start,
+        next_vol_end,
+    )
 
 
 def node_confirmation_gate(state: GenerationState) -> GenerationState:
