@@ -99,7 +99,7 @@ export interface RewriteRequest {
 export interface ChapterProgress {
   chapter_num: number;
   title?: string;
-  status: "pending" | "generating" | "completed";
+  status: "pending" | "generating" | "completed" | "blocked";
   volume_no: number;
   volume_size: number;
 }
