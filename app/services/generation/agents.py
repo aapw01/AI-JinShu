@@ -11,7 +11,12 @@ from langchain_core.output_parsers import PydanticOutputParser
 from app.core.llm import extract_provider_block, get_llm_with_fallback, response_to_text, _is_retryable
 from app.core.llm_contract import invoke_chapter_body_structured
 from app.prompts import render_prompt
-from app.services.generation.common import normalize_title_text
+from app.services.generation.common import (
+    is_outline_content_valid,
+    load_outlines_from_db,
+    normalize_title_text,
+    save_full_outlines,
+)
 from app.services.generation.contracts import OutputContractError
 from app.services.generation.length_control import build_chapter_length_prompt_kwargs
 from app.services.memory.progression_state import normalize_outline_contract
@@ -20,6 +25,25 @@ logger = logging.getLogger(__name__)
 
 _AGENT_MAX_RETRIES = 3
 _AGENT_RETRY_BACKOFF = [2.0, 5.0, 10.0]
+_OUTLINE_BATCH_SIZE = 10
+_HARMONIZABLE_OUTLINE_FIELDS = {
+    "payoff",
+    "reveal_kind",
+    "forbidden_repeats",
+    "opening_scene",
+    "opening_character_positions",
+    "opening_time_state",
+    "transition_mode",
+}
+
+
+def _coerce_novel_pk(novel_id: str | int | None) -> int | None:
+    try:
+        if novel_id is None:
+            return None
+        return int(novel_id)
+    except (TypeError, ValueError):
+        return None
 
 
 def _truncate_text(value: Any, max_chars: int) -> str:
@@ -362,6 +386,25 @@ class FullOutlinesSchema(BaseModel):
     outlines: list[OutlineItemSchema]
 
 
+# Alias: batch generation uses the same shape as the legacy full-book schema.
+VolumeOutlineBatchSchema = FullOutlinesSchema
+
+
+class VolumeOutlineHarmonizationItemSchema(BaseModel):
+    chapter_num: int
+    payoff: str | None = None
+    reveal_kind: str | None = None
+    forbidden_repeats: list[str] = Field(default_factory=list)
+    opening_scene: str | None = None
+    opening_character_positions: list[str] = Field(default_factory=list)
+    opening_time_state: str | None = None
+    transition_mode: str | None = None
+
+
+class VolumeOutlineHarmonizationSchema(BaseModel):
+    outlines: list[VolumeOutlineHarmonizationItemSchema]
+
+
 class ReviewSchema(BaseModel):
     score: float = 0.8
     feedback: str = ""
@@ -424,6 +467,10 @@ class AestheticReviewSchema(BaseModel):
 class FinalBookReviewSchema(BaseModel):
     score: float = 0.8
     feedback: str = "ok"
+    confidence: float = 0.75
+    must_fix: list[str] = Field(default_factory=list)
+    should_improve: list[str] = Field(default_factory=list)
+    fallback: bool = False
 
 
 class FactExtractionSchema(BaseModel):
@@ -432,25 +479,140 @@ class FactExtractionSchema(BaseModel):
     facts: list[dict[str, Any]] = []
 
 
+class CharacterSpecSchema(BaseModel):
+    name: str = ""
+    goal: str = ""
+    conflict: str = ""
+
+
+class PlotlineSpecSchema(BaseModel):
+    id: str = ""
+    name: str = ""
+    start: int = 1
+    end: int = 1
+
+
+class ForeshadowingSpecSchema(BaseModel):
+    id: str = ""
+    plant_chapter: int = 1
+    resolve_chapter: int = 1
+    content: str = ""
+
+
+class VolumeMapSpecSchema(BaseModel):
+    volume: int = 1
+    chapter_range: str = ""
+    main_goal: str = ""
+
+
+class ClimaxPlanSpecSchema(BaseModel):
+    chapter_range: str = ""
+    level: str = "small"
+    objective: str = ""
+
+
+class ConstitutionSchema(BaseModel):
+    core_values: list[str] = Field(default_factory=list)
+    quality_standards: list[str] = Field(default_factory=list)
+    style_rules: list[str] = Field(default_factory=list)
+    red_lines: list[str] = Field(default_factory=list)
+
+
+class StorySpecificationSchema(BaseModel):
+    logline: str = ""
+    theme: str = ""
+    target_reader: str = ""
+    characters: list[CharacterSpecSchema] = Field(default_factory=list)
+    worldview: str = ""
+    main_conflict: str = ""
+    sub_conflicts: list[str] = Field(default_factory=list)
+    plotlines: list[PlotlineSpecSchema] = Field(default_factory=list)
+    foreshadowing: list[ForeshadowingSpecSchema] = Field(default_factory=list)
+    volume_map: list[VolumeMapSpecSchema] = Field(default_factory=list)
+    climax_plan: list[ClimaxPlanSpecSchema] = Field(default_factory=list)
+    constraints: list[str] = Field(default_factory=list)
+
+
+class CreativePlanVolumeSchema(BaseModel):
+    volume: int = 1
+    chapter_range: str = ""
+    goal: str = ""
+
+
+class EmotionCurveSchema(BaseModel):
+    chapter: int = 1
+    type: str = ""
+    intensity: str = ""
+
+
+class SerialRulesSchema(BaseModel):
+    small_climax_every: str = "3-5 chapters"
+    medium_climax_every: str = "10-15 chapters"
+    volume_climax_every: str = "30-50 chapters"
+
+
+class CreativePlanSchema(BaseModel):
+    writing_method: str = ""
+    volume_plan: list[CreativePlanVolumeSchema] = Field(default_factory=list)
+    emotion_curve: list[EmotionCurveSchema] = Field(default_factory=list)
+    pacing_rules: list[str] = Field(default_factory=list)
+    opening_strategy: str = ""
+    serial_rules: SerialRulesSchema = Field(default_factory=SerialRulesSchema)
+    risk_controls: list[str] = Field(default_factory=list)
+
+
+class TaskItemSchema(BaseModel):
+    task_id: str = ""
+    chapter_num: int = 1
+    must_contain: list[str] = Field(default_factory=list)
+    plotlines: list[str] = Field(default_factory=list)
+    foreshadowing: list[str] = Field(default_factory=list)
+    hook_type: str = ""
+    climax_level: str = "none"
+    dependencies: list[str] = Field(default_factory=list)
+
+
+class TasksBreakdownSchema(BaseModel):
+    tasks: list[TaskItemSchema] = Field(default_factory=list)
+
+
+class CharacterStateUpdateSchema(BaseModel):
+    name: str = ""
+    status: str = "unknown"
+    location: str = ""
+    new_items: list[str] = Field(default_factory=list)
+    lost_items: list[str] = Field(default_factory=list)
+    injuries: list[str] = Field(default_factory=list)
+    can_use_both_hands: bool = True
+    limitations: list[str] = Field(default_factory=list)
+    forbidden_actions: list[str] = Field(default_factory=list)
+    relationship_changes: list[str] = Field(default_factory=list)
+    key_action: str = ""
+
+
+class CharacterStateUpdatesSchema(BaseModel):
+    updates: list[CharacterStateUpdateSchema] = Field(default_factory=list)
+
+
 class ChapterAdvancementMemorySchema(BaseModel):
     chapter_objective: str = ""
     actual_progress: str = ""
-    new_information: list[str] = []
+    new_information: list[str] = Field(default_factory=list)
     irreversible_change: str = ""
     relationship_delta: str = ""
     conflict_axis: str = ""
     payoff_kind: str = ""
     reveal_kind: str = ""
-    resolved_threads: list[str] = []
-    new_unresolved_threads: list[str] = []
-    forbidden_repeats: list[str] = []
+    resolved_threads: list[str] = Field(default_factory=list)
+    new_unresolved_threads: list[str] = Field(default_factory=list)
+    forbidden_repeats: list[str] = Field(default_factory=list)
     phase: str = ""
-    major_beats: list[str] = []
+    major_beats: list[str] = Field(default_factory=list)
 
 
 class ChapterTransitionMemorySchema(BaseModel):
     ending_scene: str = ""
-    character_positions: list[str] = []
+    character_positions: list[str] = Field(default_factory=list)
     physical_state: str = ""
     last_action: str = ""
     time_state: str = ""
@@ -479,6 +641,200 @@ class ProgressionReviewSchema(BaseModel):
     repeated_reveal: list[str] = []
     repeated_relationship_turn: list[str] = []
     transition_conflict: list[str] = []
+
+
+def _normalize_outline_item(item: dict[str, Any], chapter_no: int) -> dict[str, Any]:
+    return normalize_outline_contract(
+        {
+            "chapter_num": chapter_no,
+            "title": normalize_title_text(item.get("title")) or f"第{chapter_no}章",
+            "outline": item.get("outline", ""),
+            "role": item.get("role"),
+            "purpose": item.get("purpose"),
+            "suspense_level": item.get("suspense_level"),
+            "foreshadowing": item.get("foreshadowing"),
+            "plot_twist_level": item.get("plot_twist_level"),
+            "hook": item.get("hook"),
+            "payoff": item.get("payoff"),
+            "mini_climax": item.get("mini_climax"),
+            "summary": item.get("summary"),
+            "chapter_objective": item.get("chapter_objective"),
+            "required_new_information": item.get("required_new_information"),
+            "required_irreversible_change": item.get("required_irreversible_change"),
+            "relationship_delta": item.get("relationship_delta"),
+            "conflict_axis": item.get("conflict_axis"),
+            "payoff_kind": item.get("payoff_kind"),
+            "reveal_kind": item.get("reveal_kind"),
+            "forbidden_repeats": item.get("forbidden_repeats"),
+            "opening_scene": item.get("opening_scene"),
+            "opening_character_positions": item.get("opening_character_positions"),
+            "opening_time_state": item.get("opening_time_state"),
+            "transition_mode": item.get("transition_mode"),
+        },
+        chapter_no,
+    )
+
+
+def _trim_fact_lists(data: dict[str, Any]) -> dict[str, Any]:
+    trimmed = dict(data)
+    trimmed["events"] = list((data.get("events") or []))[:12]
+    trimmed["entities"] = list((data.get("entities") or []))[:12]
+    trimmed["facts"] = list((data.get("facts") or []))[:16]
+    return trimmed
+
+
+def _trim_text_list(value: Any, *, max_items: int, max_chars: int = 180) -> list[str]:
+    items = value if isinstance(value, list) else []
+    out: list[str] = []
+    for item in items:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        clipped = text[:max_chars]
+        if clipped not in out:
+            out.append(clipped)
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def _trim_progression_memory_payload(data: dict[str, Any]) -> dict[str, Any]:
+    trimmed = dict(data)
+    advancement = dict(data.get("advancement") or {}) if isinstance(data.get("advancement"), dict) else {}
+    transition = dict(data.get("transition") or {}) if isinstance(data.get("transition"), dict) else {}
+    advancement["new_information"] = _trim_text_list(advancement.get("new_information"), max_items=5)
+    advancement["resolved_threads"] = _trim_text_list(advancement.get("resolved_threads"), max_items=5)
+    advancement["new_unresolved_threads"] = _trim_text_list(advancement.get("new_unresolved_threads"), max_items=5)
+    advancement["forbidden_repeats"] = _trim_text_list(advancement.get("forbidden_repeats"), max_items=5)
+    advancement["major_beats"] = _trim_text_list(advancement.get("major_beats"), max_items=5)
+    transition["character_positions"] = _trim_text_list(transition.get("character_positions"), max_items=5)
+    trimmed["advancement"] = advancement
+    trimmed["transition"] = transition
+    trimmed["validation_notes"] = _trim_text_list(data.get("validation_notes"), max_items=6)
+    return trimmed
+
+
+def _compact_final_review_chapters(
+    chapters: list[dict[str, Any]],
+    *,
+    direct_limit: int = 18,
+    window_size: int = 8,
+) -> list[dict[str, Any]]:
+    compacted = [
+        {
+            "chapter_num": item.get("chapter_num"),
+            "title": _truncate_text(item.get("title"), 80),
+            "summary": _truncate_text(item.get("summary") or item.get("content"), 220),
+        }
+        for item in chapters
+        if isinstance(item, dict) and item.get("chapter_num") is not None
+    ]
+    if len(compacted) <= direct_limit:
+        return compacted
+
+    grouped: list[dict[str, Any]] = []
+    for idx in range(0, len(compacted), max(window_size, 1)):
+        window = compacted[idx : idx + max(window_size, 1)]
+        if not window:
+            continue
+        start = window[0].get("chapter_num")
+        end = window[-1].get("chapter_num")
+        grouped.append(
+            {
+                "chapter_range": f"{start}-{end}",
+                "summary": " | ".join(
+                    f"ch{entry.get('chapter_num')}: {entry.get('summary') or entry.get('title') or ''}"
+                    for entry in window
+                    if entry.get("chapter_num") is not None
+                )[:1200],
+            }
+        )
+    return grouped[: max(direct_limit, 1)]
+
+
+def _final_book_review_fallback(reason: str) -> dict[str, Any]:
+    fallback_reason = str(reason or "unknown_error")[:240]
+    return {
+        "score": 0.45,
+        "confidence": 0.2,
+        "feedback": "全书终审未能稳定完成，已降级为告警结果。",
+        "must_fix": [f"final_book_review_unavailable: {fallback_reason}"],
+        "should_improve": [],
+        "fallback": True,
+    }
+
+
+def _default_prewrite_component(key: str, novel: dict[str, Any], num_chapters: int) -> dict[str, Any]:
+    if key == "constitution":
+        return ConstitutionSchema(
+            core_values=["核心爽点清晰", "主线推进稳定"],
+            quality_standards=["章节必须有明确推进", "人物行为前后一致", "章末保留阅读钩子"],
+            style_rules=["保持题材既定文风", "避免重复解释同一信息"],
+            red_lines=["不得自相矛盾", "不得无故跳过关键兑现"],
+        ).model_dump()
+    if key == "specification":
+        title = str((novel or {}).get("title") or "未命名")
+        return StorySpecificationSchema(
+            logline=title,
+            theme=str((novel or {}).get("style") or "成长与冲突"),
+            target_reader=str((novel or {}).get("audience") or "网文读者"),
+            characters=[CharacterSpecSchema(name="主角", goal="推动主线", conflict="解决核心冲突")],
+            worldview=str((novel or {}).get("genre") or "现实向世界观"),
+            main_conflict=str((novel or {}).get("user_idea") or "围绕核心创意展开冲突"),
+            volume_map=[VolumeMapSpecSchema(volume=1, chapter_range=f"1-{max(1, min(num_chapters, 30))}", main_goal="建立主线冲突")],
+            climax_plan=[ClimaxPlanSpecSchema(chapter_range=f"1-{max(1, min(num_chapters, 5))}", level="small", objective="建立开篇冲突")],
+            constraints=["保持人物目标清晰", "每章必须新增推进"],
+        ).model_dump()
+    if key == "creative_plan":
+        return CreativePlanSchema(
+            writing_method=str((novel or {}).get("writing_method") or "三幕结构"),
+            volume_plan=[CreativePlanVolumeSchema(volume=1, chapter_range=f"1-{max(1, min(num_chapters, 30))}", goal="推进主线")],
+            pacing_rules=["每3-5章形成小高潮", "避免连续章节原地踏步"],
+            opening_strategy="前三章快速建立冲突和钩子",
+            risk_controls=["发现重复推进时及时收束"],
+        ).model_dump()
+    if key == "tasks":
+        return TasksBreakdownSchema(
+            tasks=[
+                TaskItemSchema(
+                    task_id="T001",
+                    chapter_num=1,
+                    must_contain=["建立主角目标", "抛出主线冲突"],
+                    hook_type="悬念",
+                    climax_level="small",
+                )
+            ]
+        ).model_dump()
+    return {"raw": f"fallback-{key}"}
+
+
+def _normalize_prewrite_component(
+    key: str,
+    data: dict[str, Any] | None,
+    *,
+    novel: dict[str, Any],
+    num_chapters: int,
+) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        return _default_prewrite_component(key, novel, num_chapters)
+    if key == "constitution":
+        return ConstitutionSchema.model_validate(data).model_dump()
+    if key == "specification":
+        normalized = StorySpecificationSchema.model_validate(data).model_dump()
+        if not normalized.get("characters"):
+            normalized["characters"] = _default_prewrite_component(key, novel, num_chapters)["characters"]
+        return normalized
+    if key == "creative_plan":
+        normalized = CreativePlanSchema.model_validate(data).model_dump()
+        if not normalized.get("volume_plan"):
+            normalized["volume_plan"] = _default_prewrite_component(key, novel, num_chapters)["volume_plan"]
+        return normalized
+    if key == "tasks":
+        normalized = TasksBreakdownSchema.model_validate(data).model_dump()
+        if not normalized.get("tasks"):
+            normalized["tasks"] = _default_prewrite_component(key, novel, num_chapters)["tasks"]
+        return normalized
+    return data
 
 
 class ArchitectAgent:
@@ -528,6 +884,12 @@ class PrewritePlannerAgent:
             ("creative_plan", "plan_story"),
             ("tasks", "tasks_breakdown"),
         ]
+        schema_map: dict[str, type[BaseModel]] = {
+            "constitution": ConstitutionSchema,
+            "specification": StorySpecificationSchema,
+            "creative_plan": CreativePlanSchema,
+            "tasks": TasksBreakdownSchema,
+        }
         started_all = time.perf_counter()
         for key, tpl in templates:
             try:
@@ -537,17 +899,27 @@ class PrewritePlannerAgent:
                     num_chapters=num_chapters,
                     language=language,
                 )
-                resp = _timed_invoke(
+                parsed = _invoke_json_with_schema(
                     llm,
                     prompt,
-                    f"prewrite.{key}",
-                    {"num_chapters": num_chapters, "provider": provider, "model": model},
+                    schema_map[key],
+                    strict=False,
+                    stage=f"prewrite.{key}",
+                    provider=provider,
+                    model=model,
+                    prompt_template=tpl,
+                    prompt_version="v1",
                 )
-                parsed = _parse_json_response(response_to_text(resp))
-                result[key] = parsed if isinstance(parsed, dict) else {"raw": str(parsed)}
+                result[key] = _normalize_prewrite_component(
+                    key,
+                    parsed if isinstance(parsed, dict) and "raw" not in parsed else None,
+                    novel=novel,
+                    num_chapters=num_chapters,
+                )
+                logger.info("PrewritePlannerAgent normalized key=%s provider=%s model=%s", key, provider, model)
             except Exception as e:
                 logger.error(f"PrewritePlannerAgent {key} failed: {e}")
-                result[key] = {"raw": f"fallback-{key}"}
+                result[key] = _default_prewrite_component(key, novel, num_chapters)
         logger.info("PrewritePlannerAgent finished elapsed=%.2fs", time.perf_counter() - started_all)
         return result
 
@@ -596,79 +968,201 @@ class OutlinerAgent:
         start_chapter: int,
         num_chapters: int,
         prewrite: dict,
+        novel_version_id: int | None = None,
         previous_summaries: list[dict] | None = None,
         planning_context: dict[str, Any] | None = None,
         language: str = "zh",
         provider: str | None = None,
         model: str | None = None,
     ) -> list[dict]:
-        """Generate outlines for one volume (num_chapters chapters starting at start_chapter)."""
+        """Generate outlines for one volume via smaller fixed-size batches."""
+        end_chapter = start_chapter + num_chapters - 1
+        previous_summaries = previous_summaries or []
+        planning_context = planning_context or {}
+        novel_pk = _coerce_novel_pk(novel_id)
+        existing_map: dict[int, dict[str, Any]] = {}
+        if novel_version_id is not None and novel_pk is not None:
+            existing = load_outlines_from_db(novel_pk, novel_version_id)
+            existing_map = {
+                int(item.get("chapter_num") or 0): item
+                for item in existing
+                if isinstance(item, dict) and int(item.get("chapter_num") or 0) >= start_chapter
+            }
+
+        aggregated: list[dict[str, Any]] = []
+        for batch_start in range(start_chapter, end_chapter + 1, _OUTLINE_BATCH_SIZE):
+            batch_end = min(batch_start + _OUTLINE_BATCH_SIZE - 1, end_chapter)
+            batch_size = batch_end - batch_start + 1
+            batch_numbers = range(batch_start, batch_end + 1)
+            if existing_map and all(is_outline_content_valid(existing_map.get(ch, {})) for ch in batch_numbers):
+                batch_outlines = [
+                    _normalize_outline_item(existing_map[ch], ch)
+                    for ch in batch_numbers
+                ]
+                aggregated.extend(batch_outlines)
+                logger.info(
+                    "OutlinerAgent.run_volume_outlines reused batch vol=%s ch=%s-%s",
+                    volume_no,
+                    batch_start,
+                    batch_end,
+                )
+                continue
+
+            batch_outlines = self._generate_outline_batch(
+                novel_id=novel_id,
+                volume_no=volume_no,
+                start_chapter=batch_start,
+                num_chapters=batch_size,
+                prewrite=prewrite,
+                previous_summaries=previous_summaries,
+                planning_context=planning_context,
+                language=language,
+                provider=provider,
+                model=model,
+            )
+            aggregated.extend(batch_outlines)
+            if novel_version_id is not None and novel_pk is not None:
+                save_full_outlines(
+                    novel_pk,
+                    batch_outlines,
+                    novel_version_id=novel_version_id,
+                    replace_all=False,
+                )
+            logger.info(
+                "OutlinerAgent.run_volume_outlines generated batch vol=%s ch=%s-%s expected_items=%s actual_items=%s persisted=%s",
+                volume_no,
+                batch_start,
+                batch_end,
+                batch_size,
+                len(batch_outlines),
+                novel_version_id is not None and novel_pk is not None,
+            )
+
+        try:
+            harmonized = self._harmonize_volume_outlines(
+                novel_id=novel_id,
+                volume_no=volume_no,
+                outlines=aggregated,
+                prewrite=prewrite,
+                previous_summaries=previous_summaries,
+                planning_context=planning_context,
+                language=language,
+                provider=provider,
+                model=model,
+            )
+            if harmonized != aggregated and novel_version_id is not None and novel_pk is not None:
+                save_full_outlines(
+                    novel_pk,
+                    harmonized,
+                    novel_version_id=novel_version_id,
+                    replace_all=False,
+                )
+            logger.info(
+                "OutlinerAgent.run_volume_outlines harmonized vol=%s ch=%s-%s",
+                volume_no,
+                start_chapter,
+                end_chapter,
+            )
+            return harmonized
+        except Exception as exc:
+            logger.warning(
+                "OutlinerAgent.run_volume_outlines harmonization soft-failed vol=%s ch=%s-%s error=%s",
+                volume_no,
+                start_chapter,
+                end_chapter,
+                exc,
+            )
+            return aggregated
+
+    def _generate_outline_batch(
+        self,
+        *,
+        novel_id: str,
+        volume_no: int,
+        start_chapter: int,
+        num_chapters: int,
+        prewrite: dict,
+        previous_summaries: list[dict],
+        planning_context: dict[str, Any],
+        language: str,
+        provider: str | None,
+        model: str | None,
+    ) -> list[dict]:
         llm = get_llm_with_fallback(provider, model)
         end_chapter = start_chapter + num_chapters - 1
         prompt = render_prompt(
-            "volume_outline",
+            "volume_outline_batch",
             novel_id=novel_id,
             volume_no=volume_no,
             start_chapter=start_chapter,
             end_chapter=end_chapter,
             num_chapters=num_chapters,
             prewrite=prewrite,
-            previous_summaries=previous_summaries or [],
-            planning_context=planning_context or {},
+            previous_summaries=previous_summaries,
+            planning_context=planning_context,
             language=language,
         )
-        try:
-            data = _invoke_json_with_schema(llm, prompt, FullOutlinesSchema)
-            outlines = data.get("outlines", []) if isinstance(data, dict) else []
-            if not isinstance(outlines, list) or not outlines:
-                raise ValueError("empty outlines from LLM")
-            normalized = []
-            for idx in range(num_chapters):
-                chapter_no = start_chapter + idx
-                item = outlines[idx] if idx < len(outlines) else {}
-                normalized.append(
-                    normalize_outline_contract(
-                        {
-                            "chapter_num": chapter_no,
-                            "title": normalize_title_text(item.get("title")) or f"第{chapter_no}章",
-                            "outline": item.get("outline", ""),
-                            "role": item.get("role"),
-                            "purpose": item.get("purpose"),
-                            "suspense_level": item.get("suspense_level"),
-                            "foreshadowing": item.get("foreshadowing"),
-                            "plot_twist_level": item.get("plot_twist_level"),
-                            "hook": item.get("hook"),
-                            "payoff": item.get("payoff"),
-                            "mini_climax": item.get("mini_climax"),
-                            "summary": item.get("summary"),
-                            "chapter_objective": item.get("chapter_objective"),
-                            "required_new_information": item.get("required_new_information"),
-                            "required_irreversible_change": item.get("required_irreversible_change"),
-                            "relationship_delta": item.get("relationship_delta"),
-                            "conflict_axis": item.get("conflict_axis"),
-                            "payoff_kind": item.get("payoff_kind"),
-                            "reveal_kind": item.get("reveal_kind"),
-                            "forbidden_repeats": item.get("forbidden_repeats"),
-                            "opening_scene": item.get("opening_scene"),
-                            "opening_character_positions": item.get("opening_character_positions"),
-                            "opening_time_state": item.get("opening_time_state"),
-                            "transition_mode": item.get("transition_mode"),
-                        },
-                        chapter_no,
-                    )
-                )
-            return normalized
-        except Exception as e:
-            logger.error(
-                f"OutlinerAgent.run_volume_outlines vol={volume_no} ch={start_chapter}-{end_chapter} failed: {e}"
+        data = _invoke_json_with_schema(llm, prompt, VolumeOutlineBatchSchema)
+        outlines = data.get("outlines", []) if isinstance(data, dict) else []
+        if not isinstance(outlines, list) or len(outlines) != num_chapters:
+            raise ValueError(
+                f"invalid batch outline count for ch={start_chapter}-{end_chapter}: expected={num_chapters} actual={len(outlines) if isinstance(outlines, list) else 'non-list'}"
             )
-            return [
-                normalize_outline_contract(
-                    {"chapter_num": start_chapter + i, "title": f"第{start_chapter + i}章", "outline": ""},
-                    start_chapter + i,
-                )
-                for i in range(num_chapters)
-            ]
+        return [
+            _normalize_outline_item(outlines[idx], start_chapter + idx)
+            for idx in range(num_chapters)
+        ]
+
+    def _harmonize_volume_outlines(
+        self,
+        *,
+        novel_id: str,
+        volume_no: int,
+        outlines: list[dict[str, Any]],
+        prewrite: dict,
+        previous_summaries: list[dict],
+        planning_context: dict[str, Any],
+        language: str,
+        provider: str | None,
+        model: str | None,
+    ) -> list[dict]:
+        if len(outlines) <= 1:
+            return outlines
+        llm = get_llm_with_fallback(provider, model)
+        prompt = render_prompt(
+            "volume_outline_harmonize",
+            novel_id=novel_id,
+            volume_no=volume_no,
+            outlines=outlines,
+            prewrite=prewrite,
+            previous_summaries=previous_summaries,
+            planning_context=planning_context,
+            language=language,
+        )
+        data = _invoke_json_with_schema(llm, prompt, VolumeOutlineHarmonizationSchema)
+        items = data.get("outlines", []) if isinstance(data, dict) else []
+        if not isinstance(items, list) or not items:
+            raise ValueError("empty harmonization outlines")
+        updates = {
+            int(item.get("chapter_num") or 0): item
+            for item in items
+            if isinstance(item, dict) and int(item.get("chapter_num") or 0) > 0
+        }
+        if not updates:
+            raise ValueError("invalid harmonization payload")
+        harmonized: list[dict[str, Any]] = []
+        for outline in outlines:
+            chapter_num = int(outline.get("chapter_num") or 0)
+            patch = updates.get(chapter_num)
+            if not patch:
+                harmonized.append(dict(outline))
+                continue
+            merged = dict(outline)
+            for field in _HARMONIZABLE_OUTLINE_FIELDS:
+                if field in patch:
+                    merged[field] = patch[field]
+            harmonized.append(_normalize_outline_item(merged, chapter_num))
+        return harmonized
 
     def run_full_book(
         self,
@@ -1238,20 +1732,26 @@ class FinalReviewerAgent:
     ) -> dict:
         template = "final_book_review"
         llm = get_llm_with_fallback(provider, model, inference=inference)
-        prompt = render_prompt(template, chapters=chapters, language=language)
+        compacted_chapters = _compact_final_review_chapters(chapters)
+        prompt = render_prompt(template, chapters=compacted_chapters, language=language)
         try:
             data = _invoke_json_with_schema(
                 llm,
                 prompt,
                 FinalBookReviewSchema,
+                strict=True,
+                provider=provider,
+                model=model,
                 stage="reviewer.book",
                 prompt_template=template,
                 prompt_version="v2",
             )
-            return data if isinstance(data, dict) else {"score": 0.8, "feedback": "ok"}
+            if not isinstance(data, dict):
+                return _final_book_review_fallback("invalid_final_review_payload")
+            return FinalBookReviewSchema.model_validate(data).model_dump()
         except Exception as e:
             logger.error(f"FinalReviewerAgent full-book review failed: {e}")
-            return {"score": 0.8, "feedback": "final review fallback"}
+            return _final_book_review_fallback(str(e))
 
 
 class FactExtractorAgent:
@@ -1288,7 +1788,9 @@ class FactExtractorAgent:
             prompt_template=template,
             prompt_version="v2",
         )
-        return data if isinstance(data, dict) else {"events": [], "entities": [], "facts": []}
+        if not isinstance(data, dict):
+            return {"events": [], "entities": [], "facts": []}
+        return _trim_fact_lists(data)
 
     def run_foreshadow_extraction(
         self,
@@ -1363,12 +1865,13 @@ class ProgressionMemoryAgent:
                 "transition_confidence": 0.0,
                 "validation_notes": [],
             }
-        advancement = data.get("advancement") or {}
-        transition = data.get("transition") or {}
+        trimmed = _trim_progression_memory_payload(data)
+        advancement = trimmed.get("advancement") or {}
+        transition = trimmed.get("transition") or {}
         return {
             "advancement": dict(advancement) if isinstance(advancement, dict) else {},
             "transition": dict(transition) if isinstance(transition, dict) else {},
-            "advancement_confidence": float(data.get("advancement_confidence") or 0.0),
-            "transition_confidence": float(data.get("transition_confidence") or 0.0),
-            "validation_notes": [str(x)[:180] for x in (data.get("validation_notes") or []) if str(x).strip()][:8],
+            "advancement_confidence": float(trimmed.get("advancement_confidence") or 0.0),
+            "transition_confidence": float(trimmed.get("transition_confidence") or 0.0),
+            "validation_notes": [str(x)[:180] for x in (trimmed.get("validation_notes") or []) if str(x).strip()][:6],
         }
