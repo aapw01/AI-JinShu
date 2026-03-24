@@ -1,6 +1,10 @@
 """Chapter-loop nodes: context loading, beats, consistency check, save-blocked, advance."""
 from __future__ import annotations
 
+import json
+import logging
+import re
+
 from sqlalchemy import select
 
 from app.core.database import SessionLocal
@@ -9,6 +13,13 @@ from app.services.generation.common import resolve_chapter_title
 from app.services.generation.heuristics import build_consistency_scorecard
 from app.services.generation.progress import chapter_progress, progress, volume_no_for_chapter
 from app.services.generation.state import GenerationState
+
+_chapter_loop_logger = logging.getLogger("app.services.generation")
+
+_REFINABLE_FIELDS = {
+    "hook", "payoff", "opening_scene", "transition_mode", "forbidden_repeats",
+    "opening_character_positions", "opening_time_state",
+}
 
 
 def node_load_context(state: GenerationState) -> GenerationState:
@@ -256,21 +267,15 @@ def node_advance_chapter(state: GenerationState) -> GenerationState:
     return {"current_chapter": state["current_chapter"] + 1}
 
 
-import logging as _logging  # noqa: E402
-_chapter_loop_logger = _logging.getLogger("app.services.generation")
-
-
 def _invoke_json_simple(llm, prompt: str) -> dict:
     """Invoke LLM and parse JSON response without schema enforcement."""
-    import json as _json
-    import re as _re
     response = llm.invoke(prompt)
     text = str(getattr(response, "content", response) or "").strip()
-    match = _re.search(r"\{.*\}", text, _re.DOTALL)
+    match = re.search(r"\{.*\}", text, re.DOTALL)
     if match:
         try:
-            return _json.loads(match.group())
-        except _json.JSONDecodeError:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
             return {}
     return {}
 
@@ -312,10 +317,6 @@ def node_refine_chapter_outline(state: GenerationState) -> GenerationState:
         return {"outline": outline}
 
     # Call LLM for refinement
-    _REFINABLE_FIELDS = {
-        "hook", "payoff", "opening_scene", "transition_mode", "forbidden_repeats",
-        "opening_character_positions", "opening_time_state",
-    }
     try:
         prompt = render_prompt(
             "chapter_outline_refine",
