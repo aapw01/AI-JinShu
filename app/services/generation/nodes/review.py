@@ -17,6 +17,9 @@ from app.services.memory.progression_control import rollback_progression_range
 
 
 def node_review(state: GenerationState) -> GenerationState:
+    from app.core.strategy import get_pipeline_options
+    _opts = get_pipeline_options(state.get("strategy"))
+    _combined_mode = _opts.get("combined_reviewer", False)
     chapter_num = state["current_chapter"]
     progress(state, "reviewer", chapter_num, chapter_progress(state, 0.55), "章节审校...", {"current_phase": "chapter_review", "total_chapters": state["num_chapters"]})
     r_provider, r_model = get_model_for_stage(state["strategy"], "reviewer")
@@ -35,70 +38,82 @@ def node_review(state: GenerationState) -> GenerationState:
     best = None
     for c in candidates:
         text = str(c.get("draft") or "")
-        try:
-            if hasattr(state["reviewer"], "run_structured"):
-                struct_raw = state["reviewer"].run_structured(
-                    text, chapter_num, state["target_language"],
-                    state["native_style_profile"], r_provider, r_model,
-                    inference=struct_inference,
-                )
-            else:
-                struct_raw = state["reviewer"].run(
-                    text, chapter_num, state["target_language"],
-                    state["native_style_profile"], r_provider, r_model,
-                    inference=struct_inference,
-                )
-        except Exception as exc:
-            logger.warning("reviewer.structured failed chapter=%s error=%s", chapter_num, exc)
-            struct_raw = dict(_REVIEWER_FALLBACK)
-
-        try:
-            if hasattr(state["reviewer"], "run_factual_structured"):
-                factual_raw = state["reviewer"].run_factual_structured(
-                    text, chapter_num, state.get("context") or {},
-                    state["target_language"], r_provider, r_model,
-                    inference=factual_inference,
-                )
-            else:
-                factual_raw = state["reviewer"].run_factual(
-                    text, chapter_num, state.get("context") or {},
-                    state["target_language"], r_provider, r_model,
-                    inference=factual_inference,
-                )
-        except Exception as exc:
-            logger.warning("reviewer.factual failed chapter=%s error=%s", chapter_num, exc)
-            factual_raw = dict(_REVIEWER_FALLBACK)
-
-        try:
-            progression_raw = state["reviewer"].run_progression_structured(
+        # Pre-initialize to avoid UnboundLocalError in fallback path
+        struct_raw = factual_raw = progression_raw = aesthetic_raw = None
+        if _combined_mode:
+            struct_raw, factual_raw, progression_raw, aesthetic_raw = state["reviewer"].run_combined(
                 text,
                 chapter_num,
                 state.get("context") or {},
                 state["target_language"],
+                state["native_style_profile"],
                 r_provider,
                 r_model,
-                inference=progression_inference,
+                inference=None,  # run_combined manages its own temperature
             )
-        except Exception as exc:
-            logger.warning("reviewer.progression failed chapter=%s error=%s", chapter_num, exc)
-            progression_raw = dict(_REVIEWER_FALLBACK)
+            # run_combined never raises; empty defaults are still usable
+        if not _combined_mode or struct_raw is None:
+            # Legacy 4-call path (always used when combined_mode=False, or as last-resort fallback)
+            try:
+                if hasattr(state["reviewer"], "run_structured"):
+                    struct_raw = state["reviewer"].run_structured(
+                        text, chapter_num, state["target_language"],
+                        state["native_style_profile"], r_provider, r_model,
+                        inference=struct_inference,
+                    )
+                else:
+                    struct_raw = state["reviewer"].run(
+                        text, chapter_num, state["target_language"],
+                        state["native_style_profile"], r_provider, r_model,
+                        inference=struct_inference,
+                    )
+            except Exception as exc:
+                logger.warning("reviewer.structured failed chapter=%s error=%s", chapter_num, exc)
+                struct_raw = dict(_REVIEWER_FALLBACK)
 
-        try:
-            if hasattr(state["reviewer"], "run_aesthetic_structured"):
-                aesthetic_raw = state["reviewer"].run_aesthetic_structured(
-                    text, chapter_num, state["target_language"],
-                    r_provider, r_model,
-                    inference=aesthetic_inference,
+            try:
+                if hasattr(state["reviewer"], "run_factual_structured"):
+                    factual_raw = state["reviewer"].run_factual_structured(
+                        text, chapter_num, state.get("context") or {},
+                        state["target_language"], r_provider, r_model,
+                        inference=factual_inference,
+                    )
+                else:
+                    factual_raw = state["reviewer"].run_factual(
+                        text, chapter_num, state.get("context") or {},
+                        state["target_language"], r_provider, r_model,
+                        inference=factual_inference,
+                    )
+            except Exception as exc:
+                logger.warning("reviewer.factual failed chapter=%s error=%s", chapter_num, exc)
+                factual_raw = dict(_REVIEWER_FALLBACK)
+
+            try:
+                progression_raw = state["reviewer"].run_progression_structured(
+                    text, chapter_num, state.get("context") or {},
+                    state["target_language"], r_provider, r_model,
+                    inference=progression_inference,
                 )
-            else:
-                aesthetic_raw = state["reviewer"].run_aesthetic(
-                    text, chapter_num, state["target_language"],
-                    r_provider, r_model,
-                    inference=aesthetic_inference,
-                )
-        except Exception as exc:
-            logger.warning("reviewer.aesthetic failed chapter=%s error=%s", chapter_num, exc)
-            aesthetic_raw = dict(_REVIEWER_FALLBACK)
+            except Exception as exc:
+                logger.warning("reviewer.progression failed chapter=%s error=%s", chapter_num, exc)
+                progression_raw = dict(_REVIEWER_FALLBACK)
+
+            try:
+                if hasattr(state["reviewer"], "run_aesthetic_structured"):
+                    aesthetic_raw = state["reviewer"].run_aesthetic_structured(
+                        text, chapter_num, state["target_language"],
+                        r_provider, r_model,
+                        inference=aesthetic_inference,
+                    )
+                else:
+                    aesthetic_raw = state["reviewer"].run_aesthetic(
+                        text, chapter_num, state["target_language"],
+                        r_provider, r_model,
+                        inference=aesthetic_inference,
+                    )
+            except Exception as exc:
+                logger.warning("reviewer.aesthetic failed chapter=%s error=%s", chapter_num, exc)
+                aesthetic_raw = dict(_REVIEWER_FALLBACK)
 
         struct_pack = normalize_reviewer_payload(struct_raw, "结构审校结果")
         factual_pack = normalize_reviewer_payload(factual_raw, "事实审校结果")
