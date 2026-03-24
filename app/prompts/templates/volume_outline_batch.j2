@@ -1,0 +1,50 @@
+{# volume_outline_batch.j2: 分批章节大纲生成 #}
+你是长篇网文策划编辑。请只为第 {{ volume_no }} 卷中的当前批次生成章节大纲。
+
+<global_bible>
+{{ prewrite | tojson_pretty }}
+</global_bible>
+
+{% if previous_summaries %}
+<previous_chapters_summary>
+以下是前几章的真实写作摘要（按章节顺序），用于确保大纲连贯：
+{% for s in previous_summaries %}
+第{{ s.chapter_num }}章：{{ s.summary }}
+{% endfor %}
+</previous_chapters_summary>
+{% endif %}
+
+{% if planning_context %}
+<volume_planning_context>
+{{ planning_context | tojson_pretty }}
+</volume_planning_context>
+{% endif %}
+
+<task>
+只生成第{{ start_chapter }}章到第{{ end_chapter }}章，共{{ num_chapters }}章。
+必须严格返回 {{ num_chapters }} 条 outline，不允许多写，也不允许少写。
+chapter_num 必须使用全书绝对章节号，不得重新从 1 编号。
+不得提前规划未来批次（第{{ end_chapter + 1 }}章及之后）的主事件。
+
+每章必须包含：
+- title: 章节标题（含实质内容，不得只是"第N章"）
+- outline: 本章核心事件（≥20字）
+- purpose: 本章在全书中的叙事功能
+- hook: 开头钩子
+- payoff: 本章给读者的兑现
+- foreshadowing: 埋下的伏笔（无则留空）
+- conflict_axis: 本章主冲突
+- chapter_objective: 本章必须完成的叙事目标
+- required_irreversible_change: 本章产生的不可逆变化
+- mini_climax: 本章小高潮（无则填 none）
+- opening_scene: 本章开场场景描述
+- transition_mode: 与上一章的衔接方式
+
+要求：
+- 只输出当前批次的最终大纲，不要解释
+- 每章必须有真实推进，不能只是重复上一章已完成的信息
+- 每章结尾钩子必须服务相邻章节的继续阅读
+- 如果某章无明确伏笔或兑现，可填空串，但不得省略字段
+
+请以 JSON 格式输出，键为 "outlines"，值为数组，每个元素包含上述字段（加上 chapter_num）。
+</task>

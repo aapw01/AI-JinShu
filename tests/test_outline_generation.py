@@ -77,20 +77,23 @@ class TestOutlineContentValid:
 
 
 class TestRunVolumeOutlines:
-    def test_returns_correct_count(self):
+    def test_batches_large_volume_generation(self):
         agent = OutlinerAgent()
-        mock_data = {
-            "outlines": [
+        batch_calls: list[tuple[int, int]] = []
+
+        def _fake_batch(*, start_chapter, num_chapters, **_kwargs):
+            batch_calls.append((start_chapter, num_chapters))
+            return [
                 {
                     "chapter_num": i,
                     "title": f"第{i}章：测试内容",
                     "outline": "主角发现了关键线索，决定采取行动推进主线",
                 }
-                for i in range(1, 31)
+                for i in range(start_chapter, start_chapter + num_chapters)
             ]
-        }
-        with patch("app.services.generation.agents._invoke_json_with_schema", return_value=mock_data):
-            with patch("app.services.generation.agents.get_llm_with_fallback", return_value=MagicMock()):
+
+        with patch.object(agent, "_generate_outline_batch", side_effect=_fake_batch):
+            with patch.object(agent, "_harmonize_volume_outlines", side_effect=lambda **kwargs: kwargs["outlines"]):
                 result = agent.run_volume_outlines(
                     novel_id="test",
                     volume_no=1,
@@ -102,13 +105,14 @@ class TestRunVolumeOutlines:
         assert len(result) == 30
         assert result[0]["chapter_num"] == 1
         assert result[29]["chapter_num"] == 30
+        assert batch_calls == [(1, 10), (11, 10), (21, 10)]
 
-    def test_returns_fallback_on_llm_failure(self):
-        """失败时返回空 outline，不抛异常"""
+    def test_raises_on_batch_generation_failure(self):
+        """批次生成失败时应直接抛错，不再回退为空大纲"""
         agent = OutlinerAgent()
-        with patch("app.services.generation.agents._invoke_json_with_schema", side_effect=Exception("LLM error")):
-            with patch("app.services.generation.agents.get_llm_with_fallback", return_value=MagicMock()):
-                result = agent.run_volume_outlines(
+        with patch.object(agent, "_generate_outline_batch", side_effect=Exception("LLM error")):
+            with pytest.raises(Exception, match="LLM error"):
+                agent.run_volume_outlines(
                     novel_id="test",
                     volume_no=1,
                     start_chapter=1,
@@ -116,20 +120,17 @@ class TestRunVolumeOutlines:
                     prewrite={},
                     previous_summaries=[],
                 )
-        assert len(result) == 5
-        for item in result:
-            assert item.get("outline", "") == ""
 
     def test_chapter_nums_are_sequential(self):
         agent = OutlinerAgent()
-        mock_data = {
-            "outlines": [
+        def _fake_batch(*, start_chapter, num_chapters, **_kwargs):
+            return [
                 {"chapter_num": i, "title": f"第{i}章：内容", "outline": "足够长的大纲内容测试数据，主角发现了隐藏的真相并决定行动"}
-                for i in range(31, 61)
+                for i in range(start_chapter, start_chapter + num_chapters)
             ]
-        }
-        with patch("app.services.generation.agents._invoke_json_with_schema", return_value=mock_data):
-            with patch("app.services.generation.agents.get_llm_with_fallback", return_value=MagicMock()):
+
+        with patch.object(agent, "_generate_outline_batch", side_effect=_fake_batch):
+            with patch.object(agent, "_harmonize_volume_outlines", side_effect=lambda **kwargs: kwargs["outlines"]):
                 result = agent.run_volume_outlines(
                     novel_id="test",
                     volume_no=2,
@@ -141,22 +142,61 @@ class TestRunVolumeOutlines:
         assert result[0]["chapter_num"] == 31
         assert result[-1]["chapter_num"] == 60
 
-    def test_returns_fallback_on_empty_outlines(self):
-        """LLM 返回空 outlines 列表时应触发 fallback"""
+    def test_reuses_valid_db_batches_and_only_generates_missing_batches(self):
         agent = OutlinerAgent()
-        with patch("app.services.generation.agents._invoke_json_with_schema", return_value={"outlines": []}):
-            with patch("app.services.generation.agents.get_llm_with_fallback", return_value=MagicMock()):
+        existing = [
+            {"chapter_num": i, "title": f"第{i}章：已有", "outline": "这是已存在且有效的大纲内容，足以复用"}
+            for i in range(1, 11)
+        ]
+        batch_calls: list[tuple[int, int]] = []
+
+        def _fake_batch(*, start_chapter, num_chapters, **_kwargs):
+            batch_calls.append((start_chapter, num_chapters))
+            return [
+                {"chapter_num": i, "title": f"第{i}章：新批次", "outline": "足够长的大纲内容测试数据，主角发现了隐藏的真相并决定行动"}
+                for i in range(start_chapter, start_chapter + num_chapters)
+            ]
+
+        with patch("app.services.generation.agents.load_outlines_from_db", return_value=existing):
+            with patch("app.services.generation.agents.save_full_outlines"):
+                with patch.object(agent, "_generate_outline_batch", side_effect=_fake_batch):
+                    with patch.object(agent, "_harmonize_volume_outlines", side_effect=lambda **kwargs: kwargs["outlines"]):
+                        result = agent.run_volume_outlines(
+                            novel_id="1",
+                            novel_version_id=1,
+                            volume_no=1,
+                            start_chapter=1,
+                            num_chapters=30,
+                            prewrite={},
+                            previous_summaries=[],
+                        )
+        assert len(result) == 30
+        assert batch_calls == [(11, 10), (21, 10)]
+
+    def test_harmonization_failure_soft_fails(self):
+        agent = OutlinerAgent()
+
+        def _fake_batch(*, start_chapter, num_chapters, **_kwargs):
+            return [
+                {
+                    "chapter_num": i,
+                    "title": f"第{i}章：测试内容",
+                    "outline": "主角发现了关键线索，决定采取行动推进主线",
+                }
+                for i in range(start_chapter, start_chapter + num_chapters)
+            ]
+
+        with patch.object(agent, "_generate_outline_batch", side_effect=_fake_batch):
+            with patch.object(agent, "_harmonize_volume_outlines", side_effect=Exception("harmonize failed")):
                 result = agent.run_volume_outlines(
                     novel_id="test",
                     volume_no=1,
                     start_chapter=1,
-                    num_chapters=3,
+                    num_chapters=12,
                     prewrite={},
                     previous_summaries=[],
                 )
-        assert len(result) == 3
-        for item in result:
-            assert item.get("outline", "") == ""
+        assert len(result) == 12
 
 
 class TestNodeOutlineFirstVolumeOnly:

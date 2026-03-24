@@ -246,6 +246,7 @@ def node_outline(state: GenerationState) -> GenerationState:
     first_vol_chapters = min(volume_size, state["num_chapters"])
     full_outlines = state["outliner"].run_volume_outlines(
         novel_id=str(state["novel_id"]),
+        novel_version_id=state.get("novel_version_id"),
         volume_no=int(state.get("volume_no") or 1),
         start_chapter=segment_start,
         num_chapters=first_vol_chapters,

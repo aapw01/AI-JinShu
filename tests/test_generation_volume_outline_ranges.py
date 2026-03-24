@@ -134,7 +134,7 @@ def test_node_outline_appends_second_volume_without_overwriting_first(monkeypatc
                 for idx in range(start_chapter, start_chapter + num_chapters)
             ]
 
-        def run_volume_outlines(self, novel_id, volume_no, start_chapter, num_chapters, prewrite, previous_summaries=None, planning_context=None, language="zh", provider=None, model=None):
+        def run_volume_outlines(self, novel_id, volume_no, start_chapter, num_chapters, prewrite, novel_version_id=None, previous_summaries=None, planning_context=None, language="zh", provider=None, model=None):
             self.calls.append(
                 {
                     "novel_id": novel_id,
@@ -220,7 +220,7 @@ def test_node_outline_does_not_reuse_when_count_is_enough_but_requested_range_mi
                 for idx in range(start_chapter, start_chapter + num_chapters)
             ]
 
-        def run_volume_outlines(self, novel_id, volume_no, start_chapter, num_chapters, prewrite, previous_summaries=None, planning_context=None, language="zh", provider=None, model=None):
+        def run_volume_outlines(self, novel_id, volume_no, start_chapter, num_chapters, prewrite, novel_version_id=None, previous_summaries=None, planning_context=None, language="zh", provider=None, model=None):
             self.called += 1
             return [
                 {"chapter_num": idx, "title": f"补全第{idx}章", "outline": f"补全提纲{idx}"}

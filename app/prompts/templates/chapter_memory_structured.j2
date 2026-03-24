@@ -54,3 +54,5 @@
 - `advancement_confidence` / `transition_confidence` 使用 `0.0~1.0` 浮点数，表示你对抽取结果可靠性的判断。
 - 若某部分证据较弱，请在 `validation_notes` 中简要说明原因。
 - 置信度偏低时保持保守，不要为了填满字段而猜测。
+- 所有数组字段都要克制：`new_information / resolved_threads / new_unresolved_threads / forbidden_repeats / major_beats / character_positions` 各最多 `5` 条，`validation_notes` 最多 `6` 条。
+- 若可提取信息很多，只保留最重要、最影响后续写作约束的几条。

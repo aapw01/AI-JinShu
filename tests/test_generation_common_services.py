@@ -1,3 +1,4 @@
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -260,6 +261,65 @@ def test_update_character_states_from_content_no_character_short_circuit(monkeyp
         strategy="web-novel",
     )
     assert called["v"] is False
+
+
+def test_update_character_states_from_content_only_passes_relevant_characters(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _fake_render_prompt(_template, **kwargs):
+        captured["character_names"] = kwargs["character_names"]
+        return "prompt"
+
+    monkeypatch.setattr("app.core.strategy.get_model_for_stage", lambda *_: ("openai", "mock"))
+    monkeypatch.setattr("app.services.generation.common.render_prompt", _fake_render_prompt)
+
+    class _LLM:
+        def invoke(self, _prompt):
+            return SimpleNamespace(content='{"updates":[{"name":"林秋","status":"injured"}]}')
+
+    monkeypatch.setattr("app.core.llm.get_llm_with_fallback", lambda *_: _LLM())
+
+    class _Mgr:
+        def update_state(self, *args, **kwargs):
+            return None
+
+    prewrite = {
+        "specification": {
+            "characters": [{"name": "林秋"}, {"name": "陆沉"}, {"name": "顾北"}, {"name": "周姨"}]
+        }
+    }
+    update_character_states_from_content(
+        novel_id=1003,
+        chapter_num=8,
+        content="林秋在庭院中受了伤，但仍坚持追查真相。",
+        prewrite=prewrite,
+        char_mgr=_Mgr(),  # type: ignore[arg-type]
+        language="zh",
+        strategy="web-novel",
+    )
+    assert captured["character_names"] == "林秋"
+
+
+def test_update_character_states_from_content_warns_on_invalid_payload(monkeypatch, caplog):
+    monkeypatch.setattr("app.core.strategy.get_model_for_stage", lambda *_: ("openai", "mock"))
+
+    class _LLM:
+        def invoke(self, _prompt):
+            return SimpleNamespace(content="not-json")
+
+    monkeypatch.setattr("app.core.llm.get_llm_with_fallback", lambda *_: _LLM())
+    prewrite = {"specification": {"characters": [{"name": "林秋"}]}}
+    with caplog.at_level(logging.WARNING):
+        update_character_states_from_content(
+            novel_id=1004,
+            chapter_num=9,
+            content="林秋站在门外，神色紧绷。",
+            prewrite=prewrite,
+            char_mgr=SimpleNamespace(update_state=lambda *args, **kwargs: None),  # type: ignore[arg-type]
+            language="zh",
+            strategy="web-novel",
+        )
+    assert "returned no updates" in caplog.text or "invalid" in caplog.text
 
 
 def test_writer_agent_error_includes_provider_model_and_root_cause(monkeypatch):

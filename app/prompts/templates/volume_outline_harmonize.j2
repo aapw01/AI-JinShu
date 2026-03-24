@@ -1,0 +1,51 @@
+{# volume_outline_harmonize.j2: 卷级大纲轻量整合 #}
+你是长篇网文策划编辑。下面给你的是同一卷已经生成完成的章节大纲，请做一次轻量整合。
+
+<global_bible>
+{{ prewrite | tojson_pretty }}
+</global_bible>
+
+{% if previous_summaries %}
+<previous_chapters_summary>
+{% for s in previous_summaries %}
+第{{ s.chapter_num }}章：{{ s.summary }}
+{% endfor %}
+</previous_chapters_summary>
+{% endif %}
+
+{% if planning_context %}
+<volume_planning_context>
+{{ planning_context | tojson_pretty }}
+</volume_planning_context>
+{% endif %}
+
+<volume_outlines>
+{{ outlines | tojson_pretty }}
+</volume_outlines>
+
+<task>
+请仅微调以下字段，以改善卷内连贯性：
+- payoff
+- reveal_kind
+- forbidden_repeats
+- opening_scene
+- opening_character_positions
+- opening_time_state
+- transition_mode
+
+严格禁止修改：
+- title
+- outline
+- chapter_objective
+- required_new_information
+- required_irreversible_change
+- relationship_delta
+- conflict_axis
+- 主事件和剧情路线
+
+输出要求：
+- 只返回 JSON
+- 仅返回与输入章节一一对应的 outlines 数组
+- 每个元素必须包含 chapter_num
+- 其余只允许包含上述可微调字段
+</task>
