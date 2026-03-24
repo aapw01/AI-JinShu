@@ -299,6 +299,7 @@ class TestGenerateNextVolumeOutlinesIfNeeded:
         call_kwargs = state["outliner"].run_volume_outlines.call_args[1]
         assert call_kwargs["start_chapter"] == 31
         assert call_kwargs["volume_no"] == 2
+        assert "previous_summaries" in call_kwargs
         mock_save.assert_called_once()
 
 

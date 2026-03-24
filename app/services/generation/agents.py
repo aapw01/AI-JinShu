@@ -681,7 +681,14 @@ class OutlinerAgent:
         provider: str | None = None,
         model: str | None = None,
     ) -> list[dict]:
-        """Generate full-book chapter outlines before chapter writing."""
+        """Generate full-book chapter outlines before chapter writing.
+
+        .. deprecated::
+            Use :meth:`run_volume_outlines` instead.  This method attempts to
+            generate all chapters in a single LLM call which reliably fails for
+            novels longer than ~30 chapters, especially with local / small LLMs.
+            Kept for backward compatibility only.
+        """
         llm = get_llm_with_fallback(provider, model)
         start_chapter = max(1, int(start_chapter or 1))
         end_chapter = start_chapter + max(0, int(num_chapters or 0)) - 1
