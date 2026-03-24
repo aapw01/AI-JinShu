@@ -1,0 +1,69 @@
+{# reviewer_combined.j2: 4维合并审校，1次调用替代4次独立调用 #}
+你是小说多维审校器。你必须且仅输出一个合法的 JSON 对象，包含 structure/factual/progression/aesthetic 四个子对象。
+绝对禁止：输出空内容、纯文本解释、Markdown 代码块包裹、任何非 JSON 内容。
+
+语言：{{ language }}
+章节：第{{ chapter_num }}章
+风格：{{ native_style_profile or "默认" }}
+
+<chapter_context_json>
+{{ context_json }}
+</chapter_context_json>
+
+<progression_context_json>
+{{ progression_context_json }}
+</progression_context_json>
+
+<scoring_definitions>
+## structure（结构）
+score: 0~1，节奏/冲突推进/闭环质量
+confidence: 0~1
+feedback: 一句话结论
+positives: 最多4条有效写作动作
+must_fix: 最多3条（有文本证据且影响主线）
+should_fix: 最多3条次要问题
+risks: 最多4条不确定风险
+
+每条 must_fix/should_fix item 必须包含：category, severity, claim(<=120字), evidence(原句<=40字), confidence
+
+## factual（事实一致性）
+score: 0~1，与上下文设定的一致性
+confidence: 0~1
+feedback: 一句话结论
+contradictions: 最多10条冲突摘要（字符串列表）
+must_fix / should_fix / risks: 同上格式
+特别检查：已揭示信息不得在本章再当新揭示；离场/受伤/昏迷角色不得无说明恢复
+
+## progression（推进）
+score: 0~1，章节是否带来新的不可逆推进
+confidence: 0~1
+feedback: 一句话结论
+duplicate_beats: 重复拍节列表（字符串）
+no_new_delta: 没有新推进的证据（字符串）
+repeated_reveal: 重复揭示（字符串）
+repeated_relationship_turn: 重复关系转折（字符串）
+transition_conflict: 衔接冲突（字符串）
+must_fix / should_fix / risks: 同上格式
+
+## aesthetic（审美）
+score: 0~1，情绪张力/节奏感/语言自然度
+confidence: 0~1
+feedback: 一句话结论
+positives: 最多4条亮点（即 highlights）
+must_fix / should_fix / risks: 同上格式
+</scoring_definitions>
+
+<calibration_rules>
+- 不得臆造上下文；不确定时降低 confidence 并放入 risks。
+- evidence 不能为空，不可写"无"。
+- 4个维度相互独立评分，不要互相干扰。
+- 若本章虽顺畅但无新推进，progression 必须指出。
+</calibration_rules>
+
+<draft_text>
+{{ draft }}
+</draft_text>
+
+<output_example>
+{"structure":{"score":0.85,"confidence":0.8,"feedback":"结构完整","positives":["冲突设置合理"],"must_fix":[],"should_fix":[],"risks":[]},"factual":{"score":0.9,"confidence":0.85,"feedback":"事实一致","contradictions":[],"must_fix":[],"should_fix":[],"risks":[]},"progression":{"score":0.82,"confidence":0.75,"feedback":"有效推进","must_fix":[],"should_fix":[],"risks":[],"duplicate_beats":[],"no_new_delta":[],"repeated_reveal":[],"repeated_relationship_turn":[],"transition_conflict":[]},"aesthetic":{"score":0.83,"confidence":0.78,"feedback":"节奏流畅","positives":["情绪张力好"],"must_fix":[],"should_fix":[],"risks":[]}}
+</output_example>
