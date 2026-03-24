@@ -359,7 +359,7 @@ def node_finalize(state: GenerationState) -> GenerationState:
             "language_quality_report": language_report,
             "metadata_": {
                 "language_quality_report": language_report,
-                "consistency_report": state["consistency_report"].summary(),
+                "consistency_report": (cr := state.get("consistency_report")) and cr.summary() or {},
                 "revision_count": revision_count,
                 "context_budget_used": state["context"].get("budget_used", 0),
                 "rerun_count": state.get("rerun_count", 0),
