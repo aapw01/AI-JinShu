@@ -38,6 +38,13 @@ _META_TITLE_PHRASES = (
     "全面打磨",
     "提示词",
     "保持原有",
+    # English placeholders
+    "auto-generated",
+    "placeholder",
+    "todo",
+    "tbd",
+    "fill in",
+    "insert here",
 )
 _LEADING_META_PREFIXES = (
     "以下是根据反馈",
@@ -94,7 +101,7 @@ def _looks_like_meta_text(text: str) -> bool:
     if "feedback" in lowered and "chapter" in lowered:
         return True
     for phrase in _META_TITLE_PHRASES:
-        if phrase in source:
+        if phrase.lower() in lowered:  # 统一用 lowered 比对，兼容大小写
             return True
     return False
 
