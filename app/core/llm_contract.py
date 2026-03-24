@@ -98,7 +98,8 @@ def invoke_chapter_body_structured(
                         kwargs["strict"] = True
                     try:
                         structured = llm.with_structured_output(ChapterBodySchema, **kwargs)
-                    except TypeError:
+                    except (TypeError, ValueError):
+                        # json_mode does not accept strict=True; drop it and retry
                         kwargs.pop("strict", None)
                         structured = llm.with_structured_output(ChapterBodySchema, **kwargs)
                     result = structured.invoke(prompt)
