@@ -177,19 +177,29 @@ def node_beats(state: GenerationState) -> GenerationState:
 
 def node_consistency_check(state: GenerationState) -> GenerationState:
     from app.services.generation.consistency import check_consistency, inject_consistency_context
+    from app.services.generation.common import logger
 
     chapter_num = state["current_chapter"]
     progress(state, "consistency", chapter_num, chapter_progress(state, 0.15), "一致性检查...", {"current_phase": "consistency_check", "total_chapters": state["num_chapters"]})
-    report = check_consistency(
-        state["novel_id"],
-        state["novel_version_id"],
-        chapter_num,
-        state["outline"],
-        state["context"],
-        state["prewrite"],
-    )
-    scorecard = build_consistency_scorecard(report)
-    ctx = inject_consistency_context(state["context"], report)
+    try:
+        report = check_consistency(
+            state["novel_id"],
+            state["novel_version_id"],
+            chapter_num,
+            state["outline"],
+            state["context"],
+            state["prewrite"],
+        )
+        scorecard = build_consistency_scorecard(report)
+        ctx = inject_consistency_context(state["context"], report)
+    except Exception as _e:
+        logger.warning("node_consistency_check: soft-fail for ch=%s: %s", chapter_num, _e)
+        return {
+            "consistency_report": None,
+            "consistency_scorecard": {},
+            "context": state["context"],
+            "consistency_soft_fail": True,
+        }
     return {
         "consistency_report": report,
         "consistency_scorecard": scorecard,
@@ -200,7 +210,7 @@ def node_consistency_check(state: GenerationState) -> GenerationState:
 
 def node_save_blocked(state: GenerationState) -> GenerationState:
     chapter_num = state["current_chapter"]
-    report = state["consistency_report"]
+    report = state.get("consistency_report")
     chapter_title = resolve_chapter_title(
         chapter_num=chapter_num,
         title=(state.get("outline") or {}).get("title"),
@@ -218,7 +228,7 @@ def node_save_blocked(state: GenerationState) -> GenerationState:
             "content": "",
             "summary": "",
             "status": "consistency_blocked",
-            "metadata_": {"consistency_report": report.summary(), "consistency_blocked": True},
+            "metadata_": {"consistency_report": report.summary() if report else {}, "consistency_blocked": True},
         }
         if existing:
             for k, v in payload.items():
