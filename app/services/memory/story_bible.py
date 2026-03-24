@@ -559,8 +559,13 @@ class QualityReportStore:
         scope_id: str | None = None,
         novel_version_id: int | None = None,
         db: Optional[Session] = None,
+        limit: int | None = None,
     ) -> list[QualityReport]:
-        """List reports by scope, optionally narrowed to scope_id."""
+        """List reports by scope, optionally narrowed to scope_id.
+
+        When *limit* is provided the query is capped at that many rows (most
+        recent first by id).
+        """
         should_close = db is None
         db = db or SessionLocal()
         try:
@@ -570,6 +575,8 @@ class QualityReportStore:
             if scope_id is not None:
                 stmt = stmt.where(QualityReport.scope_id == scope_id)
             stmt = stmt.order_by(QualityReport.id.desc())
+            if limit is not None:
+                stmt = stmt.limit(limit)
             return db.execute(stmt).scalars().all()
         finally:
             if should_close:

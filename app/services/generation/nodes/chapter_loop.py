@@ -91,6 +91,7 @@ def node_load_context(state: GenerationState) -> GenerationState:
             state.get("novel_version_id"),
             chapter_num,
             db=db,
+            limit=5,
         )
     finally:
         db.close()
@@ -303,10 +304,11 @@ def node_refine_chapter_outline(state: GenerationState) -> GenerationState:
             state["novel_id"],
             state.get("novel_version_id"),
             chapter_num,
+            limit=5,
         ) or []
         recent_summaries = [
             {"chapter_num": s.get("chapter_num"), "summary": s.get("summary", "")}
-            for s in raw[-5:]
+            for s in raw
             if s.get("summary")
         ]
     except Exception as e:

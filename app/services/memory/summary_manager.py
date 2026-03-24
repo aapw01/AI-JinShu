@@ -12,22 +12,32 @@ class SummaryManager:
     """Manage chapter summaries."""
 
     def get_summaries_before(
-        self, novel_id: int, novel_version_id: int, before_chapter: int, db: Optional[Session] = None
+        self,
+        novel_id: int,
+        novel_version_id: int,
+        before_chapter: int,
+        db: Optional[Session] = None,
+        limit: int | None = None,
     ) -> list[dict]:
-        """Get summaries of chapters before given number."""
+        """Get summaries of chapters before given number.
+
+        When *limit* is provided, only the *limit* most recent chapters are
+        returned (fetched DESC then reversed to preserve chronological order).
+        """
         should_close = db is None
         db = db or SessionLocal()
         try:
-            stmt = (
-                select(ChapterSummary)
-                .where(
-                    ChapterSummary.novel_id == novel_id,
-                    ChapterSummary.novel_version_id == novel_version_id,
-                    ChapterSummary.chapter_num < before_chapter,
-                )
-                .order_by(ChapterSummary.chapter_num)
+            stmt = select(ChapterSummary).where(
+                ChapterSummary.novel_id == novel_id,
+                ChapterSummary.novel_version_id == novel_version_id,
+                ChapterSummary.chapter_num < before_chapter,
             )
-            rows = db.execute(stmt).scalars().all()
+            if limit is not None:
+                stmt = stmt.order_by(ChapterSummary.chapter_num.desc()).limit(limit)
+                rows = list(reversed(db.execute(stmt).scalars().all()))
+            else:
+                stmt = stmt.order_by(ChapterSummary.chapter_num)
+                rows = db.execute(stmt).scalars().all()
             return [{"chapter_num": r.chapter_num, "summary": r.summary} for r in rows]
         finally:
             if should_close:

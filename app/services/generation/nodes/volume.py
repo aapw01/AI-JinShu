@@ -37,6 +37,7 @@ def node_volume_replan(state: GenerationState) -> GenerationState:
             novel_version_id=state.get("novel_version_id"),
             scope="volume",
             scope_id=str(previous_volume),
+            limit=1,
         )
         if prev_reports:
             previous_quality = prev_reports[0].metrics_json or {}
@@ -228,8 +229,8 @@ def _generate_next_volume_outlines_if_needed(
             state["novel_id"],
             state.get("novel_version_id"),
             next_vol_start,
+            limit=5,
         ) or []
-        raw = raw[-5:]  # take last 5 summaries
         recent_summaries = [
             {"chapter_num": s.get("chapter_num"), "summary": s.get("summary", "")}
             for s in raw
