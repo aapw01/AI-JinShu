@@ -250,7 +250,9 @@ def test_final_reviewer_parse_failure_returns_warning_fallback(monkeypatch):
     monkeypatch.setattr("app.services.generation.agents.get_llm_with_fallback", lambda *_args, **_kwargs: _FakeLLM())
     reviewer = FinalReviewerAgent()
     result = reviewer.run_full_book(
-        [{"chapter_num": i, "summary": f"第{i}章摘要"} for i in range(1, 6)],
+        volume_reports=[],
+        recent_summaries=[{"chapter_num": i, "summary": f"第{i}章摘要"} for i in range(1, 6)],
+        unresolved_foreshadows=[],
         provider="openai",
         model="test-model",
     )
@@ -259,11 +261,12 @@ def test_final_reviewer_parse_failure_returns_warning_fallback(monkeypatch):
     assert result["must_fix"]
 
 
-def test_final_reviewer_compacts_large_payload(monkeypatch):
+def test_final_reviewer_run_full_book_passes_new_kwargs_to_render_prompt(monkeypatch):
+    """run_full_book passes volume_reports/recent_summaries/unresolved_foreshadows to render_prompt."""
     captured: dict[str, object] = {}
 
     def _fake_render_prompt(_template: str, **kwargs):
-        captured["chapters"] = kwargs["chapters"]
+        captured.update(kwargs)
         return "prompt"
 
     monkeypatch.setattr("app.services.generation.agents.render_prompt", _fake_render_prompt)
@@ -280,18 +283,19 @@ def test_final_reviewer_compacts_large_payload(monkeypatch):
         },
     )
     reviewer = FinalReviewerAgent()
+    vr = [{"volume_no": "1", "verdict": "pass", "metrics": {}}]
+    rs = [{"chapter_num": 30, "summary": "结局"}]
+    uf = [{"title": "钥匙", "planted_chapter": 3}]
     reviewer.run_full_book(
-        [
-            {"chapter_num": i, "title": f"第{i}章", "summary": ("摘要" * 80)}
-            for i in range(1, 31)
-        ],
+        volume_reports=vr,
+        recent_summaries=rs,
+        unresolved_foreshadows=uf,
         provider="openai",
         model="test-model",
     )
-    payload = captured["chapters"]
-    assert isinstance(payload, list)
-    assert len(payload) < 30
-    assert any(isinstance(item, dict) and "chapter_range" in item for item in payload)
+    assert captured.get("volume_reports") == vr
+    assert captured.get("recent_summaries") == rs
+    assert captured.get("unresolved_foreshadows") == uf
 
 
 def test_progression_memory_agent_trims_large_lists(monkeypatch):

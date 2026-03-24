@@ -26,22 +26,39 @@ def node_final_book_review(state: GenerationState) -> GenerationState:
     db = SessionLocal()
     try:
         last_chapter = effective_end
-        all_summaries = state["summary_mgr"].get_summaries_before(
+        # 1. Volume-level quality reports (bounded by N_volumes, ~1 row per 30 chapters)
+        volume_reports = state["quality_store"].list_reports(
+            novel_id=state["novel_id"],
+            novel_version_id=state.get("novel_version_id"),
+            scope="volume",
+            db=db,
+        )
+        volume_reports_payload = [
+            {
+                "volume_no": r.scope_id,
+                "verdict": str(getattr(r, "verdict", "") or ""),
+                "metrics": (r.metrics_json or {}) if isinstance(r.metrics_json, dict) else {},
+            }
+            for r in volume_reports
+        ]
+
+        # 2. Last 15 chapter summaries (covers the ending arc)
+        recent_summaries = state["summary_mgr"].get_summaries_before(
             state["novel_id"],
             state.get("novel_version_id"),
             last_chapter + 1,
             db=db,
+            limit=15,
         )
-        if all_summaries:
-            chapter_payload = [{"chapter_num": s["chapter_num"], "summary": s["summary"]} for s in all_summaries]
-        else:
-            chapter_stmt = (
-                select(ChapterVersion)
-                .where(ChapterVersion.novel_version_id == state.get("novel_version_id"))
-                .order_by(ChapterVersion.chapter_num)
-            )
-            chapter_rows = db.execute(chapter_stmt).scalars().all()
-            chapter_payload = [{"chapter_num": c.chapter_num, "title": c.title, "content": (c.content or "")[:2000]} for c in chapter_rows]
+
+        # 3. Unresolved foreshadows + arc state (bounded structured data)
+        constraints = state["bible_store"].get_chapter_constraints(
+            state["novel_id"],
+            last_chapter,
+            novel_version_id=state.get("novel_version_id"),
+            db=db,
+        )
+        unresolved_foreshadows = (constraints.get("unresolved_foreshadows") or [])[:10]
     finally:
         db.close()
 
@@ -56,10 +73,12 @@ def node_final_book_review(state: GenerationState) -> GenerationState:
     fr_provider, fr_model = get_model_for_stage(state["strategy"], "reviewer")
     fr_inference = get_inference_for_stage(state["strategy"], "reviewer.book")
     final_report = state["final_reviewer"].run_full_book(
-        chapter_payload,
-        state["target_language"],
-        fr_provider,
-        fr_model,
+        volume_reports=volume_reports_payload,
+        recent_summaries=recent_summaries,
+        unresolved_foreshadows=unresolved_foreshadows,
+        language=state["target_language"],
+        provider=fr_provider,
+        model=fr_model,
         inference=fr_inference,
     )
     save_prewrite_artifacts(state["novel_id"], {"final_book_review": final_report})
