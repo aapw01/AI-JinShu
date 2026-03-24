@@ -24,6 +24,12 @@ class TestLooksLikeMetaText:
     def test_allows_english_real_title(self):
         assert _looks_like_meta_text("The Storm Breaks") is False
 
+    def test_catches_fill_in(self):
+        assert _looks_like_meta_text("fill in the content") is True
+
+    def test_catches_insert_here(self):
+        assert _looks_like_meta_text("insert here") is True
+
     def test_empty_string(self):
         assert _looks_like_meta_text("") is False
 
