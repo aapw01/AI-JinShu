@@ -124,7 +124,7 @@ class TestRunVolumeOutlines:
         agent = OutlinerAgent()
         mock_data = {
             "outlines": [
-                {"chapter_num": i, "title": f"第{i}章：内容", "outline": "足够长的大纲内容测试数据"}
+                {"chapter_num": i, "title": f"第{i}章：内容", "outline": "足够长的大纲内容测试数据，主角发现了隐藏的真相并决定行动"}
                 for i in range(31, 61)
             ]
         }
@@ -140,3 +140,20 @@ class TestRunVolumeOutlines:
                 )
         assert result[0]["chapter_num"] == 31
         assert result[-1]["chapter_num"] == 60
+
+    def test_returns_fallback_on_empty_outlines(self):
+        """LLM 返回空 outlines 列表时应触发 fallback"""
+        agent = OutlinerAgent()
+        with patch("app.services.generation.agents._invoke_json_with_schema", return_value={"outlines": []}):
+            with patch("app.services.generation.agents.get_llm_with_fallback", return_value=MagicMock()):
+                result = agent.run_volume_outlines(
+                    novel_id="test",
+                    volume_no=1,
+                    start_chapter=1,
+                    num_chapters=3,
+                    prewrite={},
+                    previous_summaries=[],
+                )
+        assert len(result) == 3
+        for item in result:
+            assert item.get("outline", "") == ""
