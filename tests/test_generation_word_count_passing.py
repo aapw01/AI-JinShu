@@ -147,6 +147,9 @@ def test_node_finalize_passes_default_word_count(monkeypatch):
         def run(self, **_kwargs):
             return {}
 
+        def run_foreshadow_extraction(self, **_kwargs):
+            return {"planted": [], "resolved": []}
+
     class _SummaryMgr:
         def add_summary(self, *_args, **_kwargs):
             return None
