@@ -1,0 +1,43 @@
+id: fast-local
+name: Fast Local Strategy
+description: |
+  Optimized for local LLMs (Ollama, LM Studio, etc.).
+  Combined reviewer (4-call → 1), max_retries=1, cross_chapter/refine_outline disabled.
+  ~20 LLM calls per chapter vs ~55 in standard mode.
+
+stages:
+  architect:
+    provider: __default__
+    model: __default__
+  outliner:
+    provider: __default__
+    model: __default__
+  writer:
+    provider: __default__
+    model: __default__
+  reviewer:
+    provider: __default__
+    model: __default__
+  finalizer:
+    provider: __default__
+    model: __default__
+
+inference:
+  reviewer.combined:
+    temperature: 0.18
+  fact_extractor:
+    temperature: 0.1
+  progression_memory:
+    temperature: 0.1
+
+review_weights:
+  structure: 0.28
+  factual: 0.24
+  progression: 0.28
+  aesthetic: 0.20
+
+pipeline_options:
+  combined_reviewer: true
+  max_retries: 1
+  enable_cross_chapter_check: false
+  enable_refine_outline: false
