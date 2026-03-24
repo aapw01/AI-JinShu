@@ -14,7 +14,7 @@ def aesthetic_score(text: str) -> float:
     avg_sentence_len = len(text) / sentence_count
     paragraph_bonus = min(len(paragraphs) / 12.0, 1.0) * 0.2
     rhythm = 1.0 - min(abs(avg_sentence_len - 28) / 60.0, 1.0)
-    return max(0.0, min(1.0, 0.55 + paragraph_bonus + rhythm * 0.25))
+    return max(0.0, min(1.0, 0.62 + paragraph_bonus + rhythm * 0.25))
 
 
 def extract_timeline_markers(text: str) -> list[str]:

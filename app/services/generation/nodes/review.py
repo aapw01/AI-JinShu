@@ -162,7 +162,7 @@ def node_review(state: GenerationState) -> GenerationState:
         if best is None or item["combined"] > best["combined"]:
             best = item
     if best is None:
-        return {"score": 0.0, "feedback": "review failed", "factual_score": 0.0, "progression_score": 0.75, "aesthetic_review_score": 0.0}
+        return {"score": 0.0, "feedback": "review failed", "factual_score": 0.75, "progression_score": 0.75, "aesthetic_review_score": 0.75}
     suggestions = {
         "missing_payoff": [],
         "weak_conflict": [],

@@ -135,7 +135,7 @@ def get_pipeline_options(strategy_key: str | None) -> dict[str, Any]:
     defs = DEFAULT_PIPELINE_OPTIONS
     return {
         "combined_reviewer": bool(opts.get("combined_reviewer", defs["combined_reviewer"])),
-        "max_retries": int(opts.get("max_retries") or defs["max_retries"]),
+        "max_retries": int(opts["max_retries"] if "max_retries" in opts else defs["max_retries"]),
         "enable_cross_chapter_check": bool(opts.get("enable_cross_chapter_check", defs["enable_cross_chapter_check"])),
         "enable_refine_outline": bool(opts.get("enable_refine_outline", defs["enable_refine_outline"])),
     }
