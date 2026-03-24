@@ -6,6 +6,7 @@ from app.services.generation.nodes.chapter_loop import (  # noqa: F401
     node_beats,
     node_consistency_check,
     node_load_context,
+    node_refine_chapter_outline,
     node_save_blocked,
 )
 from app.services.generation.nodes.writer import node_writer  # noqa: F401

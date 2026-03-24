@@ -254,3 +254,83 @@ def node_save_blocked(state: GenerationState) -> GenerationState:
 
 def node_advance_chapter(state: GenerationState) -> GenerationState:
     return {"current_chapter": state["current_chapter"] + 1}
+
+
+import logging as _logging  # noqa: E402
+_chapter_loop_logger = _logging.getLogger("app.services.generation")
+
+
+def _invoke_json_simple(llm, prompt: str) -> dict:
+    """Invoke LLM and parse JSON response without schema enforcement."""
+    import json as _json
+    import re as _re
+    response = llm.invoke(prompt)
+    text = str(getattr(response, "content", response) or "").strip()
+    match = _re.search(r"\{.*\}", text, _re.DOTALL)
+    if match:
+        try:
+            return _json.loads(match.group())
+        except _json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def node_refine_chapter_outline(state: GenerationState) -> GenerationState:
+    """Pre-chapter outline refinement using actual recent chapter summaries.
+
+    Refines transition fields (hook, payoff, opening_scene, transition_mode,
+    forbidden_repeats) without touching core chapter objectives.
+    """
+    from app.core.llm import get_llm_with_fallback
+    from app.core.strategy import get_model_for_stage
+    from app.prompts import render_prompt
+
+    chapter_num = state["current_chapter"]
+    outline = dict(state.get("outline") or {})
+
+    # Skip refinement for the first two chapters (no prior summaries to align with)
+    if chapter_num < 3:
+        return {"outline": outline}
+
+    # Load recent actual summaries
+    try:
+        raw = state["summary_mgr"].get_summaries_before(
+            state["novel_id"],
+            state.get("novel_version_id"),
+            chapter_num,
+        ) or []
+        recent_summaries = [
+            {"chapter_num": s.get("chapter_num"), "summary": s.get("summary", "")}
+            for s in raw[-5:]
+            if s.get("summary")
+        ]
+    except Exception as e:
+        _chapter_loop_logger.warning("node_refine_chapter_outline: failed to load summaries ch=%s: %s", chapter_num, e)
+        return {"outline": outline}
+
+    if not recent_summaries:
+        return {"outline": outline}
+
+    # Call LLM for refinement
+    _REFINABLE_FIELDS = {
+        "hook", "payoff", "opening_scene", "transition_mode", "forbidden_repeats",
+        "opening_character_positions", "opening_time_state",
+    }
+    try:
+        prompt = render_prompt(
+            "chapter_outline_refine",
+            chapter_num=chapter_num,
+            outline=outline,
+            recent_summaries=recent_summaries,
+        )
+        out_provider, out_model = get_model_for_stage(state.get("strategy", "web-novel"), "outliner")
+        llm = get_llm_with_fallback(out_provider, out_model)
+        refined_fields = _invoke_json_simple(llm, prompt)
+        if isinstance(refined_fields, dict):
+            for field in _REFINABLE_FIELDS:
+                if field in refined_fields:
+                    outline[field] = refined_fields[field]
+    except Exception as e:
+        _chapter_loop_logger.warning("node_refine_chapter_outline: refinement failed ch=%s: %s", chapter_num, e)
+
+    return {"outline": outline}

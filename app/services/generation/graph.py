@@ -24,6 +24,7 @@ from app.services.generation.nodes import (
     node_load_context,
     node_outline,
     node_prewrite,
+    node_refine_chapter_outline,
     node_review,
     node_revise,
     node_rollback_rerun,
@@ -181,6 +182,7 @@ def _build_generation_graph():
     graph.add_node("confirmation_gate", _timed_node("confirmation_gate", node_confirmation_gate))
     graph.add_node("volume_replan", _timed_node("volume_replan", node_volume_replan))
     graph.add_node("load_context", _timed_node("load_context", node_load_context))
+    graph.add_node("refine_outline", _timed_node("refine_outline", node_refine_chapter_outline))
     graph.add_node("consistency_check", _timed_node("consistency_check", node_consistency_check))
     graph.add_node("save_blocked", _timed_node("save_blocked", node_save_blocked))
     graph.add_node("beats", _timed_node("beats", node_beats))
@@ -203,7 +205,8 @@ def _build_generation_graph():
     graph.add_edge("outline", "confirmation_gate")
     graph.add_conditional_edges("confirmation_gate", _route_after_confirmation, {"volume_replan": "volume_replan", "load_context": "load_context", "segment_done": END})
     graph.add_edge("volume_replan", "load_context")
-    graph.add_edge("load_context", "consistency_check")
+    graph.add_edge("load_context", "refine_outline")
+    graph.add_edge("refine_outline", "consistency_check")
     graph.add_conditional_edges("consistency_check", _route_consistency, {"save_blocked": "save_blocked", "beats": "beats"})
     graph.add_edge("beats", "writer")
     graph.add_edge("save_blocked", "advance_chapter")

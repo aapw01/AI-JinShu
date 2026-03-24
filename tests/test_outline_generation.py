@@ -300,3 +300,76 @@ class TestGenerateNextVolumeOutlinesIfNeeded:
         assert call_kwargs["start_chapter"] == 31
         assert call_kwargs["volume_no"] == 2
         mock_save.assert_called_once()
+
+
+class TestNodeRefineChapterOutline:
+    def _make_state(self, chapter_num=5, outline=None):
+        summary_mgr = MagicMock()
+        summary_mgr.get_summaries_before.return_value = [
+            {"chapter_num": 4, "summary": "主角在追逐中发现了隐藏的线索并与对手正面交锋"}
+        ]
+        return {
+            "novel_id": 1,
+            "novel_version_id": 1,
+            "current_chapter": chapter_num,
+            "outline": outline or {"chapter_num": chapter_num, "outline": "测试大纲内容", "hook": "old hook"},
+            "strategy": "web-novel",
+            "summary_mgr": summary_mgr,
+        }
+
+    def test_skips_refinement_for_early_chapters(self):
+        """章节 < 3 时跳过精化，直接返回原大纲"""
+        from app.services.generation.nodes.chapter_loop import node_refine_chapter_outline
+        state = self._make_state(chapter_num=2)
+        result = node_refine_chapter_outline(state)
+        assert result["outline"] == state["outline"]
+        state["summary_mgr"].get_summaries_before.assert_not_called()
+
+    def test_returns_original_outline_when_no_summaries(self):
+        """无摘要时返回原始大纲"""
+        from app.services.generation.nodes.chapter_loop import node_refine_chapter_outline
+        state = self._make_state(chapter_num=5)
+        state["summary_mgr"].get_summaries_before.return_value = []
+        result = node_refine_chapter_outline(state)
+        assert result["outline"]["hook"] == "old hook"
+
+    def test_applies_refinable_fields(self):
+        """LLM 返回有效字段时应合并到 outline"""
+        from app.services.generation.nodes.chapter_loop import node_refine_chapter_outline
+        state = self._make_state(chapter_num=5)
+        refined = {"hook": "新钩子内容", "opening_scene": "审讯室场景"}
+        with patch("app.prompts.render_prompt", return_value="prompt"):
+            with patch("app.services.generation.nodes.chapter_loop._invoke_json_simple", return_value=refined):
+                with patch("app.core.llm.get_llm_with_fallback", return_value=MagicMock()):
+                    with patch("app.core.strategy.get_model_for_stage", return_value=(None, None)):
+                        result = node_refine_chapter_outline(state)
+        assert result["outline"]["hook"] == "新钩子内容"
+        assert result["outline"]["opening_scene"] == "审讯室场景"
+
+    def test_does_not_modify_core_fields(self):
+        """LLM 不得覆盖核心字段 outline/chapter_objective"""
+        from app.services.generation.nodes.chapter_loop import node_refine_chapter_outline
+        outline = {
+            "chapter_num": 5, "outline": "核心大纲不得改动",
+            "chapter_objective": "主线目标", "hook": "old hook"
+        }
+        state = self._make_state(chapter_num=5, outline=outline)
+        # LLM tries to overwrite protected fields - should be ignored
+        refined = {"outline": "被替换的大纲", "chapter_objective": "替换目标", "hook": "新钩子"}
+        with patch("app.prompts.render_prompt", return_value="prompt"):
+            with patch("app.services.generation.nodes.chapter_loop._invoke_json_simple", return_value=refined):
+                with patch("app.core.llm.get_llm_with_fallback", return_value=MagicMock()):
+                    with patch("app.core.strategy.get_model_for_stage", return_value=(None, None)):
+                        result = node_refine_chapter_outline(state)
+        assert result["outline"]["outline"] == "核心大纲不得改动"
+        assert result["outline"]["chapter_objective"] == "主线目标"
+        # hook IS in _REFINABLE_FIELDS so it should be updated
+        assert result["outline"]["hook"] == "新钩子"
+
+    def test_returns_original_on_llm_failure(self):
+        """LLM 调用失败时不崩溃，返回原始大纲"""
+        from app.services.generation.nodes.chapter_loop import node_refine_chapter_outline
+        state = self._make_state(chapter_num=5)
+        with patch("app.prompts.render_prompt", side_effect=Exception("LLM error")):
+            result = node_refine_chapter_outline(state)
+        assert result["outline"]["hook"] == "old hook"
