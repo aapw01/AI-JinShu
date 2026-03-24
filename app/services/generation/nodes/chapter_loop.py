@@ -105,6 +105,7 @@ def node_load_context(state: GenerationState) -> GenerationState:
         "aesthetic_feedback": "",
         "score": 0.0,
         "factual_score": 0.0,
+        "progression_score": 0.0,
         "aesthetic_review_score": 0.0,
         "review_attempt": 0,
         "rerun_count": 0,
