@@ -121,6 +121,74 @@ class TestRunVolumeOutlines:
                     previous_summaries=[],
                 )
 
+
+class TestGenerateOutlineBatch:
+    """_generate_outline_batch 的重试与推断补全逻辑"""
+
+    def _make_agent_and_llm(self):
+        from unittest.mock import MagicMock
+        from app.services.generation.agents import OutlinerAgent
+        agent = OutlinerAgent()
+        mock_llm = MagicMock()
+        return agent, mock_llm
+
+    def _make_outline(self, chapter_num: int) -> dict:
+        return {
+            "chapter_num": chapter_num,
+            "title": f"第{chapter_num}章：测试",
+            "outline": "主角发现了关键线索，决定采取行动推进主线剧情",
+        }
+
+    def test_retries_when_count_short_then_succeeds(self):
+        """首次返回 9 条，重试后返回 10 条，应成功"""
+        agent, _ = self._make_agent_and_llm()
+        short = [self._make_outline(i) for i in range(1, 10)]   # 9 items
+        full  = [self._make_outline(i) for i in range(1, 11)]   # 10 items
+        calls = iter([{"outlines": short}, {"outlines": full}])
+
+        with patch("app.services.generation.agents._invoke_json_with_schema", side_effect=lambda *a, **kw: next(calls)):
+            with patch("app.services.generation.agents.get_llm_with_fallback"):
+                result = agent._generate_outline_batch(
+                    novel_id="1", volume_no=1, start_chapter=1, num_chapters=10,
+                    prewrite={}, previous_summaries=[], planning_context={},
+                    language="zh", provider=None, model=None,
+                )
+        assert len(result) == 10
+        assert result[0]["chapter_num"] == 1
+        assert result[9]["chapter_num"] == 10
+
+    def test_infers_missing_chapter_when_short_by_one_after_retries(self):
+        """3 次重试后仍少 1 章，应推断补全而不是抛错"""
+        agent, _ = self._make_agent_and_llm()
+        # Missing chapter 5 — return chapters 1-4, 6-10
+        partial = [self._make_outline(i) for i in list(range(1, 5)) + list(range(6, 11))]
+        assert len(partial) == 9
+
+        with patch("app.services.generation.agents._invoke_json_with_schema", return_value={"outlines": partial}):
+            with patch("app.services.generation.agents.get_llm_with_fallback"):
+                result = agent._generate_outline_batch(
+                    novel_id="1", volume_no=1, start_chapter=1, num_chapters=10,
+                    prewrite={}, previous_summaries=[], planning_context={},
+                    language="zh", provider=None, model=None,
+                )
+        assert len(result) == 10
+        chap5 = next(r for r in result if r["chapter_num"] == 5)
+        assert chap5["outline"]  # inferred outline must be non-empty
+
+    def test_raises_when_missing_more_than_two_after_retries(self):
+        """3 次重试后缺 3 章以上，应抛错"""
+        agent, _ = self._make_agent_and_llm()
+        partial = [self._make_outline(i) for i in range(1, 8)]  # only 7 of 10
+
+        with patch("app.services.generation.agents._invoke_json_with_schema", return_value={"outlines": partial}):
+            with patch("app.services.generation.agents.get_llm_with_fallback"):
+                with pytest.raises(ValueError, match="expected=10 actual=7"):
+                    agent._generate_outline_batch(
+                        novel_id="1", volume_no=1, start_chapter=1, num_chapters=10,
+                        prewrite={}, previous_summaries=[], planning_context={},
+                        language="zh", provider=None, model=None,
+                    )
+
     def test_chapter_nums_are_sequential(self):
         agent = OutlinerAgent()
         def _fake_batch(*, start_chapter, num_chapters, **_kwargs):
