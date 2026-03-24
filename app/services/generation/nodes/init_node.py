@@ -18,6 +18,7 @@ from app.services.generation.agents import (
     WriterAgent,
 )
 from app.services.generation.common import (
+    is_outline_content_valid,
     load_outlines_from_db,
     load_prewrite_artifacts,
     logger,
@@ -43,12 +44,14 @@ def _covers_outline_range(outlines: list[dict] | None, start_chapter: int, end_c
     required = set(range(int(start_chapter), int(end_chapter) + 1))
     if not required:
         return False
-    available = {
+    valid = {
         int(item.get("chapter_num") or 0)
         for item in (outlines or [])
-        if isinstance(item, dict) and int(item.get("chapter_num") or 0) > 0
+        if isinstance(item, dict)
+        and int(item.get("chapter_num") or 0) > 0
+        and is_outline_content_valid(item)
     }
-    return required.issubset(available)
+    return required.issubset(valid)
 
 
 def _is_resume_like(state: GenerationState) -> bool:

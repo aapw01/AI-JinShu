@@ -1,5 +1,5 @@
 import pytest
-from app.services.generation.common import _looks_like_meta_text, is_effective_title
+from app.services.generation.common import _looks_like_meta_text, is_effective_title, is_outline_content_valid
 
 
 class TestLooksLikeMetaText:
@@ -46,3 +46,25 @@ class TestIsEffectiveTitle:
 
     def test_rejects_chapter_with_placeholder_suffix(self):
         assert is_effective_title("第1章：auto-generated", 1) is False
+
+
+class TestOutlineContentValid:
+    def test_empty_outline_is_invalid(self):
+        item = {"chapter_num": 1, "title": "第1章", "outline": ""}
+        assert is_outline_content_valid(item) is False
+
+    def test_auto_generated_outline_is_invalid(self):
+        item = {"chapter_num": 1, "title": "第1章", "outline": "auto-generated outline"}
+        assert is_outline_content_valid(item) is False
+
+    def test_valid_outline(self):
+        item = {"chapter_num": 1, "title": "第1章：铁幕之下", "outline": "主角在审讯室中发现线索"}
+        assert is_outline_content_valid(item) is True
+
+    def test_outline_too_short_is_invalid(self):
+        item = {"chapter_num": 1, "title": "第1章", "outline": "推进"}
+        assert is_outline_content_valid(item) is False
+
+    def test_none_outline_is_invalid(self):
+        item = {"chapter_num": 1, "title": "第1章", "outline": None}
+        assert is_outline_content_valid(item) is False

@@ -175,6 +175,19 @@ def is_effective_title(title: str | None, chapter_num: int | None = None) -> boo
     return True
 
 
+def is_outline_content_valid(item: dict) -> bool:
+    """Return True if the outline item has real (non-placeholder) content."""
+    outline = str(item.get("outline") or "").strip()
+    if not outline:
+        return False
+    if _looks_like_meta_text(outline):
+        return False
+    # At least 10 characters of real content
+    if len(outline) < 10:
+        return False
+    return True
+
+
 def normalize_outline_payload(chapter_num: int, outline: dict[str, Any] | None) -> dict[str, Any]:
     """Normalize outline payloads so runtime-added chapters match full-book outline storage."""
     item = normalize_outline_contract(dict(outline or {}), chapter_num)
