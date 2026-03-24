@@ -68,3 +68,7 @@ class TestOutlineContentValid:
     def test_none_outline_is_invalid(self):
         item = {"chapter_num": 1, "title": "第1章", "outline": None}
         assert is_outline_content_valid(item) is False
+
+    def test_non_dict_input_is_invalid(self):
+        assert is_outline_content_valid(None) is False  # type: ignore[arg-type]
+        assert is_outline_content_valid("string") is False  # type: ignore[arg-type]
