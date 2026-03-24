@@ -1650,6 +1650,91 @@ class ReviewerAgent:
         result["highlights"] = [x for x in highlights if x][:20]
         return result
 
+    def run_combined(
+        self,
+        draft: str,
+        chapter_num: int,
+        context: dict,
+        language: str = "zh",
+        native_style_profile: str = "",
+        provider: str | None = None,
+        model: str | None = None,
+        inference: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+        """Combined 4-dimension review in a single LLM call.
+
+        Returns (struct_raw, factual_raw, progression_raw, aesthetic_raw) —
+        same shape as the 4 separate run_*_structured() calls, fully drop-in.
+        Never raises — always returns 4 dicts (empty defaults on any failure).
+        """
+        def _empty_defaults():
+            return (
+                ReviewScorecardSchema().model_dump(),
+                FactualSubReviewSchema().model_dump(),
+                ProgressionReviewSchema().model_dump(),
+                ReviewScorecardSchema().model_dump(),
+            )
+
+        template = "reviewer_combined"
+        combined_inference = dict(inference or {})
+        if "temperature" not in combined_inference:
+            combined_inference["temperature"] = 0.18
+        factual_ctx = _build_reviewer_context_json(context, reviewer_kind="factual")
+        prog_ctx = _build_reviewer_context_json(context, reviewer_kind="progression")
+        try:
+            llm = get_llm_with_fallback(provider, model, inference=combined_inference)
+            prompt = render_prompt(
+                template,
+                chapter_num=chapter_num,
+                language=language,
+                native_style_profile=(native_style_profile or "默认"),
+                context_json=factual_ctx,
+                progression_context_json=prog_ctx,
+                draft=(draft[:7000]),
+            )
+            result = _invoke_json_with_schema(
+                llm,
+                prompt,
+                ReviewCombinedSchema,
+                strict=False,
+                stage="reviewer.combined",
+                provider=provider,
+                model=model,
+                chapter_num=chapter_num,
+                prompt_template=template,
+                prompt_version="v1",
+            )
+        except Exception as exc:
+            logger.warning("run_combined LLM call failed chapter=%s: %s", chapter_num, exc)
+            return _empty_defaults()
+
+        if not isinstance(result, dict) or result.get("raw") == "structured_output_fallback":
+            logger.warning("run_combined structured fallback for chapter=%s", chapter_num)
+            return _empty_defaults()
+
+        def _clamp_score(d: dict) -> dict:
+            s = float(d.get("score", 0.8))
+            if s > 1:
+                s = s / 100 if s <= 100 else 0.8
+            d["score"] = max(0.0, min(1.0, s))
+            c = float(d.get("confidence", 0.75))
+            d["confidence"] = max(0.0, min(1.0, c))
+            return d
+
+        struct_raw = _clamp_score(dict(result.get("structure") or {}))
+        factual_raw = _clamp_score(dict(result.get("factual") or {}))
+        if not factual_raw.get("contradictions"):
+            factual_raw["contradictions"] = [
+                str(x.get("claim") or "") for x in (factual_raw.get("must_fix") or [])
+                if isinstance(x, dict) and x.get("claim")
+            ][:20]
+        progression_raw = _clamp_score(dict(result.get("progression") or {}))
+        aesthetic_raw = _clamp_score(dict(result.get("aesthetic") or {}))
+        if not aesthetic_raw.get("highlights"):
+            aesthetic_raw["highlights"] = aesthetic_raw.get("positives") or []
+
+        return struct_raw, factual_raw, progression_raw, aesthetic_raw
+
     def run_cross_chapter_check(
         self,
         draft: str,
