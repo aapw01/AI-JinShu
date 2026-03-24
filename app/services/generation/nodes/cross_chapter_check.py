@@ -21,6 +21,10 @@ def node_cross_chapter_check(state: GenerationState) -> dict:
     if not draft.strip():
         return {}
 
+    from app.core.strategy import get_pipeline_options as _get_pipeline_options
+    if not _get_pipeline_options(state.get("strategy")).get("enable_cross_chapter_check", True):
+        return {}
+
     progress(
         state, "cross_chapter_check", chapter_num,
         chapter_progress(state, 0.58),

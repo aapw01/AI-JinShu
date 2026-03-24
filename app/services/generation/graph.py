@@ -8,7 +8,8 @@ from langgraph.graph import END, StateGraph
 
 from app.core.config import get_settings
 from app.core.logging_config import log_event
-from app.services.generation.common import MAX_RETRIES, REVIEW_SCORE_THRESHOLD, logger
+from app.core.strategy import get_max_retries
+from app.services.generation.common import REVIEW_SCORE_THRESHOLD, logger
 from app.services.generation.nodes import (
     node_advance_chapter,
     node_beats,
@@ -51,7 +52,8 @@ def _route_review(state: GenerationState) -> str:
         return "finalizer"
     if state["score"] >= REVIEW_SCORE_THRESHOLD:
         return "finalizer"
-    if state.get("review_attempt", 0) < MAX_RETRIES:
+    max_retries = get_max_retries(state.get("strategy"))
+    if state.get("review_attempt", 0) < max_retries:
         return "revise"
     if state.get("rerun_count", 0) < 1:
         return "rollback_rerun"
@@ -67,7 +69,8 @@ def _route_after_confirmation(state: GenerationState) -> str:
 def _route_finalize(state: GenerationState) -> str:
     if state.get("quality_passed", True):
         return "advance_chapter"
-    if state.get("rerun_count", 0) < 1:
+    max_retries = get_max_retries(state.get("strategy"))
+    if state.get("rerun_count", 0) < 1 and max_retries > 0:
         return "rollback_rerun"
     return "advance_chapter"
 

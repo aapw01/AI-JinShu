@@ -304,6 +304,10 @@ def node_refine_chapter_outline(state: GenerationState) -> GenerationState:
     chapter_num = state["current_chapter"]
     outline = dict(state.get("outline") or {})
 
+    from app.core.strategy import get_pipeline_options as _get_pipeline_options
+    if not _get_pipeline_options(state.get("strategy", "web-novel")).get("enable_refine_outline", True):
+        return {"outline": outline}
+
     # Skip refinement for the first two chapters (no prior summaries to align with)
     if chapter_num < 3:
         return {"outline": outline}
