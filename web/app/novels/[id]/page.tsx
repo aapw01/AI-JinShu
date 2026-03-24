@@ -45,6 +45,7 @@ const CHAPTER_STATUS_MAP: Record<ChapterProgress["status"], { label: string; var
   pending: { label: "待生成", variant: "default" },
   generating: { label: "生成中", variant: "warning" },
   completed: { label: "已完成", variant: "success" },
+  blocked: { label: "已阻断", variant: "error" },
 };
 const GRAMMAR_SKIPPED_TEXT = "未启用语法检查（language_tool_python 不可用），跳过该项。";
 const EMPTY_VERSIONS: NovelVersion[] = [];
@@ -771,8 +772,8 @@ export default function NovelPage() {
                                       </span>
                                     ) : null}
                                   </span>
-                                  <Badge variant={CHAPTER_STATUS_MAP[chapter.status].variant}>
-                                    {CHAPTER_STATUS_MAP[chapter.status].label}
+                                  <Badge variant={(CHAPTER_STATUS_MAP[chapter.status] || CHAPTER_STATUS_MAP.pending).variant}>
+                                    {(CHAPTER_STATUS_MAP[chapter.status] || CHAPTER_STATUS_MAP.pending).label}
                                   </Badge>
                                 </div>
                                 <div className="text-xs opacity-70 truncate">

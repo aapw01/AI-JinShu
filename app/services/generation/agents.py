@@ -583,7 +583,7 @@ class OutlinerAgent:
             return normalize_outline_contract(
                 {
                     "title": f"Chapter {chapter_num}",
-                    "outline": "auto-generated outline",
+                    "outline": "",
                     "purpose": "推进主线",
                 },
                 chapter_num,
@@ -662,7 +662,7 @@ class OutlinerAgent:
                     {
                         "chapter_num": i,
                         "title": f"第{i}章",
-                        "outline": "auto-generated outline",
+                        "outline": "",
                         "role": "推进剧情",
                         "purpose": "推进主线",
                         "suspense_level": "中",

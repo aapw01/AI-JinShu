@@ -173,7 +173,7 @@ def normalize_outline_payload(chapter_num: int, outline: dict[str, Any] | None) 
     item = normalize_outline_contract(dict(outline or {}), chapter_num)
     normalized_title = normalize_title_text(item.get("title"))
     if not is_effective_title(normalized_title, chapter_num):
-        normalized_title = f"第{chapter_num}章"
+        normalized_title = resolve_chapter_title(chapter_num=chapter_num, title=normalized_title, outline=item)
     return {
         "chapter_num": int(chapter_num),
         "title": normalized_title,

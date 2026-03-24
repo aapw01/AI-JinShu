@@ -638,6 +638,52 @@ def test_chapter_progress_defaults_to_volume_size_30_when_not_configured(client)
     assert item["volume_no"] == 2
 
 
+def test_chapter_progress_maps_consistency_blocked_to_blocked(client):
+    r = client.post("/api/novels", json={"title": "Blocked Progress", "target_language": "zh"})
+    assert r.status_code == 200
+    novel_id = r.json()["id"]
+    version_id: int | None = None
+
+    db = SessionLocal()
+    try:
+        novel = resolve_novel(db, novel_id)
+        assert novel is not None
+        version = db.execute(
+            select(NovelVersion).where(
+                NovelVersion.novel_id == novel.id,
+                NovelVersion.is_default == 1,
+            )
+        ).scalar_one()
+        version_id = int(version.id)
+        db.add(
+            ChapterOutline(
+                novel_id=novel.id,
+                novel_version_id=version_id,
+                chapter_num=1,
+                title="第1章",
+            )
+        )
+        db.add(
+            ChapterVersion(
+                novel_version_id=version_id,
+                chapter_num=1,
+                title="第1章",
+                content="",
+                status="consistency_blocked",
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    assert version_id is not None
+    resp = client.get(f"/api/novels/{novel_id}/chapter-progress?version_id={version_id}")
+    assert resp.status_code == 200
+    items = resp.json()
+    assert len(items) == 1
+    assert items[0]["status"] == "blocked"
+
+
 def test_chapter_progress_uses_creation_task_resume_cursor_when_redis_missing(client, monkeypatch):
     r = client.post("/api/novels", json={"title": "Progress Resume Cursor", "target_language": "zh"})
     assert r.status_code == 200
