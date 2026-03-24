@@ -242,6 +242,7 @@ def _generate_next_volume_outlines_if_needed(
     outliner = state.get("outliner") or OutlinerAgent()
     next_vol_outlines = outliner.run_volume_outlines(
         novel_id=str(state["novel_id"]),
+        novel_version_id=state.get("novel_version_id"),
         volume_no=next_vol_no,
         start_chapter=next_vol_start,
         num_chapters=next_vol_end - next_vol_start + 1,

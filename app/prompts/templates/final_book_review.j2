@@ -1,8 +1,8 @@
 请对整本小说做终审，给出可执行改进建议。
 
 语言：{{ language }}
-章节内容（可能截断）：
-{{ chapters[:20] | tojson }}
+输入载荷（已做压缩，可能是逐章摘要，也可能是按章节窗口聚合后的摘要）：
+{{ chapters | tojson }}
 
 评审维度：
 1) 全局一致性（设定、人物、时间线）
@@ -16,7 +16,13 @@
 输出 JSON：
 {
   "score": 0.0,
+  "confidence": 0.0,
   "feedback": "总体评语",
   "must_fix": ["必须修复项"],
-  "should_improve": ["建议优化项"]
+  "should_improve": ["建议优化项"],
+  "fallback": false
 }
+
+要求：
+- 只根据输入载荷进行评审，不要臆造未提供的情节。
+- `must_fix` 最多 5 条，`should_improve` 最多 5 条。

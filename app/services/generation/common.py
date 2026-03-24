@@ -61,6 +61,7 @@ _STRONG_PREFACE_MARKERS = (
     "原章节内容",
     "人工标注",
 )
+_MAX_CHARACTER_STATE_CANDIDATES = 8
 _OUTLINE_METADATA_KEYS = (
     "role",
     "purpose",
@@ -633,9 +634,9 @@ def update_character_states_from_content(
     db=None,
     novel_version_id: int | None = None,
 ) -> None:
-    from app.core.llm import get_llm_with_fallback, response_to_text
+    from app.core.llm import get_llm_with_fallback
     from app.core.strategy import get_model_for_stage
-    from app.services.generation.agents import _parse_json_response
+    from app.services.generation.agents import CharacterStateUpdatesSchema, _invoke_json_with_schema
 
     provider, model = get_model_for_stage(strategy, "reviewer")
     llm = get_llm_with_fallback(provider, model)
@@ -645,16 +646,37 @@ def update_character_states_from_content(
     char_names = [c.get("name", "") for c in characters if isinstance(c, dict) and c.get("name")]
     if not char_names:
         return
+    mentioned = [name for name in char_names if name and name in (content or "")]
+    relevant_names = mentioned or char_names[:_MAX_CHARACTER_STATE_CANDIDATES]
     prompt = render_prompt(
         "character_state_updates_from_chapter",
-        character_names=", ".join(char_names),
+        character_names=", ".join(relevant_names),
         chapter_num=chapter_num,
         content=(content[:3000]),
     )
     try:
-        resp = llm.invoke(prompt)
-        data = _parse_json_response(response_to_text(resp))
-        for update in data.get("updates", []):
+        data = _invoke_json_with_schema(
+            llm,
+            prompt,
+            CharacterStateUpdatesSchema,
+            strict=False,
+            stage="character_state_updates",
+            provider=provider,
+            model=model,
+            chapter_num=chapter_num,
+            prompt_template="character_state_updates_from_chapter",
+            prompt_version="v1",
+        )
+        updates = list((data or {}).get("updates") or []) if isinstance(data, dict) else []
+        if not updates:
+            logger.warning(
+                "character_state update returned no updates chapter=%s candidates=%s mentioned=%s",
+                chapter_num,
+                len(relevant_names),
+                len(mentioned),
+            )
+            return
+        for update in updates:
             if isinstance(update, dict) and update.get("name"):
                 payload = {"chapter_num": chapter_num, **update}
                 if novel_version_id is None:
