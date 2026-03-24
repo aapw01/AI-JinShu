@@ -134,6 +134,21 @@ def test_node_outline_appends_second_volume_without_overwriting_first(monkeypatc
                 for idx in range(start_chapter, start_chapter + num_chapters)
             ]
 
+        def run_volume_outlines(self, novel_id, volume_no, start_chapter, num_chapters, prewrite, previous_summaries=None, planning_context=None, language="zh", provider=None, model=None):
+            self.calls.append(
+                {
+                    "novel_id": novel_id,
+                    "num_chapters": num_chapters,
+                    "planning_context": planning_context or {},
+                    "start_chapter": start_chapter,
+                    "language": language,
+                }
+            )
+            return [
+                {"chapter_num": idx, "title": f"第二卷第{idx}章", "outline": f"第二卷提纲{idx}"}
+                for idx in range(start_chapter, start_chapter + num_chapters)
+            ]
+
     outliner = _DummyOutliner()
     monkeypatch.setattr("app.services.generation.nodes.init_node.progress", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("app.services.generation.nodes.init_node.get_model_for_stage", lambda *_args: ("openai", "mock"))
@@ -205,6 +220,13 @@ def test_node_outline_does_not_reuse_when_count_is_enough_but_requested_range_mi
                 for idx in range(start_chapter, start_chapter + num_chapters)
             ]
 
+        def run_volume_outlines(self, novel_id, volume_no, start_chapter, num_chapters, prewrite, previous_summaries=None, planning_context=None, language="zh", provider=None, model=None):
+            self.called += 1
+            return [
+                {"chapter_num": idx, "title": f"补全第{idx}章", "outline": f"补全提纲{idx}"}
+                for idx in range(start_chapter, start_chapter + num_chapters)
+            ]
+
     outliner = _DummyOutliner()
     monkeypatch.setattr("app.services.generation.nodes.init_node.progress", lambda *_args, **_kwargs: None)
     monkeypatch.setattr("app.services.generation.nodes.init_node.get_model_for_stage", lambda *_args: ("openai", "mock"))
@@ -233,7 +255,7 @@ def test_node_outline_reuses_existing_requested_range(monkeypatch):
     save_full_outlines(
         novel.id,
         [
-            {"chapter_num": idx, "title": f"已有第{idx}章", "outline": f"已有提纲{idx}"}
+            {"chapter_num": idx, "title": f"已有第{idx}章", "outline": f"已有提纲内容：第{idx}章推进主线剧情"}
             for idx in range(1, 61)
         ],
         novel_version_id=version.id,
@@ -241,6 +263,9 @@ def test_node_outline_reuses_existing_requested_range(monkeypatch):
 
     class _DummyOutliner:
         def run_full_book(self, *args, **kwargs):  # pragma: no cover - should not be called
+            raise AssertionError("outliner should not run when requested range already exists")
+
+        def run_volume_outlines(self, *args, **kwargs):  # pragma: no cover - should not be called
             raise AssertionError("outliner should not run when requested range already exists")
 
     monkeypatch.setattr("app.services.generation.nodes.init_node.progress", lambda *_args, **_kwargs: None)
