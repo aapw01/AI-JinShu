@@ -1090,7 +1090,7 @@ class OutlinerAgent:
     ) -> list[dict]:
         llm = get_llm_with_fallback(provider, model)
         end_chapter = start_chapter + num_chapters - 1
-        prompt = render_prompt(
+        base_prompt = render_prompt(
             "volume_outline_batch",
             novel_id=novel_id,
             volume_no=volume_no,
@@ -1102,12 +1102,80 @@ class OutlinerAgent:
             planning_context=planning_context,
             language=language,
         )
-        data = _invoke_json_with_schema(llm, prompt, VolumeOutlineBatchSchema)
-        outlines = data.get("outlines", []) if isinstance(data, dict) else []
-        if not isinstance(outlines, list) or len(outlines) != num_chapters:
-            raise ValueError(
-                f"invalid batch outline count for ch={start_chapter}-{end_chapter}: expected={num_chapters} actual={len(outlines) if isinstance(outlines, list) else 'non-list'}"
+
+        outlines: list[Any] = []
+        for attempt in range(3):
+            prompt = base_prompt
+            if attempt > 0:
+                actual = len(outlines) if isinstance(outlines, list) else 0
+                prompt = (
+                    base_prompt
+                    + f"\n\n[重要] 上次只返回了 {actual} 条，必须严格返回"
+                    f"第 {start_chapter} 到第 {end_chapter} 章共 {num_chapters} 条，不多不少。"
+                )
+            data = _invoke_json_with_schema(llm, prompt, VolumeOutlineBatchSchema)
+            outlines = data.get("outlines", []) if isinstance(data, dict) else []
+            if isinstance(outlines, list) and len(outlines) == num_chapters:
+                break
+            logger.warning(
+                "OutlinerAgent._generate_outline_batch count mismatch attempt=%s ch=%s-%s expected=%s actual=%s",
+                attempt + 1,
+                start_chapter,
+                end_chapter,
+                num_chapters,
+                len(outlines) if isinstance(outlines, list) else "non-list",
             )
+
+        if not isinstance(outlines, list):
+            raise ValueError(
+                f"invalid batch outline for ch={start_chapter}-{end_chapter}: non-list response after retries"
+            )
+
+        missing = num_chapters - len(outlines)
+        if missing > 2:
+            raise ValueError(
+                f"invalid batch outline count for ch={start_chapter}-{end_chapter}:"
+                f" expected={num_chapters} actual={len(outlines)} after retries"
+            )
+
+        if missing > 0:
+            chapter_map = {
+                int(o.get("chapter_num") or 0): o
+                for o in outlines
+                if isinstance(o, dict) and int(o.get("chapter_num") or 0) > 0
+            }
+            targets = {
+                int(t.get("chapter_num") or 0): t
+                for t in (planning_context.get("chapter_targets") or [])
+                if isinstance(t, dict)
+            }
+            for ch in range(start_chapter, end_chapter + 1):
+                if ch in chapter_map:
+                    continue
+                prev = chapter_map.get(ch - 1, {})
+                nxt = chapter_map.get(ch + 1, {})
+                target = targets.get(ch, {})
+                goal = str(target.get("goal") or prev.get("hook") or "延续上章情节，推进主线")
+                chapter_map[ch] = {
+                    "chapter_num": ch,
+                    "title": str(target.get("title") or f"第{ch}章"),
+                    "outline": goal,
+                    "purpose": goal,
+                    "hook": str(nxt.get("opening_scene") or ""),
+                    "payoff": "",
+                    "foreshadowing": "",
+                    "conflict_axis": "",
+                    "chapter_objective": goal,
+                    "required_irreversible_change": "",
+                    "mini_climax": "none",
+                    "opening_scene": str(prev.get("hook") or ""),
+                    "transition_mode": str(nxt.get("transition_mode") or ""),
+                }
+                logger.warning(
+                    "OutlinerAgent._generate_outline_batch inferred missing ch=%s from neighbors", ch
+                )
+            outlines = [chapter_map[ch] for ch in range(start_chapter, end_chapter + 1)]
+
         return [
             _normalize_outline_item(outlines[idx], start_chapter + idx)
             for idx in range(num_chapters)

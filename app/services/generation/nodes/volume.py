@@ -183,7 +183,12 @@ def node_volume_replan(state: GenerationState) -> GenerationState:
     except Exception as _e:
         from app.services.generation.common import logger
         logger.error("node_volume_replan: next volume outline generation failed: %s", _e)
-    return {"volume_no": vol_no, "volume_plan": volume_plan}
+    from app.services.generation.common import load_outlines_from_db
+    current_vol_outlines = [
+        o for o in load_outlines_from_db(state["novel_id"], state.get("novel_version_id"))
+        if start <= int(o.get("chapter_num") or 0) <= end
+    ]
+    return {"volume_no": vol_no, "volume_plan": volume_plan, "full_outlines": current_vol_outlines}
 
 
 def _generate_next_volume_outlines_if_needed(

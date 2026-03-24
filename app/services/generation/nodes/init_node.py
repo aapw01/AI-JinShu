@@ -265,7 +265,10 @@ def node_outline(state: GenerationState) -> GenerationState:
         novel_version_id=state.get("novel_version_id"),
         replace_all=replace_all,
     )
-    full_outlines = load_outlines_from_db(state["novel_id"], state.get("novel_version_id"))
+    full_outlines = [
+        o for o in load_outlines_from_db(state["novel_id"], state.get("novel_version_id"))
+        if segment_start <= int(o.get("chapter_num") or 0) <= segment_start + first_vol_chapters - 1
+    ]
     plan = build_segment_plan(
         start_chapter=segment_start,
         end_chapter=segment_end,
