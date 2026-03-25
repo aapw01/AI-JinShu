@@ -37,6 +37,22 @@ def _default_version_id(novel_public_id: str) -> int:
 
 
 def test_dispatch_user_queue_ignores_uncommitted_generation_task(client, monkeypatch):
+    # Cancel all active/pending tasks left by other tests to prevent concurrency-limit
+    # or write-lock interference with this test's dispatch assertions
+    _db = SessionLocal()
+    try:
+        stale = _db.execute(
+            select(CreationTask).where(
+                CreationTask.user_uuid == "test-admin-user",
+                CreationTask.status.in_(["running", "dispatching", "queued"]),
+            )
+        ).scalars().all()
+        for _t in stale:
+            _t.status = "cancelled"
+        _db.commit()
+    finally:
+        _db.close()
+
     created = client.post("/api/novels", json={"title": "Dispatch Commit", "target_language": "zh"})
     assert created.status_code == 200
     novel_public_id = created.json()["id"]
