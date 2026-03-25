@@ -1,11 +1,21 @@
 """Celery application."""
 from celery import Celery
+from celery.signals import worker_process_init
 from app.core.config import get_settings
 from app.core.constants import CREATION_DISPATCH_POLL_SECONDS, CREATION_RECOVERY_POLL_SECONDS
 from app.core.logging_config import setup_logging
 
 settings = get_settings()
 setup_logging()
+
+
+@worker_process_init.connect
+def _configure_worker_db(**_kwargs) -> None:
+    """P1: Switch to NullPool after fork to prevent stale connection reuse."""
+    from app.core.database import use_null_pool
+    use_null_pool()
+
+
 app = Celery(
     "ai_jinshu",
     broker=settings.celery_broker_url,

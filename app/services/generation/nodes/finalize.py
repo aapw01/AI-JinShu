@@ -272,41 +272,63 @@ def node_finalize(state: GenerationState) -> GenerationState:
         content=final_content,
     )
 
+    # P0: LLM calls BEFORE opening DB session — keeps connection held time to DB I/O only
+    progress(state, "memory_update", chapter_num, chapter_progress(state, 0.85), "生成摘要 & 更新记忆...", {"current_phase": "memory_update", "total_chapters": state["num_chapters"]})
+    summary_text = generate_chapter_summary(final_content, state["outline"], chapter_num, state["target_language"], state["strategy"])
+    progression_memory_raw = state["progression_memory_extractor"].run(
+        chapter_num=chapter_num,
+        content=final_content,
+        outline=state.get("outline") or {},
+        language=state["target_language"],
+        provider=progression_provider,
+        model=progression_model,
+        inference=progression_inference,
+    )
+
+    # Foreshadow extraction (best-effort LLM call, before DB session)
+    _fe_provider, _fe_model = get_model_for_stage(state["strategy"], "fact_extractor")
+    _foreshadow_planted: list = []
+    _foreshadow_resolved: list = []
+    try:
+        foreshadow_result = state["fact_extractor"].run_foreshadow_extraction(
+            content=final_content,
+            chapter_num=chapter_num,
+            outline=state.get("outline") or {},
+            target_language=state["target_language"],
+            provider=_fe_provider,
+            model=_fe_model,
+        )
+        _foreshadow_planted = (foreshadow_result.get("planted") or [])[:5]
+        _foreshadow_resolved = (foreshadow_result.get("resolved") or [])[:5]
+    except Exception as exc:
+        logger.warning("foreshadow_extraction failed chapter=%s error=%s", chapter_num, exc)
+
+    progression_promotion = ProgressionPromotionService().decide(
+        chapter_num=chapter_num,
+        extraction=progression_memory_raw,
+        outline_contract=((state.get("context") or {}).get("outline_contract") if isinstance(state.get("context"), dict) else None)
+        or state.get("outline")
+        or {},
+        review_suggestions=state.get("review_suggestions") if isinstance(state.get("review_suggestions"), dict) else {},
+        review_gate=state.get("review_gate") if isinstance(state.get("review_gate"), dict) else {},
+    )
+    promoted_progression = progression_promotion.get("promoted_payload")
+    progression_memory = promoted_progression if isinstance(promoted_progression, dict) else {"advancement": {}, "transition": {}}
+    factual_score = float(state.get("factual_score", 0.0) or 0.0)
+    progression_score = float(state.get("progression_score", 0.0) or 0.0)
+    reviewer_aesthetic = float(state.get("aesthetic_review_score", 0.0) or 0.0)
+    quality_passed = _is_quality_passed(
+        review_score=float(state.get("score", 0.0) or 0.0),
+        factual_score=factual_score,
+        progression_score=progression_score,
+        language_score=language_score,
+        reviewer_aesthetic=reviewer_aesthetic,
+        aesthetic_score_val=aesthetic_score_val,
+    )
+
+    # DB session: connection held only during actual DB reads/writes
     db = SessionLocal()
     try:
-        progress(state, "memory_update", chapter_num, chapter_progress(state, 0.85), "生成摘要 & 更新记忆...", {"current_phase": "memory_update", "total_chapters": state["num_chapters"]})
-        summary_text = generate_chapter_summary(final_content, state["outline"], chapter_num, state["target_language"], state["strategy"])
-        progression_memory_raw = state["progression_memory_extractor"].run(
-            chapter_num=chapter_num,
-            content=final_content,
-            outline=state.get("outline") or {},
-            language=state["target_language"],
-            provider=progression_provider,
-            model=progression_model,
-            inference=progression_inference,
-        )
-        progression_promotion = ProgressionPromotionService().decide(
-            chapter_num=chapter_num,
-            extraction=progression_memory_raw,
-            outline_contract=((state.get("context") or {}).get("outline_contract") if isinstance(state.get("context"), dict) else None)
-            or state.get("outline")
-            or {},
-            review_suggestions=state.get("review_suggestions") if isinstance(state.get("review_suggestions"), dict) else {},
-            review_gate=state.get("review_gate") if isinstance(state.get("review_gate"), dict) else {},
-        )
-        promoted_progression = progression_promotion.get("promoted_payload")
-        progression_memory = promoted_progression if isinstance(promoted_progression, dict) else {"advancement": {}, "transition": {}}
-        factual_score = float(state.get("factual_score", 0.0) or 0.0)
-        progression_score = float(state.get("progression_score", 0.0) or 0.0)
-        reviewer_aesthetic = float(state.get("aesthetic_review_score", 0.0) or 0.0)
-        quality_passed = _is_quality_passed(
-            review_score=float(state.get("score", 0.0) or 0.0),
-            factual_score=factual_score,
-            progression_score=progression_score,
-            language_score=language_score,
-            reviewer_aesthetic=reviewer_aesthetic,
-            aesthetic_score_val=aesthetic_score_val,
-        )
         state["summary_mgr"].add_summary(
             state["novel_id"],
             state.get("novel_version_id"),
@@ -401,40 +423,28 @@ def node_finalize(state: GenerationState) -> GenerationState:
             progression_promotion=progression_promotion,
             db=db,
         )
-        # Foreshadow extraction (best-effort, never breaks flow)
-        try:
-            f_provider, f_model = get_model_for_stage(state["strategy"], "fact_extractor")
-            foreshadow_result = state["fact_extractor"].run_foreshadow_extraction(
-                content=final_content,
-                chapter_num=chapter_num,
-                outline=state.get("outline") or {},
-                target_language=state["target_language"],
-                provider=f_provider,
-                model=f_model,
+        # Write pre-extracted foreshadow results (LLM call already done before DB session)
+        for i, item in enumerate(_foreshadow_planted):
+            state["bible_store"].upsert_foreshadow(
+                novel_id=state["novel_id"],
+                novel_version_id=state.get("novel_version_id"),
+                planted_chapter=chapter_num,
+                title=str(item.get("text") or ""),
+                foreshadow_id=str(item.get("id") or f"F-{chapter_num}-{i + 1}"),
+                state="planted",
+                payload={"evidence": str(item.get("evidence") or "")},
+                db=db,
             )
-            for i, item in enumerate((foreshadow_result.get("planted") or [])[:5]):
-                state["bible_store"].upsert_foreshadow(
+        for item in _foreshadow_resolved:
+            fid = str(item.get("id") or "")
+            if fid:
+                state["bible_store"].resolve_foreshadow(
                     novel_id=state["novel_id"],
                     novel_version_id=state.get("novel_version_id"),
-                    planted_chapter=chapter_num,
-                    title=str(item.get("text") or ""),
-                    foreshadow_id=str(item.get("id") or f"F-{chapter_num}-{i + 1}"),
-                    state="planted",
-                    payload={"evidence": str(item.get("evidence") or "")},
+                    foreshadow_id=fid,
+                    chapter_resolved=chapter_num,
                     db=db,
                 )
-            for item in (foreshadow_result.get("resolved") or [])[:5]:
-                fid = str(item.get("id") or "")
-                if fid:
-                    state["bible_store"].resolve_foreshadow(
-                        novel_id=state["novel_id"],
-                        novel_version_id=state.get("novel_version_id"),
-                        foreshadow_id=fid,
-                        chapter_resolved=chapter_num,
-                        db=db,
-                    )
-        except Exception as exc:
-            logger.warning("foreshadow_extraction failed chapter=%s error=%s", chapter_num, exc)
         db.commit()
     except Exception:
         db.rollback()
@@ -523,16 +533,6 @@ def node_finalize(state: GenerationState) -> GenerationState:
             volume_no=int(state.get("volume_no") or 1),
             retry_resume_chapter=int(state.get("retry_resume_chapter") or chapter_num + 1),
         )
-    factual_score = float(state.get("factual_score", 0.0) or 0.0)
-    reviewer_aesthetic = float(state.get("aesthetic_review_score", 0.0) or 0.0)
-    quality_passed = _is_quality_passed(
-        review_score=float(state.get("score", 0.0) or 0.0),
-        factual_score=factual_score,
-        progression_score=float(state.get("progression_score", 0.0) or 0.0),
-        language_score=language_score,
-        reviewer_aesthetic=reviewer_aesthetic,
-        aesthetic_score_val=aesthetic_score_val,
-    )
     fail_reason = ""
     if not quality_passed:
         fail_reasons: list[str] = []
