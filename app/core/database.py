@@ -5,9 +5,13 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from app.core.config import get_settings
 
 settings = get_settings()
-engine_kwargs = {}
+engine_kwargs: dict = {}
 if settings.database_url.startswith("sqlite"):
     engine_kwargs["connect_args"] = {"check_same_thread": False}
+else:
+    # P2: larger pool for API server (default 5/10 is too small under concurrent generation)
+    engine_kwargs["pool_size"] = 10
+    engine_kwargs["max_overflow"] = 20
 engine = create_engine(settings.database_url, **engine_kwargs)
 
 if settings.database_url.startswith("sqlite"):
@@ -20,6 +24,17 @@ if settings.database_url.startswith("sqlite"):
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
+
+def use_null_pool() -> None:
+    """P1: Switch to NullPool — call from Celery worker_process_init to prevent fork-unsafe connection reuse."""
+    if settings.database_url.startswith("sqlite"):
+        return
+    global engine, SessionLocal
+    from sqlalchemy.pool import NullPool
+    engine.dispose()
+    engine = create_engine(settings.database_url, poolclass=NullPool)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
 def get_db():
