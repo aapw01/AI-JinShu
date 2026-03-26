@@ -43,6 +43,7 @@ no_new_delta: 没有新推进的证据（字符串）
 repeated_reveal: 重复揭示（字符串）
 repeated_relationship_turn: 重复关系转折（字符串）
 transition_conflict: 衔接冲突（字符串）
+foreshadow_check: 从 progression_context_json.thread_ledger 读取挂起伏笔列表；本章若完全未提及任何挂起超过3章的伏笔，输出最多2条超期伏笔的 foreshadow_id 和 planted_chapter；若本章有推进或回收则输出空列表
 must_fix / should_fix / risks: 同上格式
 
 ## aesthetic（审美）
@@ -58,6 +59,7 @@ must_fix / should_fix / risks: 同上格式
 - evidence 不能为空，不可写"无"。
 - 4个维度相互独立评分，不要互相干扰。
 - 若本章虽顺畅但无新推进，progression 必须指出。
+- foreshadow_check 仅在 thread_ledger 有数据时输出，没有 thread_ledger 时输出空列表。
 </calibration_rules>
 
 <draft_text>
@@ -65,5 +67,5 @@ must_fix / should_fix / risks: 同上格式
 </draft_text>
 
 <output_example>
-{"structure":{"score":0.85,"confidence":0.8,"feedback":"结构完整","positives":["冲突设置合理"],"must_fix":[],"should_fix":[],"risks":[]},"factual":{"score":0.9,"confidence":0.85,"feedback":"事实一致","contradictions":[],"must_fix":[],"should_fix":[],"risks":[]},"progression":{"score":0.82,"confidence":0.75,"feedback":"有效推进","must_fix":[],"should_fix":[],"risks":[],"duplicate_beats":[],"no_new_delta":[],"repeated_reveal":[],"repeated_relationship_turn":[],"transition_conflict":[]},"aesthetic":{"score":0.83,"confidence":0.78,"feedback":"节奏流畅","positives":["情绪张力好"],"must_fix":[],"should_fix":[],"risks":[]}}
+{"structure":{"score":0.85,"confidence":0.8,"feedback":"结构完整","positives":["冲突设置合理"],"must_fix":[],"should_fix":[],"risks":[]},"factual":{"score":0.9,"confidence":0.85,"feedback":"事实一致","contradictions":[],"must_fix":[],"should_fix":[],"risks":[]},"progression":{"score":0.82,"confidence":0.75,"feedback":"有效推进","must_fix":[],"should_fix":[],"risks":[],"duplicate_beats":[],"no_new_delta":[],"repeated_reveal":[],"repeated_relationship_turn":[],"transition_conflict":[],"foreshadow_check":[]},"aesthetic":{"score":0.83,"confidence":0.78,"feedback":"节奏流畅","positives":["情绪张力好"],"must_fix":[],"should_fix":[],"risks":[]}}
 </output_example>

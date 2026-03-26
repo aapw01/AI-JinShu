@@ -7,6 +7,7 @@ Layers (priority order):
 4. Volume Brief     - Compressed summary of current volume (chapters grouped by ~30)
 5. Knowledge Chunks - Vector store results filtered by chapter outline relevance
 """
+import re
 from typing import Optional
 
 from sqlalchemy import select
@@ -14,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
 from app.core.tokens import estimate_tokens
-from app.models.novel import ChapterVersion, NovelSpecification
+from app.models.novel import ChapterVersion, NovelMemory, NovelSpecification, StoryFact
 from app.services.memory.progression_state import (
     ProgressionMemoryManager,
     build_anti_repeat_constraints,
@@ -33,31 +34,140 @@ GLOBAL_BIBLE_MAX_CHARS = 3000
 THREAD_LEDGER_MAX_CHARS = 1200
 RECENT_WINDOW_MAX_CHARS = 2000
 VOLUME_BRIEF_MAX_CHARS = 1600
-STORY_BIBLE_MAX_CHARS = 2200
+STORY_BIBLE_MAX_CHARS = 3200
 
 
-def _build_story_bible_context(novel_id: int, novel_version_id: int, chapter_num: int, db: Session) -> str:
+def _build_story_bible_context(
+    novel_id: int,
+    novel_version_id: int,
+    chapter_num: int,
+    db: Session,
+    outline: dict | None = None,
+) -> str:
+    import logging as _lg
+    _log = _lg.getLogger(__name__)
+
     bible = StoryBibleStore()
     entities = bible.list_entities(novel_id, novel_version_id=novel_version_id, db=db)
     events = bible.list_recent_events(novel_id, chapter_num - 1, limit=20, novel_version_id=novel_version_id, db=db)
     if not entities and not events:
         return ""
-    char_entities = [e for e in entities if e.entity_type == "character"][:10]
+
+    # --- Fix 3: participant-aware sorting ---
+    # Extract character names mentioned in the current chapter outline
+    outline_chars: set[str] = set()
+    if outline:
+        for field in ("opening_character_positions", "conflict_axis", "outline"):
+            val = outline.get(field) or ""
+            if isinstance(val, list):
+                for item in val:
+                    n = (item.get("name") or item.get("character") or "") if isinstance(item, dict) else str(item)
+                    if n:
+                        outline_chars.add(str(n).strip())
+            elif val:
+                for m in re.findall(r"[\u4e00-\u9fff]{2,4}", str(val)):
+                    outline_chars.add(m)
+
+    all_char_entities = [e for e in entities if e.entity_type == "character"]
+    if outline_chars:
+        relevant = [e for e in all_char_entities if any(c in (e.name or "") for c in outline_chars)]
+        others = [e for e in all_char_entities if e not in relevant]
+        all_char_entities = relevant + others
+    char_entities = all_char_entities[:12]
     item_entities = [e for e in entities if e.entity_type == "item"][:8]
+
     lines: list[str] = []
     if char_entities:
         lines.append(
             "角色状态: "
-            + "; ".join(
-                f"{e.name}({e.status or 'unknown'})" for e in char_entities if e.name
-            )
+            + "; ".join(f"{e.name}({e.status or 'unknown'})" for e in char_entities if e.name)
         )
+
+    # --- Fix 1: character dynamic states from novel_memory ---
+    # These are extracted and stored after each chapter by update_character_states_from_content()
+    try:
+        mem_stmt = select(NovelMemory).where(
+            NovelMemory.novel_id == novel_id,
+            NovelMemory.memory_type == "character",
+        )
+        if novel_version_id is not None:
+            mem_stmt = mem_stmt.where(NovelMemory.novel_version_id == novel_version_id)
+        char_states = db.execute(mem_stmt).scalars().all()
+        if char_states:
+            char_states_sorted = sorted(
+                char_states,
+                key=lambda r: (0 if outline_chars and any(c in (r.key or "") for c in outline_chars) else 1),
+            )
+            state_lines: list[str] = []
+            for r in char_states_sorted[:8]:
+                content = r.content if isinstance(r.content, dict) else {}
+                name = str(r.key or content.get("name") or "").strip()
+                if not name:
+                    continue
+                parts: list[str] = []
+                realm = content.get("realm") or content.get("power_level") or content.get("cultivation")
+                if realm:
+                    parts.append(str(realm)[:30])
+                injuries = content.get("injuries") or content.get("injury")
+                if injuries:
+                    inj = ", ".join(str(x) for x in injuries[:2]) if isinstance(injuries, list) else str(injuries)
+                    parts.append(f"伤:{inj[:30]}")
+                mood = content.get("emotional_state") or content.get("mood") or content.get("emotion")
+                if mood:
+                    parts.append(str(mood)[:20])
+                loc = content.get("location")
+                if loc:
+                    parts.append(f"位:{str(loc)[:20]}")
+                if parts:
+                    ch = int(content.get("chapter_num") or 0)
+                    suffix = f"[至ch{ch}]" if ch else ""
+                    state_lines.append(f"{name}{suffix}: {', '.join(parts)}")
+            if state_lines:
+                lines.append("角色动态: " + "; ".join(state_lines))
+    except Exception as _exc:
+        _log.warning("story_bible_context: char_state read failed: %s", _exc)
+
+    # --- Fix 2: StoryFact records for relevant characters ---
+    # These are extracted by FactExtractorAgent and stored in story_facts after each chapter
+    try:
+        relevant_ids = {e.id for e in char_entities[:8] if e.id}
+        if relevant_ids:
+            fact_stmt = (
+                select(StoryFact)
+                .where(
+                    StoryFact.novel_id == novel_id,
+                    StoryFact.entity_id.in_(relevant_ids),
+                    StoryFact.chapter_from < chapter_num,
+                )
+                .order_by(StoryFact.chapter_from.desc())
+                .limit(20)
+            )
+            if novel_version_id is not None:
+                fact_stmt = fact_stmt.where(StoryFact.novel_version_id == novel_version_id)
+            facts = db.execute(fact_stmt).scalars().all()
+            entity_id_to_name = {e.id: e.name for e in char_entities}
+            fact_by_entity: dict[int, list[str]] = {}
+            for f in facts:
+                name = entity_id_to_name.get(f.entity_id, "")
+                if not name:
+                    continue
+                v = f.value_json if isinstance(f.value_json, dict) else {}
+                desc = str(v.get("description") or v.get("value") or v.get("summary") or "").strip()
+                if desc:
+                    fact_by_entity.setdefault(f.entity_id, []).append(f"{f.fact_type}:{desc[:60]}")
+            fact_lines: list[str] = []
+            for eid, fact_strs in list(fact_by_entity.items())[:6]:
+                name = entity_id_to_name.get(eid, "")
+                fact_lines.append(f"{name}: {'; '.join(fact_strs[:3])}")
+            if fact_lines:
+                lines.append("角色事实: " + " | ".join(fact_lines))
+    except Exception as _exc:
+        _log.warning("story_bible_context: story_fact read failed: %s", _exc)
+
     if item_entities:
         lines.append(
             "关键道具: "
-            + "; ".join(
-                f"{e.name}({e.summary or '已出现'})" for e in item_entities if e.name
-            )
+            + "; ".join(f"{e.name}({e.summary or '已出现'})" for e in item_entities if e.name)
         )
     if events:
         lines.append(
@@ -168,7 +278,7 @@ def build_chapter_context(
         global_bible = _compress_global_bible(prewrite)
         thread_ledger = get_thread_ledger(novel_id, chapter_num, prewrite, db=db)
         thread_ledger_str = _format_thread_ledger(thread_ledger)
-        story_bible_context = _build_story_bible_context(novel_id, novel_version_id, chapter_num, db)
+        story_bible_context = _build_story_bible_context(novel_id, novel_version_id, chapter_num, db, outline=outline)
         recent_advancement_window = progression_mgr.list_recent_advancements(
             novel_id,
             chapter_num,
