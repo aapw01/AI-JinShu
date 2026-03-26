@@ -4,7 +4,7 @@ import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { motion } from "framer-motion";
-import { ArrowLeft, BarChart3, ChevronDown, ChevronRight, CircleAlert, Clapperboard, Copy, Download, Wand2, X } from "lucide-react";
+import { ArrowLeft, BarChart3, ChevronDown, ChevronRight, CircleAlert, Copy, Download, Wand2, X } from "lucide-react";
 import {
   api,
   Chapter,
@@ -665,18 +665,6 @@ export default function NovelPage() {
                 进度
               </Button>
             </Link>
-            {displayNovelStatus === "completed" ? (
-              <Link href={`/storyboards/create?novel_id=${encodeURIComponent(id)}`}>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  className="h-9 px-3 shadow-none border-[#E5DED7] bg-white hover:bg-[#F8F5F1]"
-                >
-                  <Clapperboard className="w-4 h-4 mr-1.5" />
-                  生成导演分镜脚本
-                </Button>
-              </Link>
-            ) : null}
           </div>
         )}
       />
