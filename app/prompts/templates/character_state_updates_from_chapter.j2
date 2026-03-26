@@ -3,5 +3,5 @@ Based on this chapter content, report any STATE CHANGES for these characters: {{
 Chapter {{ chapter_num }} content (truncated):
 {{ content }}
 
-Output JSON: {"updates": [{"name": "角色名", "status": "alive/injured/dead/unknown", "location": "当前位置", "new_items": [], "lost_items": [], "injuries": [], "can_use_both_hands": true, "limitations": [], "forbidden_actions": [], "relationship_changes": [], "key_action": "本章关键行为"}]}
+Output JSON: {"updates": [{"name": "角色名", "status": "alive/injured/dead/unknown", "location": "当前位置", "realm": "修为/境界/等级（若本章有变化则填写，否则留空）", "emotional_state": "当前情绪状态（如：愤怒/悲伤/平静/决然，否则留空）", "new_items": [], "lost_items": [], "injuries": [], "can_use_both_hands": true, "limitations": [], "forbidden_actions": [], "relationship_changes": [], "key_action": "本章关键行为"}]}
 Only include characters from the provided list who actually appeared or were directly affected. If none of them changed state, return {"updates": []}. Output pure JSON.
