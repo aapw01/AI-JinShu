@@ -26,6 +26,13 @@ def test_character_state_schema_has_realm_and_emotion():
     assert update.emotional_state == "愤怒"
 
 
+def test_character_state_schema_defaults_to_empty_string():
+    """Schema defaults must set realm and emotional_state to empty string when omitted."""
+    update = CharacterStateUpdateSchema(name="林舟")
+    assert update.realm == ""
+    assert update.emotional_state == ""
+
+
 def test_character_state_updates_schema_roundtrip():
     payload = {"updates": [{"name": "林舟", "realm": "化神期", "emotional_state": "平静"}]}
     schema = CharacterStateUpdatesSchema(**payload)
