@@ -96,7 +96,6 @@ export function AppHeader() {
           <nav className="hidden md:flex items-center gap-6 text-[15px]">
             <NavItem href="/" active={pathname === "/"}>工作台</NavItem>
             <NavItem href="/novels" active={pathname.startsWith("/novels")}>我的作品</NavItem>
-            <NavItem href="/storyboards" active={pathname.startsWith("/storyboards")}>导演分镜</NavItem>
             {user?.role === "admin" ? (
               <>
                 <NavItem href="/admin/users" active={pathname.startsWith("/admin/users")}>用户管理</NavItem>
