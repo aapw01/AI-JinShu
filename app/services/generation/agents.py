@@ -102,6 +102,7 @@ def _build_reviewer_context_json(context: dict[str, Any], *, reviewer_kind: str)
             "book_progression_state",
             "anti_repeat_constraints",
             "transition_constraints",
+            "thread_ledger",
         ]
         max_chars = 180
         max_items = 6
@@ -588,6 +589,8 @@ class CharacterStateUpdateSchema(BaseModel):
     forbidden_actions: list[str] = Field(default_factory=list)
     relationship_changes: list[str] = Field(default_factory=list)
     key_action: str = ""
+    realm: str = ""
+    emotional_state: str = ""
 
 
 class CharacterStateUpdatesSchema(BaseModel):
