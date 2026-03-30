@@ -29,7 +29,7 @@ migrate-safe:
 	@PGOPTIONS='-c lock_timeout=5s -c statement_timeout=120s' uv run alembic upgrade head
 
 dev-api:
-	@uv run uvicorn app.main:app --reload
+	@uv run uvicorn app.main:app --reload --host 127.0.0.1
 
 dev-worker:
 	@uv run celery -A app.workers.celery_app worker -l info
@@ -38,7 +38,7 @@ dev-beat:
 	@uv run celery -A app.workers.celery_app beat -l info
 
 dev-web:
-	@cd web && npm run dev
+	@cd web && npm run dev -- --hostname 127.0.0.1
 
 dev:
 	@set -euo pipefail; \
@@ -72,10 +72,10 @@ dev:
 		exit $$code; \
 	}; \
 	trap cleanup INT TERM EXIT; \
-	start_pgroup uv run uvicorn app.main:app --reload; api_pid=$$last_bg_pid; \
+	start_pgroup uv run uvicorn app.main:app --reload --host 127.0.0.1; api_pid=$$last_bg_pid; \
 	start_pgroup uv run celery -A app.workers.celery_app worker -l info; worker_pid=$$last_bg_pid; \
 	start_pgroup uv run celery -A app.workers.celery_app beat -l info; beat_pid=$$last_bg_pid; \
-	start_pgroup bash -lc 'cd web && npm run dev'; web_pid=$$last_bg_pid; \
+	start_pgroup bash -lc 'cd web && npm run dev -- --hostname 127.0.0.1'; web_pid=$$last_bg_pid; \
 	wait
 
 stop:
