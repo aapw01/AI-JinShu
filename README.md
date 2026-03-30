@@ -1,110 +1,95 @@
-# AI-JinShu - AI Novel Generation Platform
+# AI-JinShu: AI Novel Generation Platform
 
-Monorepo for AI-powered novel generation with LangGraph pipeline.
+AI-JinShu is an **AI novel generation** platform for **long-form novel** workflows, built with **LangGraph**, **FastAPI**, **Next.js**, **Celery**, and **Docker**. It focuses on long-running chapter generation, structured review, retry/resume orchestration, and deployable monorepo workflows.
 
-## Structure
+## What It Does
 
-```
-AI-JinShu/
-├── app/              # FastAPI Python backend
-├── web/              # Next.js TypeScript frontend
-├── alembic/          # Database migrations
-├── presets/          # Strategy/config presets
-├── tests/            # Backend tests
-├── docker-compose.yml
-└── .env.example
-```
+- 长篇小说分卷生成与章节级写作
+- LangGraph 驱动的 `init -> prewrite -> outline -> writer -> review -> finalize` 主链
+- 多路结构化审校、质量报告与事实抽取
+- Celery 任务调度、暂停、恢复与重试
+- 单镜像 Docker 打包，部署时由单应用容器承载前后端与后台任务
 
 ## Quick Start
 
-1. Install `uv` (Python env/deps manager): <https://docs.astral.sh/uv/>
-2. Copy `.env.example` to `.env` and configure API keys
-3. One-command startup (all services): `make dev`
-4. Or use just: `just dev`
+### Local Development
 
-## Dev Commands
+```bash
+cp .env.example .env
+cp web/.env.example web/.env
+make dev
+```
 
-- `make install` / `just install`: install Python deps via `uv` and frontend deps via `npm`
-- `make dev` / `just dev`: start postgres+redis, run migrations, and launch API+worker+web
-- `make stop` / `just stop`: stop docker infra
-- `make test` / `just test`: run backend tests
-- `make lint` / `just lint`: compile-check backend Python modules
+- Web: `http://127.0.0.1:3000`
+- API: `http://127.0.0.1:8000`
+- Health: `http://127.0.0.1:8000/health`
 
-## Auth Config Notes
+### Quick Deploy
 
-- `AUTH_REQUIRE_EMAIL_VERIFICATION=false`（默认）：注册后可直接登录。
-- `AUTH_REQUIRE_EMAIL_VERIFICATION=true`：注册后需邮件激活；必须同时配置 `SENDGRID_API_KEY` 和 `SENDGRID_FROM_EMAIL`。
+```bash
+cp .env.deploy.example .env.deploy
+docker compose -f docker-compose.deploy.yml --env-file .env.deploy up -d
+```
 
-## Quota Config Notes
+如果先本地构建镜像：
 
-- 优先级规则：**系统设置页面（DB） > 环境变量（.env）**；未在页面配置的项自动回退到环境变量。
-- `QUOTA_ENFORCE_CONCURRENCY_LIMIT=false`（默认）：不限制并发创建任务。
-- `QUOTA_ENFORCE_CONCURRENCY_LIMIT=true`：按套餐的 `max_concurrent_tasks` 启用并发上限。
-- `CREATION_SCHEDULER_ENABLED=true`：启用统一创作任务调度（Generation + Rewrite + Storyboard）。
-- `CREATION_DEFAULT_MAX_CONCURRENT_TASKS=1`：每用户默认并发运行任务数。
-- `CREATION_DISPATCH_POLL_SECONDS=2`：调度轮询间隔（秒）。
-- `CREATION_MAX_DISPATCH_BATCH=5`：单次调度最多派发任务数。
-- `QUOTA_FREE_MONTHLY_CHAPTER_LIMIT`：普通用户月度章节限额（默认 `1000000`）。
-- `QUOTA_FREE_MONTHLY_TOKEN_LIMIT`：普通用户月度 token 限额（默认 `10000000000`）。
-- `QUOTA_ADMIN_MONTHLY_CHAPTER_LIMIT`：管理员月度章节限额（默认 `10000000`）。
-- `QUOTA_ADMIN_MONTHLY_TOKEN_LIMIT`：管理员月度 token 限额（默认 `100000000000`）。
-- `SYSTEM_SETTINGS_MASTER_KEY`：可选；配置后管理员在系统设置页保存的 API Key 将加密存储（未配置则明文存储并有风险提示）。
+```bash
+docker build -t ai-jinshu .
+APP_IMAGE=ai-jinshu docker compose -f docker-compose.deploy.yml --env-file .env.deploy up -d
+```
 
-## Model Config Notes
+## Architecture
 
-- 模型配置只保留两个对象：`primary_chat`（主聊天模型）和 `embedding`（向量模型）。
-- 环境变量只接受：`LLM_PROVIDER / LLM_MODEL / LLM_BASE_URL / LLM_API_KEY / EMBEDDING_ENABLED / EMBEDDING_MODEL / EMBEDDING_REUSE_PRIMARY_CONNECTION / EMBEDDING_BASE_URL / EMBEDDING_API_KEY`。
-- 页面配置优先于环境变量；采用对象级覆盖，不再按字段拼装。
-- 自定义 `LLM_BASE_URL` 或 `EMBEDDING_BASE_URL` 时，系统默认按 OpenAI-compatible 协议处理。
-- 不支持 fallback/备用模型链；主模型失败时直接报错。
-- `EMBEDDING_REUSE_PRIMARY_CONNECTION=true` 时，仅当主模型为 OpenAI-compatible 连接时可用。
+| Layer | Stack | Purpose |
+|---|---|---|
+| API | FastAPI | REST API, auth, admin settings, generation control |
+| Worker | Celery + Redis | generation / rewrite / storyboard background jobs |
+| Data | PostgreSQL + pgvector | novels, versions, checkpoints, memory, embeddings |
+| Web | Next.js | dashboard, novel editor, task views |
+| Orchestration | LangGraph | chapter pipeline, review gates, resume/retry flow |
 
-## LLM Output Contract Notes
+## LangGraph Flow
 
-- 章节生成/重写正文链路固定为严格结构化协议（JSON `chapter_body`），不再支持 legacy/hybrid 兼容分支。
-- 结构化调用失败会在日志中记录 `stage/prompt_template/prompt_version/prompt_hash`，便于聚合诊断。
+- `init`: 初始化任务、恢复 runtime state、加载版本上下文
+- `prewrite`: 生成宪法、规格、剧情蓝图等预写作资产
+- `outline`: 生成或补齐分卷章节大纲
+- `writer`: 根据大纲和上下文生成正文
+- `review`: 做结构、事实、推进、美学多路审校
+- `finalize`: 定稿、长度收口、facts/progression 抽取
+- `closure / volume / final_review`: 处理分卷衔接、尾部重写与整书终审
 
-## API
+特点：
+- 支持 retry / resume
+- 支持长篇分卷
+- 支持质量门控与阶段化恢复
 
-- Health: `GET /health`
-- Novels CRUD: `GET/POST /api/novels`, `GET/PUT/DELETE /api/novels/{id}`
-- Generation: `POST /api/novels/{id}/generate`, `GET /api/novels/{id}/generation/status`
-- Longform reports: `GET /api/novels/{id}/quality-reports`, `GET /api/novels/{id}/checkpoints`, `GET /api/novels/{id}/volumes/summary?version_id=...`, `GET /api/novels/{id}/volumes/{volume_no}/gate-report`
-- Feedback loop: `GET/POST /api/novels/{id}/feedback`
-- Observability: `GET /api/novels/{id}/observability?version_id=...`
-- Chapters: `GET /api/novels/{id}/chapters?version_id=...`, `GET /api/novels/{id}/chapters/{num}?version_id=...`
-- Export: `GET /api/novels/{id}/export?format=txt|md|zip&version_id=...`
-- Presets: `GET /api/presets`
-- Auth: `POST /api/auth/register|login|logout`, `GET /api/auth/me`, `POST /api/auth/verify-email/*`, `POST /api/auth/password/*`
-- Generation control: `POST /api/novels/{id}/generation/pause|resume|cancel`, `GET /api/novels/{id}/generation/tasks`
-- Account quota/billing: `GET /api/account/quota`, `GET /api/account/ledger`
-- Notifications: `GET /api/account/notifications`
-- Rewrite diff: `GET /api/novels/{id}/versions/{version_id}/diff?compare_to={base_version_id}`
-- Admin observability: `GET /api/admin/observability/summary`
-- Admin system settings: `GET/PUT /api/admin/settings/models`, `GET/PUT /api/admin/settings/runtime`, `GET /api/admin/settings/effective`
-- Storyboard project: `GET/POST /api/storyboards`
-- Storyboard preflight/run: `POST /api/storyboards/{id}/preflight`, `POST /api/storyboards/{id}/runs`, `GET /api/storyboards/{id}/runs`, `GET /api/storyboards/{id}/runs/{run_id}`, `GET /api/storyboards/{id}/runs/{run_id}/events`, `POST /api/storyboards/{id}/runs/{run_id}/actions`
-- Storyboard compatibility status: `GET /api/storyboards/{id}/status`, `POST /api/storyboards/{id}/generate|pause|resume|cancel|retry`
-- Storyboard styles: `GET /api/storyboards/style-presets`, `POST /api/storyboards/style-recommendations`
-- Character profiles: `GET /api/novels/{id}/character-profiles`
-- Storyboard workbench: `GET /api/storyboards/{id}/versions`, `POST /api/storyboards/{id}/versions/{version_id}/activate|finalize|optimize`, `GET /api/storyboards/{id}/versions/{version_id}/shots`, `PUT /api/storyboards/{id}/versions/{version_id}/shots/{shot_id}`, `GET /api/storyboards/{id}/versions/{version_id}/character-cards`, `PUT /api/storyboards/{id}/versions/{version_id}/character-cards/{card_id}`
-- Storyboard export v2: `POST /api/storyboards/{id}/versions/{version_id}/exports`, `GET /api/storyboards/{id}/exports/{export_id}`, `GET /api/storyboards/{id}/exports/{export_id}/download`
+## Environment
+
+- 开发环境：见 [`.env.example`](.env.example)
+- Web 本地变量：见 [`web/.env.example`](web/.env.example)
+- 部署环境：见 [`.env.deploy.example`](.env.deploy.example)
+
+## Deployment
+
+- 单镜像 Dockerfile：[`Dockerfile`](Dockerfile)
+- 生产 compose：[`docker-compose.deploy.yml`](docker-compose.deploy.yml)
+- 详细部署说明：[`docs/deployment.md`](docs/deployment.md)
+- GitHub Actions 会构建并发布多架构 GHCR 镜像
+- 部署形态为：`postgres`、`redis` 两个基础容器 + 一个 `app` 应用容器（内含 `api/web/worker/beat`）
+
+## Common Commands
+
+| Command | Purpose |
+|---|---|
+| `make install` | 安装后端与前端依赖 |
+| `make dev` | 启动 postgres、redis、api、worker、beat、web |
+| `make stop` | 停止本地基础设施 |
+| `make test` | 运行后端测试 |
+| `make lint` | 编译检查后端 Python 模块 |
 
 ## Docs
 
-- Longform technical plan: `docs/longform-novel-technical-plan.md`
-- API details: `docs/api.md`
-- Database notes: `docs/database.md`
-- Task scheduling system: `docs/task-scheduling.md`
-
-## Logging & Trace
-
-- Structured JSON logs are enabled by default.
-- Every API response includes `X-Trace-Id`.
-- Log envs: `LOG_FORMAT`, `LOG_LEVEL`, `LOG_SLOW_THRESHOLD_MS`, `LOG_NODE_SLOW_THRESHOLD_MS`, `LOG_REDACTION_LEVEL`.
-
-## Token Usage
-
-- 任务统计返回 `token_usage_input/token_usage_output/estimated_cost`。
-- 统计口径为“全任务全阶段累计”：优先使用模型返回的真实 `usage`，缺失时回退估算。
-- 该口径对 generation/rewrite/storyboard 一致生效，便于前端展示与后续计费对账。
+- [API 文档](docs/api.md)
+- [任务调度说明](docs/task-scheduling.md)
+- [数据库说明](docs/database.md)
+- [部署说明](docs/deployment.md)

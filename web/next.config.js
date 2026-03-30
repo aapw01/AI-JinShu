@@ -1,5 +1,5 @@
 /** @type {import('next').NextConfig} */
-const apiTarget = (process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000").replace(/\/+$/, "");
+const apiTarget = (process.env.API_TARGET_URL || process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000").replace(/\/+$/, "");
 
 const nextConfig = {
   async rewrites() {
