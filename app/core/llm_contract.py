@@ -65,6 +65,7 @@ def invoke_chapter_body_structured(
     stage: str,
     provider: str | None = None,
     model: str | None = None,
+    inference: dict[str, Any] | None = None,
     chapter_num: int | None = None,
     retries: int | None = None,
     min_chars: int | None = None,
@@ -89,7 +90,7 @@ def invoke_chapter_body_structured(
         for method in methods:
             for attempt in range(schema_retries + 1):
                 try:
-                    llm = get_llm(candidate_provider, candidate_model)
+                    llm = get_llm(candidate_provider, candidate_model, inference=inference)
                     kwargs: dict[str, Any] = {
                         "method": method,
                         "include_raw": True,

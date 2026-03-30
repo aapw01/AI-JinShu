@@ -16,6 +16,7 @@ from app.models.novel import (
     GenerationCheckpoint,
     QualityReport,
     NovelMemory,
+    StoryRelation,
 )
 
 
@@ -446,6 +447,164 @@ class StoryBibleStore:
         finally:
             if should_close:
                 db.close()
+
+    def upsert_relation(
+        self,
+        novel_id: int,
+        source: str,
+        target: str,
+        relation_type: str = "",
+        description: str = "",
+        sentiment: str = "neutral",
+        chapter_num: int = 0,
+        novel_version_id: int | None = None,
+        db: Optional[Session] = None,
+    ) -> StoryRelation:
+        should_close = db is None
+        db = db or SessionLocal()
+        try:
+            stmt = select(StoryRelation).where(
+                StoryRelation.novel_id == novel_id,
+            )
+            if novel_version_id is not None:
+                stmt = stmt.where(StoryRelation.novel_version_id == novel_version_id)
+            else:
+                stmt = stmt.where(StoryRelation.novel_version_id.is_(None))
+            stmt = stmt.where(
+                StoryRelation.source == source,
+                StoryRelation.target == target,
+            )
+            row = db.execute(stmt).scalar_one_or_none()
+            if row:
+                row.relation_type = relation_type
+                row.description = description
+                row.sentiment = sentiment
+                row.chapter_num = chapter_num
+            else:
+                try:
+                    with db.begin_nested():
+                        row = StoryRelation(
+                            novel_id=novel_id,
+                            novel_version_id=novel_version_id,
+                            source=source,
+                            target=target,
+                            relation_type=relation_type,
+                            description=description,
+                            sentiment=sentiment,
+                            chapter_num=chapter_num,
+                        )
+                        db.add(row)
+                        db.flush()
+                except IntegrityError:
+                    row = db.execute(stmt).scalar_one_or_none()
+                    if row is None:
+                        raise
+                    row.relation_type = relation_type
+                    row.description = description
+                    row.sentiment = sentiment
+                    row.chapter_num = chapter_num
+            if should_close:
+                db.commit()
+            else:
+                db.flush()
+            db.refresh(row)
+            return row
+        except Exception:
+            if should_close:
+                db.rollback()
+            raise
+        finally:
+            if should_close:
+                db.close()
+
+    def list_relations(
+        self,
+        novel_id: int,
+        limit: int = 50,
+        novel_version_id: int | None = None,
+        db: Optional[Session] = None,
+    ) -> list[StoryRelation]:
+        should_close = db is None
+        db = db or SessionLocal()
+        try:
+            stmt = (
+                select(StoryRelation)
+                .where(StoryRelation.novel_id == novel_id)
+                .order_by(StoryRelation.chapter_num.desc(), StoryRelation.id.desc())
+                .limit(max(1, limit))
+            )
+            if novel_version_id is not None:
+                stmt = stmt.where(StoryRelation.novel_version_id == novel_version_id)
+            else:
+                stmt = stmt.where(StoryRelation.novel_version_id.is_(None))
+            return db.execute(stmt).scalars().all()
+        finally:
+            if should_close:
+                db.close()
+
+    def suggest_foreshadows(
+        self,
+        chapter_text: str,
+        novel_id: int,
+        chapter_num: int,
+        db: Optional[Session] = None,
+    ) -> list[str]:
+        import re
+        import logging as _logging
+        _log = _logging.getLogger("app.services.memory")
+        try:
+            patterns = [
+                r"(将要|誓要|决心|打算|一定会|终将|迟早)[^，。！？\n]{2,20}",
+                r"(获得了|炼制了|取出了|祭出了|使出了)[^，。！？\n]{2,15}(法宝|秘宝|功法|神通|宝物|丹药)",
+                r"(这[一件事个秘密段往事][^。！？\n]{0,30})",
+            ]
+            candidates: list[str] = []
+            for pat in patterns:
+                for m in re.finditer(pat, chapter_text):
+                    candidates.append(m.group(0))
+            if not candidates:
+                return []
+            should_close = db is None
+            db = db or SessionLocal()
+            try:
+                existing_stmt = select(StoryForeshadow).where(
+                    StoryForeshadow.novel_id == novel_id,
+                    StoryForeshadow.planted_chapter == chapter_num,
+                )
+                existing_rows = db.execute(existing_stmt).scalars().all()
+                existing_titles = {r.title or "" for r in existing_rows}
+                inserted: list[str] = []
+                for idx, candidate in enumerate(candidates):
+                    if candidate in existing_titles:
+                        continue
+                    fid = f"H-{chapter_num}-{idx + 1}"
+                    self.upsert_foreshadow(
+                        novel_id=novel_id,
+                        foreshadow_id=fid,
+                        planted_chapter=chapter_num,
+                        title=candidate,
+                        state="planted",
+                        db=db,
+                    )
+                    inserted.append(candidate)
+                if should_close:
+                    db.commit()
+                else:
+                    db.flush()
+                return inserted
+            except Exception as exc:
+                if should_close:
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                raise exc
+            finally:
+                if should_close:
+                    db.close()
+        except Exception as exc:
+            _log.warning("suggest_foreshadows failed novel_id=%s chapter=%s error=%s", novel_id, chapter_num, exc)
+            return []
 
     def list_recent_events(
         self,

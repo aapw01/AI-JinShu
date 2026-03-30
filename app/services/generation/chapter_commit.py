@@ -6,39 +6,31 @@ inside _node_finalize / _write_longform_artifacts.
 """
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
 from sqlalchemy.orm import Session
 
 from app.services.generation.common import REVIEW_SCORE_THRESHOLD
+from app.services.generation.events import EventBus, GenerationEvent
 from app.services.generation.heuristics import extract_item_mentions, extract_timeline_markers
 from app.services.generation.progress import volume_no_for_chapter
 from app.services.generation.state import GenerationState
 from app.services.memory.progression_state import ProgressionMemoryManager
 
+logger = logging.getLogger(__name__)
 
-def write_longform_artifacts(
-    state: GenerationState,
-    chapter_num: int,
-    summary_text: str,
-    final_content: str,
-    language_score: float,
-    aesthetic_score_val: float,
-    revision_count: int,
-    extracted_facts: dict[str, Any] | None = None,
-    progression_memory: dict[str, Any] | None = None,
-    progression_promotion: dict[str, Any] | None = None,
-    db: Session | None = None,
-) -> None:
-    """Persist all post-chapter artifacts to bible/quality/checkpoint stores."""
-    bible = state["bible_store"]
-    quality = state["quality_store"]
-    checkpoint = state["checkpoint_store"]
-    progression = state.get("progression_mgr") or ProgressionMemoryManager()
 
-    outline = state.get("outline") or {}
-    volume_no = int(state.get("volume_no") or volume_no_for_chapter(state, chapter_num))
+def _chapter_finalized_story_bible_handler(event: GenerationEvent) -> None:
+    payload = event.payload
+    state: GenerationState = payload["state"]
+    bible = payload["bible"]
+    db = payload.get("db")
+    chapter_num = int(payload["chapter_num"])
+    summary_text = str(payload.get("summary_text") or "")
+    final_content = str(payload.get("final_content") or "")
+    outline = payload.get("outline") or {}
 
     if chapter_num == state.get("start_chapter", 1):
         chars = ((state.get("prewrite") or {}).get("specification") or {}).get("characters") or []
@@ -67,7 +59,7 @@ def write_longform_artifacts(
         payload={
             "summary": summary_text[:600],
             "review_score": state.get("score"),
-            "language_score": language_score,
+            "language_score": payload.get("language_score"),
         },
         db=db,
     )
@@ -106,7 +98,8 @@ def write_longform_artifacts(
                 db=db,
             )
 
-    extracted = extracted_facts or {}
+    extracted = payload.get("extracted_facts") or {}
+    extracted_entities: dict[str, Any] = {}
     for ev in (extracted.get("events") or [])[:20]:
         if not isinstance(ev, dict):
             continue
@@ -126,7 +119,6 @@ def write_longform_artifacts(
             db=db,
         )
 
-    extracted_entities: dict[str, Any] = {}
     for ent in (extracted.get("entities") or [])[:30]:
         if not isinstance(ent, dict) or not ent.get("name"):
             continue
@@ -167,61 +159,6 @@ def write_longform_artifacts(
             fact_type=str(fact.get("fact_type") or "attribute")[:100],
             value_json={"value": fact.get("value"), "chapter_num": chapter_num},
             chapter_from=chapter_num,
-            db=db,
-        )
-
-    progression_payload = progression_memory if isinstance(progression_memory, dict) else {}
-    promotion_payload = progression_promotion if isinstance(progression_promotion, dict) else {}
-    promotion_score = float(promotion_payload.get("promotion_score") or 0.0)
-    advancement = progression_payload.get("advancement") if isinstance(progression_payload.get("advancement"), dict) else {}
-    transition = progression_payload.get("transition") if isinstance(progression_payload.get("transition"), dict) else {}
-    if advancement:
-        progression.save_chapter_advancement(
-            state["novel_id"],
-            chapter_num,
-            advancement,
-            novel_version_id=state.get("novel_version_id"),
-            volume_no=volume_no,
-            promotion_score=promotion_score,
-            db=db,
-        )
-        volume_arc_state = progression.merge_volume_arc_state(
-            state["novel_id"],
-            volume_no,
-            chapter_num,
-            advancement,
-            novel_version_id=state.get("novel_version_id"),
-            promotion_score=promotion_score,
-            db=db,
-        )
-        book_progression_state = progression.merge_book_progression_state(
-            state["novel_id"],
-            chapter_num,
-            advancement,
-            novel_version_id=state.get("novel_version_id"),
-            promotion_score=promotion_score,
-            db=db,
-        )
-    else:
-        volume_arc_state = progression.get_volume_arc_state(
-            state["novel_id"],
-            volume_no,
-            novel_version_id=state.get("novel_version_id"),
-            db=db,
-        ) or {}
-        book_progression_state = progression.get_book_progression_state(
-            state["novel_id"],
-            novel_version_id=state.get("novel_version_id"),
-            db=db,
-        ) or {}
-    if transition:
-        progression.save_chapter_transition(
-            state["novel_id"],
-            chapter_num,
-            transition,
-            novel_version_id=state.get("novel_version_id"),
-            volume_no=volume_no,
-            promotion_score=promotion_score,
             db=db,
         )
 
@@ -281,6 +218,78 @@ def write_longform_artifacts(
                 db=db,
             )
 
+
+def _chapter_finalized_progression_handler(event: GenerationEvent) -> None:
+    payload = event.payload
+    state: GenerationState = payload["state"]
+    progression = payload["progression"]
+    db = payload.get("db")
+    chapter_num = int(payload["chapter_num"])
+    volume_no = int(payload["volume_no"])
+    promotion_score = float(payload.get("promotion_score") or 0.0)
+    progression_payload = payload.get("progression_payload") or {}
+    advancement = progression_payload.get("advancement") if isinstance(progression_payload.get("advancement"), dict) else {}
+    transition = progression_payload.get("transition") if isinstance(progression_payload.get("transition"), dict) else {}
+    if advancement:
+        progression.save_chapter_advancement(
+            state["novel_id"],
+            chapter_num,
+            advancement,
+            novel_version_id=state.get("novel_version_id"),
+            volume_no=volume_no,
+            promotion_score=promotion_score,
+            db=db,
+        )
+        payload["volume_arc_state"] = progression.merge_volume_arc_state(
+            state["novel_id"],
+            volume_no,
+            chapter_num,
+            advancement,
+            novel_version_id=state.get("novel_version_id"),
+            promotion_score=promotion_score,
+            db=db,
+        )
+        payload["book_progression_state"] = progression.merge_book_progression_state(
+            state["novel_id"],
+            chapter_num,
+            advancement,
+            novel_version_id=state.get("novel_version_id"),
+            promotion_score=promotion_score,
+            db=db,
+        )
+    else:
+        payload["volume_arc_state"] = progression.get_volume_arc_state(
+            state["novel_id"],
+            volume_no,
+            novel_version_id=state.get("novel_version_id"),
+            db=db,
+        ) or {}
+        payload["book_progression_state"] = progression.get_book_progression_state(
+            state["novel_id"],
+            novel_version_id=state.get("novel_version_id"),
+            db=db,
+        ) or {}
+    if transition:
+        progression.save_chapter_transition(
+            state["novel_id"],
+            chapter_num,
+            transition,
+            novel_version_id=state.get("novel_version_id"),
+            volume_no=volume_no,
+            promotion_score=promotion_score,
+            db=db,
+        )
+
+
+def _chapter_finalized_quality_report_handler(event: GenerationEvent) -> None:
+    payload = event.payload
+    state: GenerationState = payload["state"]
+    quality = payload["quality"]
+    db = payload.get("db")
+    chapter_num = int(payload["chapter_num"])
+    volume_no = int(payload["volume_no"])
+    advancement = payload.get("progression_payload", {}).get("advancement") or {}
+    transition = payload.get("progression_payload", {}).get("transition") or {}
     factual_score = float(state.get("factual_score", 0.0) or 0.0)
     progression_score = float(state.get("progression_score", 0.0) or 0.0)
     reviewer_aesthetic = float(state.get("aesthetic_review_score", 0.0) or 0.0)
@@ -288,7 +297,7 @@ def write_longform_artifacts(
         state.get("score", 0.0) >= REVIEW_SCORE_THRESHOLD
         and factual_score >= 0.65
         and progression_score >= 0.62
-        and language_score >= 0.6
+        and float(payload.get("language_score") or 0.0) >= 0.6
         and reviewer_aesthetic >= 0.6
     ) else "warning"
     quality.add_report(
@@ -300,10 +309,10 @@ def write_longform_artifacts(
             "review_score": state.get("score", 0.0),
             "factual_score": factual_score,
             "progression_score": progression_score,
-            "language_score": language_score,
+            "language_score": payload.get("language_score"),
             "aesthetic_review_score": reviewer_aesthetic,
-            "aesthetic_score": aesthetic_score_val,
-            "revision_count": revision_count,
+            "aesthetic_score": payload.get("aesthetic_score_val"),
+            "revision_count": payload.get("revision_count"),
             "volume_no": volume_no,
             "duplication_risk": round(max(0.0, 1.0 - progression_score), 4),
             "no_new_delta": bool(advancement and not str(advancement.get("irreversible_change") or "").strip()),
@@ -312,16 +321,25 @@ def write_longform_artifacts(
                 4,
             ),
             "volume_repeat_risk": round(
-                min(1.0, max(0.0, len((volume_arc_state or {}).get("forbidden_repeats") or []) / 10.0)),
+                min(1.0, max(0.0, len((payload.get("volume_arc_state") or {}).get("forbidden_repeats") or []) / 10.0)),
                 4,
             ),
             "consistency_scorecard": state.get("consistency_scorecard") or {},
             "review_gate": state.get("review_gate") or {},
+            "context_sources": list((state.get("context") or {}).get("context_sources") or []),
         },
         verdict=verdict,
         db=db,
     )
 
+
+def _chapter_finalized_checkpoint_handler(event: GenerationEvent) -> None:
+    payload = event.payload
+    state: GenerationState = payload["state"]
+    checkpoint = payload["checkpoint"]
+    db = payload.get("db")
+    chapter_num = int(payload["chapter_num"])
+    volume_no = int(payload["volume_no"])
     if state.get("task_id"):
         checkpoint.save_checkpoint(
             task_id=state["task_id"],
@@ -333,17 +351,89 @@ def write_longform_artifacts(
                 "chapter_num": chapter_num,
                 "volume_no": volume_no,
                 "review_score": state.get("score", 0.0),
-                "language_score": language_score,
-                "progression_score": progression_score,
+                "language_score": payload.get("language_score"),
+                "progression_score": state.get("progression_score", 0.0),
                 "consistency_scorecard": state.get("consistency_scorecard") or {},
                 "review_gate": state.get("review_gate") or {},
-                "summary": summary_text[:400],
-                "content_preview": final_content[:400],
-                "chapter_advancement": advancement,
-                "chapter_transition": transition,
-                "book_progression_state": book_progression_state,
+                "summary": str(payload.get("summary_text") or "")[:400],
+                "content_preview": str(payload.get("final_content") or "")[:400],
+                "chapter_advancement": (payload.get("progression_payload") or {}).get("advancement") or {},
+                "chapter_transition": (payload.get("progression_payload") or {}).get("transition") or {},
+                "book_progression_state": payload.get("book_progression_state") or {},
             },
             db=db,
+        )
+
+
+def _chapter_finalized_telemetry_handler(event: GenerationEvent) -> None:
+    _ = event  # telemetry placeholder for future extension
+
+
+def _build_chapter_finalized_event_bus() -> EventBus:
+    bus = EventBus()
+    bus.register("chapter.finalized", _chapter_finalized_story_bible_handler, required=True)
+    bus.register("chapter.finalized", _chapter_finalized_progression_handler, required=True)
+    bus.register("chapter.finalized", _chapter_finalized_quality_report_handler, required=True)
+    bus.register("chapter.finalized", _chapter_finalized_checkpoint_handler, required=True)
+    bus.register("chapter.finalized", _chapter_finalized_telemetry_handler, required=False)
+    return bus
+
+
+def write_longform_artifacts(
+    state: GenerationState,
+    chapter_num: int,
+    summary_text: str,
+    final_content: str,
+    language_score: float,
+    aesthetic_score_val: float,
+    revision_count: int,
+    extracted_facts: dict[str, Any] | None = None,
+    progression_memory: dict[str, Any] | None = None,
+    progression_promotion: dict[str, Any] | None = None,
+    db: Session | None = None,
+) -> None:
+    """Persist all post-chapter artifacts to bible/quality/checkpoint stores."""
+    bible = state["bible_store"]
+    quality = state["quality_store"]
+    checkpoint = state["checkpoint_store"]
+    progression = state.get("progression_mgr") or ProgressionMemoryManager()
+    volume_no = int(state.get("volume_no") or volume_no_for_chapter(state, chapter_num))
+    progression_payload = progression_memory if isinstance(progression_memory, dict) else {}
+    promotion_payload = progression_promotion if isinstance(progression_promotion, dict) else {}
+    promotion_score = float(promotion_payload.get("promotion_score") or 0.0)
+    payload: dict[str, Any] = {
+        "state": state,
+        "db": db,
+        "chapter_num": chapter_num,
+        "volume_no": volume_no,
+        "summary_text": summary_text,
+        "final_content": final_content,
+        "language_score": language_score,
+        "aesthetic_score_val": aesthetic_score_val,
+        "revision_count": revision_count,
+        "extracted_facts": extracted_facts or {},
+        "progression_payload": progression_payload,
+        "promotion_score": promotion_score,
+        "outline": state.get("outline") or {},
+        "bible": bible,
+        "quality": quality,
+        "checkpoint": checkpoint,
+        "progression": progression,
+        "volume_arc_state": {},
+        "book_progression_state": {},
+    }
+    bus = _build_chapter_finalized_event_bus()
+    dispatch_result = bus.dispatch(GenerationEvent(name="chapter.finalized", payload=payload))
+    for failure in dispatch_result.get("failures") or []:
+        logger.warning(
+            "Optional chapter.finalized handler failed",
+            extra={
+                "handler": failure.get("handler"),
+                "chapter_num": chapter_num,
+                "volume_no": volume_no,
+                "required": failure.get("required"),
+                "error": failure.get("error"),
+            },
         )
 
     is_volume_end = int(chapter_num) == int(state.get("segment_end_chapter") or state["end_chapter"])

@@ -1,5 +1,5 @@
-{# reviewer_combined.j2: 4维合并审校，1次调用替代4次独立调用 #}
-你是小说多维审校器。你必须且仅输出一个合法的 JSON 对象，包含 structure/factual/progression/aesthetic 四个子对象。
+{# reviewer_combined.j2: 6维合并审校，1次调用替代6次独立调用 #}
+你是小说多维审校器。你必须且仅输出一个合法的 JSON 对象，包含 structure/factual/progression/aesthetic/ai_flavor/webnovel_principles 六个子对象。
 绝对禁止：输出空内容、纯文本解释、Markdown 代码块包裹、任何非 JSON 内容。
 
 语言：{{ language }}
@@ -52,14 +52,35 @@ confidence: 0~1
 feedback: 一句话结论
 positives: 最多4条亮点（即 highlights）
 must_fix / should_fix / risks: 同上格式
+
+## ai_flavor（AI味检查）
+score: 0~10，10=完全无AI味，0=充斥AI套路
+issues: 发现的具体问题列表（字符串列表，最多8条）
+检查项：
+- 排比句/对偶句堆砌（三连排比、"不是…而是…"模式）
+- 说明性前言（"本章主要讲述…"类开篇）
+- 总结性结尾（"这一切都预示着…"、角色"意识到…"结尾）
+- 空洞励志/鸡汤表达
+- 过度使用AI高频词：顿时、仿佛、眼神、胸口、呢喃、沉默、沉吟、内心深处、不禁、心头
+
+## webnovel_principles（网文原则）
+score: 0~10，10=完全符合网文节奏标准
+violations: 违规列表（字符串列表，最多6条）
+检查项：
+- 卖点前置：开篇100字内是否有冲突/悬念/爽点（缺失则记入violations）
+- 章末钩子：最后50字是否制造悬念或期待感（缺失则记入violations）
+- 爽点兑现：本章承诺的情节冲突是否真实推进而非延迟（未兑现则记入violations）
+- 节奏控制：是否存在连续5段以上铺垫而无推进（存在则记入violations）
 </scoring_definitions>
 
 <calibration_rules>
 - 不得臆造上下文；不确定时降低 confidence 并放入 risks。
 - evidence 不能为空，不可写"无"。
-- 4个维度相互独立评分，不要互相干扰。
+- 6个维度相互独立评分，不要互相干扰。
 - 若本章虽顺畅但无新推进，progression 必须指出。
 - foreshadow_check 仅在 thread_ledger 有数据时输出，没有 thread_ledger 时输出空列表。
+- ai_flavor: score=10 表示文字完全无AI套路；score≤5 表示有明显AI痕迹需改写；issues 必须附原文片段作为证据。
+- webnovel_principles: score=10 表示完全符合网文节奏；violations 每条说明违反了哪条检查项及位置（开篇/结尾/章中）。
 </calibration_rules>
 
 <draft_text>
@@ -67,5 +88,5 @@ must_fix / should_fix / risks: 同上格式
 </draft_text>
 
 <output_example>
-{"structure":{"score":0.85,"confidence":0.8,"feedback":"结构完整","positives":["冲突设置合理"],"must_fix":[],"should_fix":[],"risks":[]},"factual":{"score":0.9,"confidence":0.85,"feedback":"事实一致","contradictions":[],"must_fix":[],"should_fix":[],"risks":[]},"progression":{"score":0.82,"confidence":0.75,"feedback":"有效推进","must_fix":[],"should_fix":[],"risks":[],"duplicate_beats":[],"no_new_delta":[],"repeated_reveal":[],"repeated_relationship_turn":[],"transition_conflict":[],"foreshadow_check":[]},"aesthetic":{"score":0.83,"confidence":0.78,"feedback":"节奏流畅","positives":["情绪张力好"],"must_fix":[],"should_fix":[],"risks":[]}}
+{"structure":{"score":0.85,"confidence":0.8,"feedback":"结构完整","positives":["冲突设置合理"],"must_fix":[],"should_fix":[],"risks":[]},"factual":{"score":0.9,"confidence":0.85,"feedback":"事实一致","contradictions":[],"must_fix":[],"should_fix":[],"risks":[]},"progression":{"score":0.82,"confidence":0.75,"feedback":"有效推进","must_fix":[],"should_fix":[],"risks":[],"duplicate_beats":[],"no_new_delta":[],"repeated_reveal":[],"repeated_relationship_turn":[],"transition_conflict":[],"foreshadow_check":[]},"aesthetic":{"score":0.83,"confidence":0.78,"feedback":"节奏流畅","positives":["情绪张力好"],"must_fix":[],"should_fix":[],"risks":[]},"ai_flavor":{"score":8,"issues":["开篇使用三连排比句"]},"webnovel_principles":{"score":7,"violations":["章末缺乏悬念钩子"]}}
 </output_example>

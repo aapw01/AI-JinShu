@@ -111,3 +111,24 @@ def maybe_compact_chapter_length(
         else "soft_max_exceeded"
     )
     return compacted, diagnostics
+
+
+def trim_generated_text(text: str, hard_limit: int) -> str:
+    """Trim text to hard_limit chars at the nearest sentence boundary (。！？…… or \\n\\n).
+    If no boundary found within last 20% of limit, truncate at limit directly.
+    Returns text unchanged if len(text) <= hard_limit.
+    """
+    if len(text) <= hard_limit:
+        return text
+    search_start = int(hard_limit * 0.80)
+    window = text[search_start:hard_limit]
+    best_pos = -1
+    for punct in ("。", "！", "？", "……", "\n\n"):
+        idx = window.rfind(punct)
+        if idx != -1:
+            candidate = search_start + idx + len(punct)
+            if candidate > best_pos:
+                best_pos = candidate
+    if best_pos > 0:
+        return text[:best_pos]
+    return text[:hard_limit]

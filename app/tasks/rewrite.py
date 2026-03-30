@@ -11,7 +11,7 @@ from app.core.llm_contract import invoke_chapter_body_structured
 from app.core.llm_contract import get_last_prompt_meta
 from app.core.llm_usage import begin_usage_session, end_usage_session, snapshot_usage
 from app.core.logging_config import bind_log_context, log_event
-from app.core.strategy import get_model_for_stage
+from app.core.strategy import resolve_ai_profile
 from app.models.novel import ChapterVersion, Novel, NovelVersion, RewriteRequest
 from app.prompts import render_prompt
 from app.services.generation.agents import FinalizerAgent
@@ -360,8 +360,12 @@ def submit_rewrite_task(
             )
 
         strategy = novel.strategy or "web-novel"
-        provider, model = get_model_for_stage(strategy, "writer")
-        finalizer_provider, finalizer_model = get_model_for_stage(strategy, "finalizer")
+        writer_profile = resolve_ai_profile(strategy, "rewrite", novel_config=dict(novel.config or {}))
+        finalizer_profile = resolve_ai_profile(strategy, "finalizer", novel_config=dict(novel.config or {}))
+        provider, model = writer_profile["provider"], writer_profile["model"]
+        writer_inference = writer_profile["inference"]
+        finalizer_provider, finalizer_model = finalizer_profile["provider"], finalizer_profile["model"]
+        finalizer_inference = finalizer_profile["inference"]
         rewrite_finalizer = FinalizerAgent()
         annotations_by_chapter = group_annotations_by_chapter(db, rewrite_request_id)
 
@@ -424,6 +428,7 @@ def submit_rewrite_task(
                     chapter_num=chapter_num,
                     provider=provider,
                     model=model,
+                    inference=writer_inference,
                     prompt_template=prompt_template,
                     prompt_version="v2",
                 )
@@ -464,6 +469,7 @@ def submit_rewrite_task(
                     language=novel.target_language or "zh",
                     provider=finalizer_provider,
                     model=finalizer_model,
+                    inference=finalizer_inference,
                 ),
                 normalize_fn=normalize_chapter_content,
             )

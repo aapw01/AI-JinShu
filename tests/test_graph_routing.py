@@ -123,7 +123,30 @@ class _DummyCheckpointStore:
 
 
 class TestVolumeReplanNode:
-    def test_volume_replan_includes_quality_focus_and_carry_over(self):
+    def test_volume_replan_includes_quality_focus_and_carry_over(self, monkeypatch):
+        class _DummyResult:
+            def scalars(self):
+                return self
+
+            def all(self):
+                return []
+
+        class _DummySession:
+            def execute(self, _stmt):
+                return _DummyResult()
+
+            def close(self):
+                return None
+
+        monkeypatch.setattr("app.services.generation.nodes.volume.SessionLocal", lambda: _DummySession())
+        monkeypatch.setattr("app.services.generation.nodes.volume._generate_next_volume_outlines_if_needed", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(
+            "app.services.generation.common.load_outlines_from_db",
+            lambda *_args, **_kwargs: [
+                {"chapter_num": 31, "title": "新卷开篇", "purpose": "建立新矛盾"},
+                {"chapter_num": 32, "title": "暗线推进", "purpose": "推进暗线"},
+            ],
+        )
         state = _base_state(
             novel_id=1,
             current_chapter=31,
@@ -164,13 +187,22 @@ class _DummyReviewer:
 
 
 class _AlwaysFailWriter:
-    def run(self, novel_id, chapter_num, outline, context, language, native_style_profile, provider, model, word_count=None):
+    def run(self, novel_id, chapter_num, outline, context, language, native_style_profile, provider, model, inference=None, word_count=None):
         variant = context.get("ab_variant") or "?"
         raise RuntimeError(f"writer generation failed for chapter={chapter_num} provider={provider} model={model} variant={variant}")
 
 
 class TestNodeWriterFailures:
-    def test_writer_error_surfaces_both_ab_variant_details(self):
+    def test_writer_error_surfaces_both_ab_variant_details(self, monkeypatch):
+        monkeypatch.setattr(
+            "app.services.generation.nodes.writer.resolve_ai_profile",
+            lambda *_args, **_kwargs: {
+                "provider": "openai",
+                "model": "mock-writer",
+                "inference": {},
+                "resolution_trace": ["test"],
+            },
+        )
         state = _base_state(
             current_chapter=1,
             strategy="web-novel",

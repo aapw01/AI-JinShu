@@ -75,8 +75,15 @@ def test_node_final_book_review_uses_volume_reports_not_all_summaries():
 
     with (
         patch("app.services.generation.nodes.final_review.SessionLocal") as mock_session,
-        patch("app.services.generation.nodes.final_review.get_model_for_stage", return_value=("openai", "gpt-4")),
-        patch("app.services.generation.nodes.final_review.get_inference_for_stage", return_value={}),
+        patch(
+            "app.services.generation.nodes.final_review.resolve_ai_profile",
+            return_value={
+                "provider": "openai",
+                "model": "gpt-4",
+                "inference": {},
+                "resolution_trace": [],
+            },
+        ),
         patch("app.services.generation.nodes.final_review.progress"),
         patch("app.services.generation.nodes.final_review.persist_resume_runtime_state"),
         patch("app.services.generation.nodes.final_review.save_prewrite_artifacts"),

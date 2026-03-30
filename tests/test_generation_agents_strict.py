@@ -7,9 +7,11 @@ import pytest
 from app.services.generation.agents import (
     FactExtractorAgent,
     FinalReviewerAgent,
+    FinalizerAgent,
     PrewritePlannerAgent,
     ProgressionMemoryAgent,
     ReviewerAgent,
+    WriterAgent,
 )
 from app.services.generation.contracts import OutputContractError
 
@@ -151,6 +153,54 @@ def test_reviewer_structured_passes_inference_to_llm(monkeypatch):
         inference={"temperature": 0.2},
     )
     assert captured["inference"] == {"temperature": 0.2}
+
+
+def test_writer_agent_passes_inference_to_contract(monkeypatch):
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("app.services.generation.agents.render_prompt", lambda *_args, **_kwargs: "prompt")
+
+    def _fake_invoke(**kwargs):
+        captured["inference"] = kwargs.get("inference")
+        return "正文"
+
+    monkeypatch.setattr("app.services.generation.agents.invoke_chapter_body_structured", _fake_invoke)
+
+    out = WriterAgent().run(
+        novel_id="n-1",
+        chapter_num=3,
+        outline={"title": "第3章"},
+        context={},
+        provider="openai",
+        model="gpt-4o-mini",
+        inference={"temperature": 0.12},
+    )
+
+    assert out == "正文"
+    assert captured["inference"] == {"temperature": 0.12}
+
+
+def test_finalizer_agent_passes_inference_to_contract(monkeypatch):
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("app.services.generation.agents.render_prompt", lambda *_args, **_kwargs: "prompt")
+
+    def _fake_invoke(**kwargs):
+        captured["inference"] = kwargs.get("inference")
+        return "定稿"
+
+    monkeypatch.setattr("app.services.generation.agents.invoke_chapter_body_structured", _fake_invoke)
+
+    out = FinalizerAgent().run(
+        draft="草稿",
+        feedback="收紧重复",
+        provider="openai",
+        model="gpt-4o-mini",
+        inference={"temperature": 0.08},
+    )
+
+    assert out == "定稿"
+    assert captured["inference"] == {"temperature": 0.08}
 
 
 def test_reviewer_progression_context_json_is_complete_json(monkeypatch):

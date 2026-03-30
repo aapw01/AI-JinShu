@@ -2,6 +2,7 @@ from app.services.generation.agents import (
     CharacterStateUpdateSchema,
     CharacterStateUpdatesSchema,
 )
+from app.services.generation.heuristics import normalize_progression_payload
 
 
 def test_character_state_schema_has_realm_and_emotion():
@@ -38,3 +39,24 @@ def test_character_state_updates_schema_roundtrip():
     schema = CharacterStateUpdatesSchema(**payload)
     assert schema.updates[0].realm == "化神期"
     assert schema.updates[0].emotional_state == "平静"
+
+
+def test_normalize_progression_foreshadow_check_passthrough():
+    """Verify foreshadow_check is passed through from progression dict."""
+    result = {
+        "score": 0.8,
+        "feedback": "good",
+        "foreshadow_check": ["某伏笔未兑现"],
+    }
+    payload = normalize_progression_payload(result)
+    assert payload["foreshadow_check"] == ["某伏笔未兑现"]
+
+
+def test_normalize_progression_foreshadow_check_defaults_to_empty_list():
+    """Verify foreshadow_check defaults to empty list when missing."""
+    result = {
+        "score": 0.8,
+        "feedback": "good",
+    }
+    payload = normalize_progression_payload(result)
+    assert payload["foreshadow_check"] == []

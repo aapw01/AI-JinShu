@@ -1,5 +1,6 @@
 from app.core.constants import DEFAULT_CHAPTER_WORD_COUNT
 from app.services.generation.agents import FinalizerAgent, WriterAgent
+from app.services.memory.story_bible import StoryBibleStore
 from app.services.generation.nodes.finalize import node_finalize
 from app.services.generation.nodes.writer import node_writer
 
@@ -94,13 +95,22 @@ def test_node_writer_passes_default_word_count(monkeypatch):
             native_style_profile,
             provider,
             model,
+            inference=None,
             word_count=None,
         ):
             self.calls.append(word_count)
             return "章节正文"
 
     writer = _CaptureWriter()
-    monkeypatch.setattr("app.services.generation.nodes.writer.get_model_for_stage", lambda *_: ("openai", "mock"))
+    monkeypatch.setattr(
+        "app.services.generation.nodes.writer.resolve_ai_profile",
+        lambda *_args, **_kwargs: {
+            "provider": "openai",
+            "model": "mock",
+            "inference": {},
+            "resolution_trace": [],
+        },
+    )
     monkeypatch.setattr("app.services.generation.nodes.writer.snapshot_usage", lambda: {"input_tokens": 0, "output_tokens": 0})
     monkeypatch.setattr("app.services.generation.progress.snapshot_usage", lambda: {"input_tokens": 0, "output_tokens": 0})
 
@@ -138,6 +148,7 @@ def test_node_finalize_passes_default_word_count(monkeypatch):
             language,
             provider,
             model,
+            inference=None,
             word_count=None,
         ):
             self.calls.append(word_count)
@@ -149,6 +160,10 @@ def test_node_finalize_passes_default_word_count(monkeypatch):
 
         def run_foreshadow_extraction(self, **_kwargs):
             return {"planted": [], "resolved": []}
+
+        async def run_relation_extraction(self, **_kwargs):
+            from app.services.generation.agents import CharacterRelationsSchema
+            return CharacterRelationsSchema()
 
     class _SummaryMgr:
         def add_summary(self, *_args, **_kwargs):
@@ -193,7 +208,15 @@ def test_node_finalize_passes_default_word_count(monkeypatch):
             return None
 
     finalizer = _CaptureFinalizer()
-    monkeypatch.setattr("app.services.generation.nodes.finalize.get_model_for_stage", lambda *_: ("openai", "mock"))
+    monkeypatch.setattr(
+        "app.services.generation.nodes.finalize.resolve_ai_profile",
+        lambda *_args, **_kwargs: {
+            "provider": "openai",
+            "model": "mock",
+            "inference": {},
+            "resolution_trace": [],
+        },
+    )
     monkeypatch.setattr("app.services.generation.nodes.finalize.SessionLocal", lambda: _DummyDB())
     monkeypatch.setattr("app.services.generation.nodes.finalize.evaluate_language_quality", lambda *_: (1.0, "ok"))
     monkeypatch.setattr("app.services.generation.nodes.finalize.generate_chapter_summary", lambda *_args, **_kwargs: "摘要")
@@ -219,6 +242,7 @@ def test_node_finalize_passes_default_word_count(monkeypatch):
         "feedback": "收紧节奏",
         "finalizer": finalizer,
         "fact_extractor": _FactExtractor(),
+        "bible_store": StoryBibleStore(),
         "progression_memory_extractor": _ProgressionExtractor(),
         "outline": {"chapter_num": 2, "title": "第2章"},
         "summary_mgr": _SummaryMgr(),

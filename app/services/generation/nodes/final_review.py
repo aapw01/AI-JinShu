@@ -4,7 +4,7 @@ from __future__ import annotations
 from sqlalchemy import select
 
 from app.core.database import SessionLocal
-from app.core.strategy import get_inference_for_stage, get_model_for_stage
+from app.core.strategy import resolve_ai_profile
 from app.models.novel import ChapterVersion
 from app.services.generation.common import save_prewrite_artifacts
 from app.services.generation.progress import persist_resume_runtime_state, progress, volume_no_for_chapter
@@ -70,16 +70,19 @@ def node_final_book_review(state: GenerationState) -> GenerationState:
         "全书终审...",
         {"current_phase": "full_book_review", "total_chapters": effective_total},
     )
-    fr_provider, fr_model = get_model_for_stage(state["strategy"], "reviewer")
-    fr_inference = get_inference_for_stage(state["strategy"], "reviewer.book")
+    review_profile = resolve_ai_profile(
+        state["strategy"],
+        "reviewer.book",
+        novel_config=(state.get("novel_info") or {}).get("config"),
+    )
     final_report = state["final_reviewer"].run_full_book(
         volume_reports=volume_reports_payload,
         recent_summaries=recent_summaries,
         unresolved_foreshadows=unresolved_foreshadows,
         language=state["target_language"],
-        provider=fr_provider,
-        model=fr_model,
-        inference=fr_inference,
+        provider=review_profile["provider"],
+        model=review_profile["model"],
+        inference=review_profile["inference"],
     )
     save_prewrite_artifacts(state["novel_id"], {"final_book_review": final_report})
     state["quality_store"].add_report(

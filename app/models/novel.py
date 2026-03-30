@@ -593,6 +593,22 @@ class RewriteAnnotation(Base):
     created_at = Column(DateTime, default=_utc_now)
 
 
+class StoryRelation(Base):
+    __tablename__ = "story_relations"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    novel_id = Column(Integer, ForeignKey("novels.id", ondelete="CASCADE"), nullable=False, index=True)
+    novel_version_id = Column(Integer, ForeignKey("novel_versions.id", ondelete="CASCADE"), nullable=True, index=True)
+    source = Column(String(255), nullable=False)
+    target = Column(String(255), nullable=False)
+    relation_type = Column(String(64), default="")
+    description = Column(String(512), default="")
+    sentiment = Column(String(32), default="neutral")
+    chapter_num = Column(Integer, default=0)
+    created_at = Column(DateTime, default=_utc_now)
+    updated_at = Column(DateTime, default=_utc_now, onupdate=_utc_now)
+
+
 Index("idx_chapter_summaries_novel_chapter", ChapterSummary.novel_version_id, ChapterSummary.chapter_num, unique=True)
 Index("idx_novel_memory_novel_type_key", NovelMemory.novel_version_id, NovelMemory.memory_type, NovelMemory.key, unique=True)
 Index("idx_novel_specifications_novel_type", NovelSpecification.novel_id, NovelSpecification.spec_type, unique=True)
@@ -630,3 +646,11 @@ Index("idx_system_runtime_settings_key", SystemRuntimeSetting.setting_key, uniqu
 Index("idx_user_quotas_user_plan", UserQuota.user_id, UserQuota.plan_key, unique=True)
 Index("idx_usage_ledger_user_created", UsageLedger.user_id, UsageLedger.created_at)
 Index("idx_admin_audit_logs_action", AdminAuditLog.action)
+Index(
+    "idx_story_relations_novel_version_source_target",
+    StoryRelation.novel_id,
+    StoryRelation.novel_version_id,
+    StoryRelation.source,
+    StoryRelation.target,
+    unique=True,
+)
