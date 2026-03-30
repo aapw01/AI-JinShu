@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field, ValidationError
 from langchain_core.output_parsers import PydanticOutputParser
 
 from app.core.llm import extract_provider_block, get_llm_with_fallback, response_to_text, _is_retryable
+from app.core.strategy import resolve_ai_profile
 from app.core.llm_contract import invoke_chapter_body_structured
 from app.prompts import render_prompt
 from app.services.generation.common import (
@@ -597,6 +598,18 @@ class CharacterStateUpdatesSchema(BaseModel):
     updates: list[CharacterStateUpdateSchema] = Field(default_factory=list)
 
 
+class CharacterRelationSchema(BaseModel):
+    source: str
+    target: str
+    relation_type: str = ""
+    description: str = ""
+    sentiment: str = "neutral"
+
+
+class CharacterRelationsSchema(BaseModel):
+    relations: list[CharacterRelationSchema] = []
+
+
 class ChapterAdvancementMemorySchema(BaseModel):
     chapter_objective: str = ""
     actual_progress: str = ""
@@ -651,12 +664,24 @@ class FactualSubReviewSchema(ReviewScorecardSchema):
     contradictions: list[str] = Field(default_factory=list)
 
 
+class AiFlavorSchema(BaseModel):
+    score: int = 5
+    issues: list[str] = Field(default_factory=list)
+
+
+class WebnovelPrinciplesSchema(BaseModel):
+    score: int = 5
+    violations: list[str] = Field(default_factory=list)
+
+
 class ReviewCombinedSchema(BaseModel):
-    """Single-call combined review replacing 4 separate reviewer calls."""
+    """Single-call combined review replacing 6 separate reviewer calls."""
     structure: ReviewScorecardSchema = Field(default_factory=ReviewScorecardSchema)
     factual: FactualSubReviewSchema = Field(default_factory=FactualSubReviewSchema)
     progression: ProgressionReviewSchema = Field(default_factory=ProgressionReviewSchema)
     aesthetic: ReviewScorecardSchema = Field(default_factory=ReviewScorecardSchema)
+    ai_flavor: AiFlavorSchema = Field(default_factory=AiFlavorSchema)
+    webnovel_principles: WebnovelPrinciplesSchema = Field(default_factory=WebnovelPrinciplesSchema)
 
 
 def _normalize_outline_item(item: dict[str, Any], chapter_no: int) -> dict[str, Any]:
@@ -891,8 +916,9 @@ class PrewritePlannerAgent:
         language: str = "zh",
         provider: str | None = None,
         model: str | None = None,
+        strategy_key: str | None = None,
+        novel_config: dict[str, Any] | None = None,
     ) -> dict:
-        llm = get_llm_with_fallback(provider, model)
         result: dict[str, Any] = {}
         templates = [
             ("constitution", "constitution"),
@@ -909,6 +935,23 @@ class PrewritePlannerAgent:
         started_all = time.perf_counter()
         for key, tpl in templates:
             try:
+                asset_key = {
+                    "constitution": "prewrite.constitution",
+                    "specification": "prewrite.specification",
+                    "creative_plan": "prewrite.storyline",
+                    "tasks": "prewrite.blueprint",
+                }[key]
+                resolved = resolve_ai_profile(
+                    strategy_key,
+                    asset_key,
+                    novel_config=novel_config,
+                    runtime_override={"provider": provider, "model": model},
+                )
+                llm = get_llm_with_fallback(
+                    resolved["provider"],
+                    resolved["model"],
+                    inference=resolved["inference"],
+                )
                 prompt = render_prompt(
                     tpl,
                     novel=novel,
@@ -921,8 +964,8 @@ class PrewritePlannerAgent:
                     schema_map[key],
                     strict=False,
                     stage=f"prewrite.{key}",
-                    provider=provider,
-                    model=model,
+                    provider=resolved["provider"],
+                    model=resolved["model"],
                     prompt_template=tpl,
                     prompt_version="v1",
                 )
@@ -932,7 +975,13 @@ class PrewritePlannerAgent:
                     novel=novel,
                     num_chapters=num_chapters,
                 )
-                logger.info("PrewritePlannerAgent normalized key=%s provider=%s model=%s", key, provider, model)
+                logger.info(
+                    "PrewritePlannerAgent normalized key=%s provider=%s model=%s resolution_trace=%s",
+                    key,
+                    resolved["provider"],
+                    resolved["model"],
+                    resolved["resolution_trace"],
+                )
             except Exception as e:
                 logger.error(f"PrewritePlannerAgent {key} failed: {e}")
                 result[key] = _default_prewrite_component(key, novel, num_chapters)
@@ -990,6 +1039,8 @@ class OutlinerAgent:
         language: str = "zh",
         provider: str | None = None,
         model: str | None = None,
+        strategy_key: str | None = None,
+        novel_config: dict[str, Any] | None = None,
     ) -> list[dict]:
         """Generate outlines for one volume via smaller fixed-size batches."""
         end_chapter = start_chapter + num_chapters - 1
@@ -1035,6 +1086,8 @@ class OutlinerAgent:
                 language=language,
                 provider=provider,
                 model=model,
+                strategy_key=strategy_key,
+                novel_config=novel_config,
             )
             aggregated.extend(batch_outlines)
             if novel_version_id is not None and novel_pk is not None:
@@ -1065,6 +1118,8 @@ class OutlinerAgent:
                 language=language,
                 provider=provider,
                 model=model,
+                strategy_key=strategy_key,
+                novel_config=novel_config,
             )
             if harmonized != aggregated and novel_version_id is not None and novel_pk is not None:
                 save_full_outlines(
@@ -1103,8 +1158,16 @@ class OutlinerAgent:
         language: str,
         provider: str | None,
         model: str | None,
+        strategy_key: str | None = None,
+        novel_config: dict[str, Any] | None = None,
     ) -> list[dict]:
-        llm = get_llm_with_fallback(provider, model)
+        resolved = resolve_ai_profile(
+            strategy_key,
+            "outline.batch",
+            novel_config=novel_config,
+            runtime_override={"provider": provider, "model": model},
+        )
+        llm = get_llm_with_fallback(resolved["provider"], resolved["model"], inference=resolved["inference"])
         end_chapter = start_chapter + num_chapters - 1
         base_prompt = render_prompt(
             "volume_outline_batch",
@@ -1129,7 +1192,14 @@ class OutlinerAgent:
                     + f"\n\n[重要] 上次只返回了 {actual} 条，必须严格返回"
                     f"第 {start_chapter} 到第 {end_chapter} 章共 {num_chapters} 条，不多不少。"
                 )
-            data = _invoke_json_with_schema(llm, prompt, VolumeOutlineBatchSchema)
+            data = _invoke_json_with_schema(
+                llm,
+                prompt,
+                VolumeOutlineBatchSchema,
+                provider=resolved["provider"],
+                model=resolved["model"],
+                stage="outline.batch",
+            )
             outlines = data.get("outlines", []) if isinstance(data, dict) else []
             if isinstance(outlines, list) and len(outlines) == num_chapters:
                 break
@@ -1209,10 +1279,18 @@ class OutlinerAgent:
         language: str,
         provider: str | None,
         model: str | None,
+        strategy_key: str | None = None,
+        novel_config: dict[str, Any] | None = None,
     ) -> list[dict]:
         if len(outlines) <= 1:
             return outlines
-        llm = get_llm_with_fallback(provider, model)
+        resolved = resolve_ai_profile(
+            strategy_key,
+            "outline.harmonize",
+            novel_config=novel_config,
+            runtime_override={"provider": provider, "model": model},
+        )
+        llm = get_llm_with_fallback(resolved["provider"], resolved["model"], inference=resolved["inference"])
         prompt = render_prompt(
             "volume_outline_harmonize",
             novel_id=novel_id,
@@ -1223,7 +1301,14 @@ class OutlinerAgent:
             planning_context=planning_context,
             language=language,
         )
-        data = _invoke_json_with_schema(llm, prompt, VolumeOutlineHarmonizationSchema)
+        data = _invoke_json_with_schema(
+            llm,
+            prompt,
+            VolumeOutlineHarmonizationSchema,
+            provider=resolved["provider"],
+            model=resolved["model"],
+            stage="outline.harmonize",
+        )
         items = data.get("outlines", []) if isinstance(data, dict) else []
         if not isinstance(items, list) or not items:
             raise ValueError("empty harmonization outlines")
@@ -1383,6 +1468,7 @@ class WriterAgent:
         native_style_profile: str = "",
         provider: str | None = None,
         model: str | None = None,
+        inference: dict[str, Any] | None = None,
         word_count: int | None = None,
     ) -> str:
         template = "first_chapter" if chapter_num == 1 else "next_chapter"
@@ -1403,6 +1489,7 @@ class WriterAgent:
                 chapter_num=chapter_num,
                 provider=provider,
                 model=model,
+                inference=inference,
                 prompt_template=template,
                 prompt_version="v2",
             )
@@ -1663,12 +1750,12 @@ class ReviewerAgent:
         provider: str | None = None,
         model: str | None = None,
         inference: dict[str, Any] | None = None,
-    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
-        """Combined 4-dimension review in a single LLM call.
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+        """Combined 6-dimension review in a single LLM call.
 
-        Returns (struct_raw, factual_raw, progression_raw, aesthetic_raw) —
-        same shape as the 4 separate run_*_structured() calls, fully drop-in.
-        Never raises — always returns 4 dicts (empty defaults on any failure).
+        Returns (struct_raw, factual_raw, progression_raw, aesthetic_raw, ai_flavor_raw, webnovel_raw) —
+        same shape as separate run_*_structured() calls, fully drop-in.
+        Never raises — always returns 6 dicts (empty defaults on any failure).
         """
         def _empty_defaults():
             return (
@@ -1676,6 +1763,8 @@ class ReviewerAgent:
                 FactualSubReviewSchema().model_dump(),
                 ProgressionReviewSchema().model_dump(),
                 ReviewScorecardSchema().model_dump(),
+                AiFlavorSchema().model_dump(),
+                WebnovelPrinciplesSchema().model_dump(),
             )
 
         template = "reviewer_combined"
@@ -1735,8 +1824,10 @@ class ReviewerAgent:
         aesthetic_raw = _clamp_score(dict(result.get("aesthetic") or {}))
         if not aesthetic_raw.get("highlights"):
             aesthetic_raw["highlights"] = aesthetic_raw.get("positives") or []
+        ai_flavor_raw = dict(result.get("ai_flavor") or AiFlavorSchema().model_dump())
+        webnovel_raw = dict(result.get("webnovel_principles") or WebnovelPrinciplesSchema().model_dump())
 
-        return struct_raw, factual_raw, progression_raw, aesthetic_raw
+        return struct_raw, factual_raw, progression_raw, aesthetic_raw, ai_flavor_raw, webnovel_raw
 
     def run_cross_chapter_check(
         self,
@@ -1831,6 +1922,7 @@ class FinalizerAgent:
         language: str = "zh",
         provider: str | None = None,
         model: str | None = None,
+        inference: dict[str, Any] | None = None,
         word_count: int | None = None,
     ) -> str:
         # If no significant feedback, return draft as-is
@@ -1852,6 +1944,7 @@ class FinalizerAgent:
                 stage="finalizer",
                 provider=provider,
                 model=model,
+                inference=inference,
                 prompt_template=template,
                 prompt_version="v2",
             )
@@ -1997,6 +2090,31 @@ class FactExtractorAgent:
         except Exception as exc:
             logger.warning("run_foreshadow_extraction failed chapter=%s error=%s", chapter_num, exc)
             return {"planted": [], "resolved": []}
+
+    async def run_relation_extraction(
+        self,
+        chapter_text: str,
+        existing_characters: list[str],
+        provider: str | None = None,
+        model: str | None = None,
+        inference: dict[str, Any] | None = None,
+    ) -> CharacterRelationsSchema:
+        template = "character_relation_extraction"
+        prompt = render_prompt(
+            template,
+            chapter_text=chapter_text[:5000],
+            existing_characters=", ".join(existing_characters),
+        )
+        try:
+            llm = get_llm_with_fallback(provider, model, inference=inference)
+            resp = llm.invoke(prompt)
+            text = response_to_text(resp)
+            text = _extract_json_block(text)
+            data = json.loads(text)
+            return CharacterRelationsSchema.model_validate(data)
+        except Exception as exc:
+            logger.warning("run_relation_extraction failed error=%s", exc)
+            return CharacterRelationsSchema()
 
 
 class ProgressionMemoryAgent:

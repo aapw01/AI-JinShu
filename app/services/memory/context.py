@@ -8,7 +8,7 @@ Layers (priority order):
 5. Knowledge Chunks - Vector store results filtered by chapter outline relevance
 """
 import re
-from typing import Optional
+from typing import Any, Optional
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -35,6 +35,84 @@ THREAD_LEDGER_MAX_CHARS = 1200
 RECENT_WINDOW_MAX_CHARS = 2000
 VOLUME_BRIEF_MAX_CHARS = 1600
 STORY_BIBLE_MAX_CHARS = 3200
+
+
+def _chapter_range_for_items(items: list[dict] | list[Any]) -> list[int] | None:
+    chapter_nums: list[int] = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            chapter_num = int(item.get("chapter_num") or 0)
+        except Exception:
+            chapter_num = 0
+        if chapter_num > 0:
+            chapter_nums.append(chapter_num)
+    if not chapter_nums:
+        return None
+    return [min(chapter_nums), max(chapter_nums)]
+
+
+def _make_context_source(
+    *,
+    source_type: str,
+    source_key: str,
+    selection_reason: str,
+    priority: int,
+    approx_tokens: int = 0,
+    chapter_range: list[int] | None = None,
+    included: bool = True,
+) -> dict:
+    return {
+        "source_type": source_type,
+        "source_key": source_key,
+        "chapter_range": chapter_range or [],
+        "selection_reason": selection_reason,
+        "priority": int(priority),
+        "approx_tokens": max(0, int(approx_tokens)),
+        "included": bool(included),
+    }
+
+
+def _estimate_source_tokens(value: Any) -> int:
+    if isinstance(value, str):
+        return int(estimate_tokens(value))
+    if isinstance(value, list):
+        preview_parts: list[str] = []
+        for item in value[:6]:
+            if isinstance(item, dict):
+                preview_parts.append(
+                    " ".join(
+                        str(item.get(key) or "")
+                        for key in ("chapter_num", "chapter_objective", "summary", "content", "chunk_type", "ending_scene", "last_action")
+                        if item.get(key)
+                    )[:180]
+                )
+            else:
+                preview_parts.append(str(item)[:120])
+        return int(estimate_tokens("\n".join(preview_parts)))
+    if isinstance(value, dict):
+        preview = []
+        for key in (
+            "chapter_objective",
+            "ending_scene",
+            "last_action",
+            "time_state",
+            "current_objective",
+        ):
+            if value.get(key):
+                preview.append(f"{key}:{value.get(key)}")
+        for key in (
+            "recent_objectives",
+            "volume_forbidden_repeats",
+            "book_revealed_information",
+            "opening_constraints",
+        ):
+            raw = value.get(key) or []
+            if isinstance(raw, list) and raw:
+                preview.extend(str(item)[:120] for item in raw[:4])
+        return int(estimate_tokens("\n".join(preview)))
+    return int(estimate_tokens(str(value or "")))
 
 
 def _build_story_bible_context(
@@ -126,6 +204,17 @@ def _build_story_bible_context(
                 lines.append("角色动态: " + "; ".join(state_lines))
     except Exception as _exc:
         _log.warning("story_bible_context: char_state read failed: %s", _exc)
+
+    # 角色关系 read-back
+    try:
+        rel_records = bible.list_relations(novel_id, limit=30, novel_version_id=novel_version_id, db=db)
+        if rel_records:
+            rel_lines = ["【角色关系】"]
+            for rel in rel_records:
+                rel_lines.append(f"  {rel.source}→{rel.target}({rel.relation_type}): {rel.description}")
+            lines.append("\n".join(rel_lines))
+    except Exception as _exc:
+        _log.warning("story_bible_context: char_relation read failed: %s", _exc)
 
     # --- Fix 2: StoryFact records for relevant characters ---
     # These are extracted by FactExtractorAgent and stored in story_facts after each chapter
@@ -274,11 +363,43 @@ def build_chapter_context(
     progression_mgr = ProgressionMemoryManager()
 
     try:
+        context_sources: list[dict[str, Any]] = []
         outline_contract = normalize_outline_contract(outline, chapter_num)
         global_bible = _compress_global_bible(prewrite)
+        context_sources.append(
+            _make_context_source(
+                source_type="global_bible",
+                source_key="prewrite",
+                selection_reason="always_include_global_bible",
+                priority=1,
+                approx_tokens=_estimate_source_tokens(global_bible),
+                included=bool(global_bible),
+            )
+        )
         thread_ledger = get_thread_ledger(novel_id, chapter_num, prewrite, db=db)
         thread_ledger_str = _format_thread_ledger(thread_ledger)
+        context_sources.append(
+            _make_context_source(
+                source_type="thread_ledger",
+                source_key="thread_ledger",
+                selection_reason="active_threads_for_current_chapter",
+                priority=2,
+                approx_tokens=_estimate_source_tokens(thread_ledger_str),
+                chapter_range=_chapter_range_for_items((thread_ledger.get("active_foreshadowing") or []) + (thread_ledger.get("unresolved_hooks") or [])),
+                included=bool(thread_ledger_str),
+            )
+        )
         story_bible_context = _build_story_bible_context(novel_id, novel_version_id, chapter_num, db, outline=outline)
+        context_sources.append(
+            _make_context_source(
+                source_type="story_bible_context",
+                source_key="story_bible_context",
+                selection_reason="entity_fact_context",
+                priority=3,
+                approx_tokens=_estimate_source_tokens(story_bible_context),
+                included=bool(story_bible_context),
+            )
+        )
         recent_advancement_window = progression_mgr.list_recent_advancements(
             novel_id,
             chapter_num,
@@ -286,12 +407,35 @@ def build_chapter_context(
             novel_version_id=novel_version_id,
             db=db,
         )
+        context_sources.append(
+            _make_context_source(
+                source_type="recent_advancement_window",
+                source_key="chapter_advancement",
+                selection_reason="anti_repeat_recent_progress",
+                priority=4,
+                approx_tokens=_estimate_source_tokens(recent_advancement_window),
+                chapter_range=_chapter_range_for_items(recent_advancement_window),
+                included=bool(recent_advancement_window),
+            )
+        )
         previous_transition_state = progression_mgr.get_previous_transition(
             novel_id,
             chapter_num,
             novel_version_id=novel_version_id,
             db=db,
         ) or {}
+        prev_transition_ch = int(previous_transition_state.get("chapter_num") or chapter_num - 1 or 0)
+        context_sources.append(
+            _make_context_source(
+                source_type="previous_transition_state",
+                source_key="chapter_transition",
+                selection_reason="opening_continuity_constraint",
+                priority=5,
+                approx_tokens=_estimate_source_tokens(previous_transition_state),
+                chapter_range=[prev_transition_ch, prev_transition_ch] if prev_transition_ch > 0 else [],
+                included=bool(previous_transition_state),
+            )
+        )
         current_volume_no = max(1, ((max(1, chapter_num) - 1) // max(1, volume_size)) + 1)
         current_volume_arc_state = progression_mgr.get_volume_arc_state(
             novel_id,
@@ -299,11 +443,31 @@ def build_chapter_context(
             novel_version_id=novel_version_id,
             db=db,
         ) or {}
+        context_sources.append(
+            _make_context_source(
+                source_type="current_volume_arc_state",
+                source_key=f"volume:{current_volume_no}",
+                selection_reason="volume_level_repeat_control",
+                priority=6,
+                approx_tokens=_estimate_source_tokens(current_volume_arc_state),
+                included=bool(current_volume_arc_state),
+            )
+        )
         book_progression_state = progression_mgr.get_book_progression_state(
             novel_id,
             novel_version_id=novel_version_id,
             db=db,
         ) or {}
+        context_sources.append(
+            _make_context_source(
+                source_type="book_progression_state",
+                source_key="book_progression",
+                selection_reason="book_level_repeat_control",
+                priority=7,
+                approx_tokens=_estimate_source_tokens(book_progression_state),
+                included=bool(book_progression_state),
+            )
+        )
         anti_repeat_constraints = build_anti_repeat_constraints(
             recent_advancement_window,
             current_volume_arc_state,
@@ -319,12 +483,33 @@ def build_chapter_context(
         if last_ending:
             recent_parts.append(f"上章结尾: {last_ending}")
         recent_window = "\n".join(recent_parts)[:RECENT_WINDOW_MAX_CHARS]
+        context_sources.append(
+            _make_context_source(
+                source_type="recent_window",
+                source_key="chapter_summaries",
+                selection_reason="local_recent_context",
+                priority=8,
+                approx_tokens=_estimate_source_tokens(recent_window),
+                chapter_range=_chapter_range_for_items(recent_summaries),
+                included=bool(recent_window),
+            )
+        )
 
         volume_brief = ""
         if chapter_num > RECENT_WINDOW_SIZE + 1:
             volume_brief = summary_mgr.get_volume_brief(
                 novel_id, novel_version_id, chapter_num, volume_size=30, db=db
             )[:VOLUME_BRIEF_MAX_CHARS]
+        context_sources.append(
+            _make_context_source(
+                source_type="volume_brief",
+                source_key=f"volume_brief:{current_volume_no}",
+                selection_reason="compressed_volume_context",
+                priority=9,
+                approx_tokens=_estimate_source_tokens(volume_brief),
+                included=bool(volume_brief),
+            )
+        )
 
         used = (
             estimate_tokens(global_bible)
@@ -348,6 +533,38 @@ def build_chapter_context(
                     used += estimate_tokens(content)
                 else:
                     break
+        context_sources.append(
+            _make_context_source(
+                source_type="knowledge_chunks",
+                source_key="vector_store",
+                selection_reason="outline_similarity_search",
+                priority=10,
+                approx_tokens=_estimate_source_tokens(knowledge_chunks),
+                included=bool(knowledge_chunks),
+            )
+        )
+        context_sources.append(
+            _make_context_source(
+                source_type="anti_repeat_constraints",
+                source_key="anti_repeat_constraints",
+                selection_reason="derived_from_progression_and_outline",
+                priority=11,
+                approx_tokens=_estimate_source_tokens(anti_repeat_constraints),
+                included=bool(anti_repeat_constraints),
+                chapter_range=_chapter_range_for_items(recent_advancement_window),
+            )
+        )
+        context_sources.append(
+            _make_context_source(
+                source_type="transition_constraints",
+                source_key="transition_constraints",
+                selection_reason="derived_from_previous_transition",
+                priority=12,
+                approx_tokens=_estimate_source_tokens(transition_constraints),
+                included=bool(transition_constraints),
+                chapter_range=[prev_transition_ch, prev_transition_ch] if prev_transition_ch > 0 else [],
+            )
+        )
 
         return {
             "global_bible": global_bible,
@@ -364,6 +581,7 @@ def build_chapter_context(
             "recent_window": recent_window,
             "volume_brief": volume_brief,
             "knowledge_chunks": knowledge_chunks,
+            "context_sources": context_sources,
             "budget_used": used,
             "budget_total": token_budget,
         }

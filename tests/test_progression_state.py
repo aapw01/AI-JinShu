@@ -9,6 +9,7 @@ from app.services.memory.progression_state import (
     build_anti_repeat_constraints,
     build_transition_constraints,
 )
+from app.services.memory.context import build_chapter_context
 
 
 def _create_novel(title: str = "progression-state-test") -> Novel:
@@ -113,3 +114,63 @@ def test_save_chapter_advancement_upserts_same_key():
         assert rows[0].content["chapter_objective"] == "新目标"
     finally:
         db.close()
+
+
+def test_build_chapter_context_includes_context_sources(monkeypatch):
+    novel = _create_novel("context-sources")
+    db = SessionLocal()
+    try:
+        db.add(
+            NovelMemory(
+                novel_id=novel.id,
+                memory_type="chapter_advancement",
+                key="1",
+                content={"chapter_num": 1, "chapter_objective": "揭示真相"},
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    monkeypatch.setattr(
+        "app.services.memory.context._build_story_bible_context",
+        lambda *_args, **_kwargs: "角色状态: 林初(active)",
+    )
+    monkeypatch.setattr(
+        "app.services.memory.context.get_thread_ledger",
+        lambda *_args, **_kwargs: {"active_plotlines": ["云家主线"]},
+    )
+    monkeypatch.setattr(
+        "app.services.memory.context._get_last_chapter_ending",
+        lambda *_args, **_kwargs: "林初推门离开。",
+    )
+
+    class _SummaryMgr:
+        def get_summaries_before(self, *_args, **_kwargs):
+            return [{"chapter_num": 1, "summary": "林初确认云家线索。"}]
+
+        def get_volume_brief(self, *_args, **_kwargs):
+            return "第一卷概览"
+
+    class _VectorStore:
+        def search(self, *_args, **_kwargs):
+            return [{"content": "知识块", "chunk_type": "memory"}]
+
+    monkeypatch.setattr("app.services.memory.context.SummaryManager", lambda: _SummaryMgr())
+    monkeypatch.setattr("app.services.memory.context.VectorStoreWrapper", lambda: _VectorStore())
+
+    ctx = build_chapter_context(
+        novel.id,
+        novel_version_id=None,
+        chapter_num=2,
+        prewrite={"specification": {"characters": [{"name": "林初", "role": "主角"}]}},
+        outline={"chapter_num": 2, "title": "第2章", "outline": "推进云家线"},
+    )
+
+    assert "context_sources" in ctx
+    assert any(item["source_type"] == "global_bible" for item in ctx["context_sources"])
+    assert any(item["source_type"] == "recent_advancement_window" for item in ctx["context_sources"])
+    assert any(item["source_type"] == "knowledge_chunks" for item in ctx["context_sources"])
+    assert ctx["context_sources"][-1]["included"] in {True, False}
+    assert all("value" not in item for item in ctx["context_sources"])
+    assert all(set(item.keys()) == {"source_type", "source_key", "chapter_range", "selection_reason", "priority", "approx_tokens", "included"} for item in ctx["context_sources"])

@@ -22,11 +22,11 @@ class TestRunCombined:
         }
 
     def test_run_combined_returns_four_dicts(self):
-        """run_combined returns exactly 4 dicts in the right order."""
+        """run_combined returns exactly 6 dicts in the right order."""
         agent = self._make_agent()
         combined_result = self._make_combined_result()
         with patch("app.services.generation.agents._invoke_json_with_schema", return_value=combined_result):
-            struct_raw, factual_raw, prog_raw, aes_raw = agent.run_combined(
+            struct_raw, factual_raw, prog_raw, aes_raw, ai_flavor_raw, webnovel_raw = agent.run_combined(
                 draft="测试章节内容",
                 chapter_num=1,
                 context={},
@@ -36,15 +36,17 @@ class TestRunCombined:
         assert isinstance(factual_raw, dict)
         assert isinstance(prog_raw, dict)
         assert isinstance(aes_raw, dict)
+        assert isinstance(ai_flavor_raw, dict)
+        assert isinstance(webnovel_raw, dict)
         assert struct_raw["score"] == pytest.approx(0.85)
         assert factual_raw["contradictions"] == ["矛盾1"]
 
     def test_run_combined_fallback_on_error(self):
-        """run_combined returns 4 empty dicts when LLM fails, never raises."""
+        """run_combined returns 6 empty dicts when LLM fails, never raises."""
         agent = self._make_agent()
         with patch("app.services.generation.agents._invoke_json_with_schema", side_effect=RuntimeError("LLM error")):
             result = agent.run_combined(draft="x", chapter_num=1, context={})
-        assert len(result) == 4
+        assert len(result) == 6
         for d in result:
             assert isinstance(d, dict)
 
@@ -76,7 +78,7 @@ class TestRunCombined:
         combined_result["aesthetic"]["positives"] = ["情绪爆发很好"]
         combined_result["aesthetic"].pop("highlights", None)
         with patch("app.services.generation.agents._invoke_json_with_schema", return_value=combined_result):
-            *_, aes_raw = agent.run_combined(draft="x", chapter_num=1, context={})
+            struct_raw, factual_raw, prog_raw, aes_raw, ai_flavor_raw, webnovel_raw = agent.run_combined(draft="x", chapter_num=1, context={})
         assert aes_raw["highlights"] == ["情绪爆发很好"]
 
 

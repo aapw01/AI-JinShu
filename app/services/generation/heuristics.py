@@ -193,9 +193,36 @@ def normalize_progression_payload(result: Any, default_feedback: str = "") -> di
         "repeated_reveal",
         "repeated_relationship_turn",
         "transition_conflict",
+        "foreshadow_check",
     ]:
         payload[field] = [str(x)[:180] for x in (raw.get(field) or []) if str(x).strip()][:8]
     return payload
+
+
+def extract_ai_flavor(reviewer_output: dict[str, Any]) -> dict[str, Any]:
+    raw = reviewer_output.get("ai_flavor") or {}
+    if not isinstance(raw, dict):
+        raw = {}
+    score = raw.get("score", 5)
+    try:
+        score = max(0, min(10, int(float(score))))
+    except (TypeError, ValueError):
+        score = 5
+    issues = [str(x)[:200] for x in (raw.get("issues") or []) if str(x).strip()][:8]
+    return {"score": score, "issues": issues}
+
+
+def extract_webnovel_principles(reviewer_output: dict[str, Any]) -> dict[str, Any]:
+    raw = reviewer_output.get("webnovel_principles") or {}
+    if not isinstance(raw, dict):
+        raw = {}
+    score = raw.get("score", 5)
+    try:
+        score = max(0, min(10, int(float(score))))
+    except (TypeError, ValueError):
+        score = 5
+    violations = [str(x)[:200] for x in (raw.get("violations") or []) if str(x).strip()][:6]
+    return {"score": score, "violations": violations}
 
 
 def build_review_gate(draft: str, *payloads: dict[str, Any]) -> dict[str, Any]:

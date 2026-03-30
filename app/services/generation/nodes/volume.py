@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy import select
 
 from app.core.database import SessionLocal
+from app.core.strategy import resolve_ai_profile
 from app.models.creation_task import CreationTask
 from app.models.novel import GenerationTask, Novel, NovelFeedback
 from app.services.generation.common import REVIEW_SCORE_THRESHOLD
@@ -205,7 +206,6 @@ def _generate_next_volume_outlines_if_needed(
         logger,
         save_full_outlines,
     )
-    from app.core.strategy import get_model_for_stage
 
     volume_size = int(state.get("volume_size") or 30)
     book_end = int(state.get("book_effective_end_chapter") or state.get("end_chapter") or current_vol_end)
@@ -244,7 +244,11 @@ def _generate_next_volume_outlines_if_needed(
     except Exception as _e:
         logger.warning("node_volume_replan: failed to load summaries: %s", _e)
 
-    out_provider, out_model = get_model_for_stage(state.get("strategy", "web-novel"), "outliner")
+    out_profile = resolve_ai_profile(
+        state.get("strategy", "web-novel"),
+        "outline.batch",
+        novel_config=(state.get("novel_info") or {}).get("config"),
+    )
     outliner = state.get("outliner") or OutlinerAgent()
     next_vol_outlines = outliner.run_volume_outlines(
         novel_id=str(state["novel_id"]),
@@ -256,8 +260,10 @@ def _generate_next_volume_outlines_if_needed(
         previous_summaries=recent_summaries,
         planning_context=volume_plan,
         language=state.get("target_language", "zh"),
-        provider=out_provider,
-        model=out_model,
+        provider=out_profile["provider"],
+        model=out_profile["model"],
+        strategy_key=state.get("strategy", "web-novel"),
+        novel_config=(state.get("novel_info") or {}).get("config"),
     )
     save_full_outlines(
         state["novel_id"],

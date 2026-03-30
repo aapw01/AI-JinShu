@@ -1,6 +1,7 @@
 """Finalize node — polishes draft, persists chapter, and commits all artifacts."""
 from __future__ import annotations
 
+import asyncio
 import re
 
 from sqlalchemy import select
@@ -9,7 +10,7 @@ from app.core.constants import DEFAULT_CHAPTER_WORD_COUNT
 from app.core.database import SessionLocal
 from app.core.i18n import evaluate_language_quality
 from app.core.llm_usage import snapshot_usage
-from app.core.strategy import get_inference_for_stage, get_model_for_stage
+from app.core.strategy import resolve_ai_profile
 from app.models.novel import ChapterVersion
 from app.prompts import render_prompt
 from app.services.generation.chapter_commit import write_longform_artifacts
@@ -142,10 +143,15 @@ def _is_quality_passed(
 def node_finalize(state: GenerationState) -> GenerationState:
     chapter_num = state["current_chapter"]
     progress(state, "finalizer", chapter_num, chapter_progress(state, 0.70), "定稿...", {"current_phase": "chapter_finalizing", "total_chapters": state["num_chapters"]})
-    f_provider, f_model = get_model_for_stage(state["strategy"], "finalizer")
-    fact_inference = get_inference_for_stage(state["strategy"], "fact_extractor")
-    progression_inference = get_inference_for_stage(state["strategy"], "progression_memory")
-    progression_provider, progression_model = get_model_for_stage(state["strategy"], "reviewer")
+    novel_config = (state.get("novel_info") or {}).get("config")
+    finalizer_profile = resolve_ai_profile(state["strategy"], "finalizer", novel_config=novel_config)
+    fact_profile = resolve_ai_profile(state["strategy"], "fact_extractor", novel_config=novel_config)
+    progression_profile = resolve_ai_profile(state["strategy"], "progression_memory", novel_config=novel_config)
+    f_provider, f_model = finalizer_profile["provider"], finalizer_profile["model"]
+    finalizer_inference = finalizer_profile["inference"]
+    fact_inference = fact_profile["inference"]
+    progression_inference = progression_profile["inference"]
+    progression_provider, progression_model = progression_profile["provider"], progression_profile["model"]
     base_feedback = str(state.get("feedback") or "")
     format_guardrail = (
         "【输出格式纠偏】上一次输出包含说明性前言或标题污染。\n"
@@ -162,6 +168,7 @@ def node_finalize(state: GenerationState) -> GenerationState:
                 state["target_language"],
                 f_provider,
                 f_model,
+                finalizer_inference,
                 DEFAULT_CHAPTER_WORD_COUNT,
             ).strip()
             break
@@ -188,6 +195,7 @@ def node_finalize(state: GenerationState) -> GenerationState:
                     state["target_language"],
                     f_provider,
                     f_model,
+                    finalizer_inference,
                     DEFAULT_CHAPTER_WORD_COUNT,
                 ).strip()
             )
@@ -202,6 +210,7 @@ def node_finalize(state: GenerationState) -> GenerationState:
             state["target_language"],
             f_provider,
             f_model,
+            finalizer_inference,
             DEFAULT_CHAPTER_WORD_COUNT,
         ),
         normalize_fn=normalize_chapter_content,
@@ -286,7 +295,6 @@ def node_finalize(state: GenerationState) -> GenerationState:
     )
 
     # Foreshadow extraction (best-effort LLM call, before DB session)
-    _fe_provider, _fe_model = get_model_for_stage(state["strategy"], "fact_extractor")
     _foreshadow_planted: list = []
     _foreshadow_resolved: list = []
     try:
@@ -295,13 +303,31 @@ def node_finalize(state: GenerationState) -> GenerationState:
             chapter_num=chapter_num,
             outline=state.get("outline") or {},
             target_language=state["target_language"],
-            provider=_fe_provider,
-            model=_fe_model,
+            provider=fact_profile["provider"],
+            model=fact_profile["model"],
+            inference=fact_profile["inference"],
         )
         _foreshadow_planted = (foreshadow_result.get("planted") or [])[:5]
         _foreshadow_resolved = (foreshadow_result.get("resolved") or [])[:5]
     except Exception as exc:
         logger.warning("foreshadow_extraction failed chapter=%s error=%s", chapter_num, exc)
+
+    # Relation extraction (best-effort, before DB session)
+    _relation_objects: list = []
+    try:
+        existing_characters = list((state.get("character_state") or {}).keys())
+        relations_result = asyncio.run(
+            state["fact_extractor"].run_relation_extraction(
+                chapter_text=final_content,
+                existing_characters=existing_characters,
+                provider=fact_profile["provider"],
+                model=fact_profile["model"],
+                inference=fact_profile["inference"],
+            )
+        )
+        _relation_objects = list(relations_result.relations)
+    except Exception as exc:
+        logger.warning("relation_extraction failed chapter=%s error=%s", chapter_num, exc)
 
     progression_promotion = ProgressionPromotionService().decide(
         chapter_num=chapter_num,
@@ -384,6 +410,7 @@ def node_finalize(state: GenerationState) -> GenerationState:
                 "consistency_report": (cr := state.get("consistency_report")) and cr.summary() or {},
                 "revision_count": revision_count,
                 "context_budget_used": state["context"].get("budget_used", 0),
+                "context_sources": list((state.get("context") or {}).get("context_sources") or []),
                 "rerun_count": state.get("rerun_count", 0),
                 "factual_score": factual_score,
                 "progression_score": progression_score,
@@ -445,6 +472,29 @@ def node_finalize(state: GenerationState) -> GenerationState:
                     chapter_resolved=chapter_num,
                     db=db,
                 )
+        _story_bible = state["bible_store"]
+        for rel in _relation_objects:
+            _story_bible.upsert_relation(
+                novel_id=state["novel_id"],
+                novel_version_id=state.get("novel_version_id"),
+                source=rel.source,
+                target=rel.target,
+                relation_type=rel.relation_type,
+                description=rel.description,
+                sentiment=rel.sentiment,
+                chapter_num=chapter_num,
+                db=db,
+            )
+        # Heuristic foreshadow suggestions (best-effort, supplements LLM extraction)
+        try:
+            state["bible_store"].suggest_foreshadows(
+                chapter_text=final_content,
+                novel_id=state["novel_id"],
+                chapter_num=chapter_num,
+                db=db,
+            )
+        except Exception as exc:
+            logger.warning("foreshadow_suggest failed chapter=%s error=%s", chapter_num, exc)
         db.commit()
     except Exception:
         db.rollback()

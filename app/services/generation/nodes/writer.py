@@ -5,8 +5,9 @@ from typing import Any
 
 from app.core.constants import DEFAULT_CHAPTER_WORD_COUNT
 from app.core.llm_usage import snapshot_usage
-from app.core.strategy import get_model_for_stage
+from app.core.strategy import resolve_ai_profile
 from app.services.generation.contracts import OutputContractError
+from app.services.generation.length_control import trim_generated_text
 from app.services.generation.progress import chapter_progress, progress
 from app.services.generation.state import GenerationState
 
@@ -24,6 +25,7 @@ def node_writer(state: GenerationState) -> GenerationState:
         ctx_: dict[str, Any],
         provider_: str | None,
         model_: str | None,
+        inference_: dict[str, Any] | None,
     ) -> str:
         draft = state["writer"].run(
             state["novel_id"],
@@ -34,6 +36,7 @@ def node_writer(state: GenerationState) -> GenerationState:
             state["native_style_profile"],
             provider_,
             model_,
+            inference_,
             DEFAULT_CHAPTER_WORD_COUNT,
         )
         if _is_invalid_draft(draft):
@@ -43,7 +46,12 @@ def node_writer(state: GenerationState) -> GenerationState:
     chapter_num = state["current_chapter"]
     attempt = state.get("review_attempt", 0) + 1
     progress(state, "writer", chapter_num, chapter_progress(state, 0.35), f"写作第{chapter_num}章（尝试{attempt}）...", {"current_phase": "chapter_writing", "total_chapters": state["num_chapters"]})
-    w_provider, w_model = get_model_for_stage(state["strategy"], "writer")
+    writer_profile = resolve_ai_profile(
+        state["strategy"],
+        "writer",
+        novel_config=(state.get("novel_info") or {}).get("config"),
+    )
+    w_provider, w_model = writer_profile["provider"], writer_profile["model"]
     pacing_mode = str(state.get("pacing_mode") or "normal")
     ctx_a = dict(state["context"])
     ctx_a["ab_variant"] = "A"
@@ -55,7 +63,7 @@ def node_writer(state: GenerationState) -> GenerationState:
         _draft_a = ""
         _err_a: Exception | None = None
         try:
-            _draft_a = _safe_write(chapter_num, state["outline"], ctx_a, w_provider, w_model)
+            _draft_a = _safe_write(chapter_num, state["outline"], ctx_a, w_provider, w_model, writer_profile["inference"])
         except Exception as exc:
             _err_a = exc
 
@@ -70,7 +78,7 @@ def node_writer(state: GenerationState) -> GenerationState:
         _draft_b = ""
         _err_b: Exception | None = None
         try:
-            _draft_b = _safe_write(chapter_num, state["outline"], ctx_b, w_provider, w_model)
+            _draft_b = _safe_write(chapter_num, state["outline"], ctx_b, w_provider, w_model, writer_profile["inference"])
         except Exception as exc:
             _err_b = exc
         return _draft_a, _draft_b, _err_a, _err_b
@@ -119,6 +127,16 @@ def node_writer(state: GenerationState) -> GenerationState:
             )
         raise RuntimeError(f"writer failed for both variants: A={err_a}, B={err_b}")
 
+    target_word_count = DEFAULT_CHAPTER_WORD_COUNT
+    _trim_limit = int(target_word_count * 1.5)
+
+    def _maybe_trim(text: str) -> str:
+        if len(text) > target_word_count * 1.5:
+            return trim_generated_text(text, _trim_limit)
+        return text
+
+    draft_a = _maybe_trim(draft_a) if draft_a else draft_a
+    draft_b = _maybe_trim(draft_b) if draft_b else draft_b
     candidates = [
         {"variant": "A", "draft": draft_a} if draft_a else None,
         {"variant": "B", "draft": draft_b} if draft_b else None,

@@ -1,0 +1,9 @@
+Based on this chapter content, extract character relationships that are explicitly shown in the text.
+
+Known characters: {{ existing_characters }}
+
+Chapter content (truncated):
+{{ chapter_text }}
+
+Output JSON: {"relations": [{"source": "角色A名", "target": "角色B名", "relation_type": "师徒|盟友|仇敌|家人|恋人|竞争|其他", "description": "简短描述（≤20字）", "sentiment": "positive|negative|neutral"}]}
+Only include relations explicitly demonstrated in this chapter. Do not infer or assume. If no relations are found, return {"relations": []}. Output pure JSON.

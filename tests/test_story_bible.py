@@ -1,6 +1,24 @@
 """Tests for phase-1 story bible persistence."""
 from app.core.database import SessionLocal, resolve_novel
+from app.models.novel import NovelVersion
 from app.services.memory.story_bible import StoryBibleStore, CheckpointStore, QualityReportStore
+
+
+def _create_version(novel_id: int, version_no: int) -> NovelVersion:
+    db = SessionLocal()
+    try:
+        version = NovelVersion(
+            novel_id=novel_id,
+            version_no=version_no,
+            status="completed",
+            is_default=1 if version_no == 1 else 0,
+        )
+        db.add(version)
+        db.commit()
+        db.refresh(version)
+        return version
+    finally:
+        db.close()
 
 
 def test_story_bible_entity_and_fact(client):
@@ -89,3 +107,47 @@ def test_snapshot_query(client):
     latest = store.get_latest_snapshot(novel_id=novel_id, volume_no=1)
     assert latest is not None
     assert latest.snapshot_json["avg_review_score"] == 0.73
+
+
+def test_story_relations_are_scoped_by_novel_version(client):
+    r = client.post("/api/novels", json={"title": "Relation Version Test", "target_language": "zh"})
+    assert r.status_code == 200
+    novel_public_id = r.json()["id"]
+    db = SessionLocal()
+    try:
+        novel = resolve_novel(db, novel_public_id)
+        assert novel is not None
+        novel_id = int(novel.id)
+    finally:
+        db.close()
+
+    version_1 = _create_version(novel_id, 2)
+    version_2 = _create_version(novel_id, 3)
+
+    store = StoryBibleStore()
+    store.upsert_relation(
+        novel_id=novel_id,
+        novel_version_id=version_1.id,
+        source="林舟",
+        target="苏晚",
+        relation_type="ally",
+        description="第一版关系",
+        chapter_num=10,
+    )
+    store.upsert_relation(
+        novel_id=novel_id,
+        novel_version_id=version_2.id,
+        source="林舟",
+        target="苏晚",
+        relation_type="enemy",
+        description="第二版关系",
+        chapter_num=12,
+    )
+
+    rels_v1 = store.list_relations(novel_id=novel_id, novel_version_id=version_1.id)
+    rels_v2 = store.list_relations(novel_id=novel_id, novel_version_id=version_2.id)
+
+    assert len(rels_v1) == 1
+    assert len(rels_v2) == 1
+    assert rels_v1[0].description == "第一版关系"
+    assert rels_v2[0].description == "第二版关系"
