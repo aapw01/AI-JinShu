@@ -47,7 +47,6 @@ const CHAPTER_STATUS_MAP: Record<ChapterProgress["status"], { label: string; var
   completed: { label: "已完成", variant: "success" },
   blocked: { label: "已阻断", variant: "error" },
 };
-const GRAMMAR_SKIPPED_TEXT = "未启用语法检查（language_tool_python 不可用），跳过该项。";
 const EMPTY_VERSIONS: NovelVersion[] = [];
 const EMPTY_CHAPTERS: Chapter[] = [];
 const EMPTY_CHAPTER_PROGRESS: ChapterProgress[] = [];
@@ -72,11 +71,6 @@ function countVisibleChars(content?: string): number {
 function toDisplayLabel(rawValue: string | undefined, labelMap: Record<string, string>, fallback: string): string {
   if (!rawValue) return "";
   return labelMap[rawValue] || fallback;
-}
-
-function sanitizeLanguageReport(report?: string): string {
-  if (!report) return "";
-  return report.replaceAll(GRAMMAR_SKIPPED_TEXT, "").replace(/\s{2,}/g, " ").trim();
 }
 
 export default function NovelPage() {
@@ -235,11 +229,6 @@ export default function NovelPage() {
     }
     return countVisibleChars(selectedChapter.content);
   }, [selectedChapter]);
-  const selectedLanguageReport = useMemo(
-    () => sanitizeLanguageReport(selectedChapter?.language_quality_report),
-    [selectedChapter?.language_quality_report]
-  );
-
   const genreLabel = toDisplayLabel(novel?.genre, genreLabelMap, "未定义体裁");
   const styleLabel = toDisplayLabel(novel?.style, styleLabelMap, "未定义风格");
   const chapterLabel = selectedChapter
@@ -845,16 +834,6 @@ export default function NovelPage() {
                             </div>
                           ))}
                         </div>
-                      </div>
-                    ) : null}
-                    {(typeof selectedChapter.language_quality_score === "number" || selectedLanguageReport) ? (
-                      <div className="mt-6 border-t border-[rgba(60,60,67,0.12)] pt-4 text-xs text-[#7E756D]">
-                        语言质量：{typeof selectedChapter.language_quality_score === "number"
-                          ? (selectedChapter.language_quality_score * 10).toFixed(1)
-                          : "-"} / 10
-                        {selectedLanguageReport ? (
-                          <p className="mt-2 text-[#7E756D] whitespace-pre-wrap">{selectedLanguageReport}</p>
-                        ) : null}
                       </div>
                     ) : null}
                     <p className="mt-4 text-xs text-[#8E8379]">
