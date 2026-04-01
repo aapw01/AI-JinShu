@@ -947,13 +947,19 @@ export const api = {
   createNovel: (data: CreateNovelData) =>
     fetchApi<{ id: string }>("/api/novels", {
       method: "POST",
-      body: JSON.stringify(data),
+      body: JSON.stringify({
+        ...data,
+        target_language: data.target_language || "zh",
+      }),
     }),
 
   generateIdeaFramework: (data: IdeaFrameworkRequest) =>
     fetchApi<IdeaFrameworkResponse>("/api/novels/idea-framework", {
       method: "POST",
-      body: JSON.stringify(data),
+      body: JSON.stringify({
+        ...data,
+        target_language: data.target_language || "zh",
+      }),
     }),
 
   getNovel: (id: string) => fetchApi<Novel>(`/api/novels/${id}`),

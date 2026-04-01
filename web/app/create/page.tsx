@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
-import { ArrowLeft, ArrowRight, Globe, PenSquare, Sparkles, WandSparkles } from "lucide-react";
+import { ArrowLeft, ArrowRight, PenSquare, Sparkles, WandSparkles } from "lucide-react";
 import { api, getErrorMessage } from "@/lib/api";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -14,22 +14,9 @@ import { ErrorDialog } from "@/components/ui";
 
 const STEPS = [
   { id: 1, title: "创意", icon: "lightbulb" },
-  { id: 2, title: "语言", icon: "globe" },
-  { id: 3, title: "类型", icon: "book" },
-  { id: 4, title: "风格", icon: "palette" },
-  { id: 5, title: "设置", icon: "settings" },
-];
-
-const LANGUAGES = [
-  { value: "zh", label: "中文" },
-  { value: "en", label: "English" },
-  { value: "es", label: "Español" },
-  { value: "fr", label: "Français" },
-  { value: "de", label: "Deutsch" },
-  { value: "pt", label: "Português" },
-  { value: "ja", label: "日本語" },
-  { value: "ko", label: "한국어" },
-  { value: "ar", label: "العربية" },
+  { id: 2, title: "类型", icon: "book" },
+  { id: 3, title: "风格", icon: "palette" },
+  { id: 4, title: "设置", icon: "settings" },
 ];
 
 const DEFAULT_GENRES = [
@@ -77,7 +64,6 @@ const METHODS = [
 interface FormData {
   title: string;
   idea: string;
-  language: string;
   genre: string;
   style: string;
   audience: string;
@@ -97,7 +83,6 @@ export default function CreatePage() {
   const [form, setForm] = useState<FormData>({
     title: "",
     idea: "",
-    language: "zh",
     genre: "",
     style: "tomato-hot",
     audience: "general",
@@ -156,12 +141,10 @@ export default function CreatePage() {
       case 1:
         return form.title.trim().length > 0;
       case 2:
-        return form.language.length > 0;
-      case 3:
         return form.genre.length > 0;
-      case 4:
+      case 3:
         return form.style.length > 0;
-      case 5:
+      case 4:
         return true;
       default:
         return false;
@@ -181,7 +164,7 @@ export default function CreatePage() {
         style: form.style || undefined,
         audience: form.audience || undefined,
         strategy: selectedStyle?.strategy || "web-novel",
-        target_language: form.language,
+        target_language: "zh",
         config: {
           idea: form.idea,
           length: form.length,
@@ -318,36 +301,6 @@ export default function CreatePage() {
           {step === 2 && (
             <div className="space-y-6">
               <div className="mb-8">
-                <div className="inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs bg-[#F8ECEA] text-[#A52A25] border border-[#EED1CC] mb-3">
-                  <Globe className="w-3.5 h-3.5" />
-                  Language
-                </div>
-                <h2 className="text-xl font-semibold text-[#1F1B18] mb-1">选择创作语言</h2>
-                <p className="text-[#7E756D]">AI 会按该语言的母语风格生成文本。</p>
-              </div>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                {LANGUAGES.map((lang) => (
-                  <button
-                    key={lang.value}
-                    onClick={() => updateForm({ language: lang.value })}
-                    className={`
-                      p-4 rounded-xl border text-center transition-all
-                      ${form.language === lang.value
-                        ? "bg-[#F8ECEA] border-[#EED1CC] text-[#A52A25]"
-                        : "bg-white border-[rgba(60,60,67,0.14)] text-[#7E756D] hover:text-[#1F1B18] hover:border-[rgba(60,60,67,0.26)]"
-                      }
-                    `}
-                  >
-                    {lang.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {step === 3 && (
-            <div className="space-y-6">
-              <div className="mb-8">
                 <h2 className="text-xl font-semibold text-[#1F1B18] mb-1">选择小说类型</h2>
                 <p className="text-[#7E756D]">类型决定主要叙事节奏与读者期待。</p>
               </div>
@@ -374,7 +327,7 @@ export default function CreatePage() {
             </div>
           )}
 
-          {step === 4 && (
+          {step === 3 && (
             <div className="space-y-6">
               <div className="mb-8">
                 <h2 className="text-xl font-semibold text-[#1F1B18] mb-1">选择写作风格</h2>
@@ -403,7 +356,7 @@ export default function CreatePage() {
             </div>
           )}
 
-          {step === 5 && (
+          {step === 4 && (
             <div className="space-y-6">
               <div className="mb-8">
                 <div className="inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs bg-[#F8ECEA] text-[#A52A25] border border-[#EED1CC] mb-3">
@@ -453,10 +406,6 @@ export default function CreatePage() {
                     <span className="text-[#1F1B18]">{form.title}</span>
                   </div>
                   <div className="flex justify-between">
-                    <span className="text-[#7E756D]">语言</span>
-                    <span className="text-[#1F1B18]">{LANGUAGES.find((l) => l.value === form.language)?.label}</span>
-                  </div>
-                  <div className="flex justify-between">
                     <span className="text-[#7E756D]">类型</span>
                     <span className="text-[#1F1B18]">{genres.find((g) => g.id === form.genre)?.label}</span>
                   </div>
@@ -489,7 +438,7 @@ export default function CreatePage() {
             上一步
           </Button>
 
-          {step < 5 ? (
+          {step < 4 ? (
             <Button onClick={() => setStep(step + 1)} disabled={!canProceed()}>
               下一步
               <ArrowRight className="w-4 h-4 ml-2" />

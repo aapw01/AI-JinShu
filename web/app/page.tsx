@@ -41,22 +41,9 @@ const STATUS_MAP: Record<string, { label: string; variant: "default" | "success"
 
 const STEPS = [
   { id: 1, title: "创意设定" },
-  { id: 2, title: "语言" },
-  { id: 3, title: "类型" },
-  { id: 4, title: "风格" },
-  { id: 5, title: "参数配置" },
-];
-
-const LANGUAGES = [
-  { value: "zh", label: "中文" },
-  { value: "en", label: "English" },
-  { value: "es", label: "Español" },
-  { value: "fr", label: "Français" },
-  { value: "de", label: "Deutsch" },
-  { value: "pt", label: "Português" },
-  { value: "ja", label: "日本語" },
-  { value: "ko", label: "한국어" },
-  { value: "ar", label: "العربية" },
+  { id: 2, title: "类型" },
+  { id: 3, title: "风格" },
+  { id: 4, title: "参数配置" },
 ];
 
 const DEFAULT_GENRES = [
@@ -104,7 +91,6 @@ const METHODS = [
 interface FormData {
   title: string;
   idea: string;
-  language: string;
   genre: string;
   style: string;
   audience: string;
@@ -143,7 +129,6 @@ export default function Home() {
   const [form, setForm] = useState<FormData>({
     title: "",
     idea: "",
-    language: "zh",
     genre: "",
     style: "",
     audience: "general",
@@ -231,12 +216,10 @@ export default function Home() {
       case 1:
         return form.title.trim().length > 0;
       case 2:
-        return form.language.length > 0;
-      case 3:
         return form.genre.length > 0;
-      case 4:
+      case 3:
         return form.style.length > 0;
-      case 5:
+      case 4:
         return true;
       default:
         return false;
@@ -284,7 +267,7 @@ export default function Home() {
         style: form.style || undefined,
         audience: form.audience || undefined,
         strategy: selectedStyle?.strategy || "web-novel",
-        target_language: form.language,
+        target_language: "zh",
         config: {
           idea: form.idea,
           length: form.length,
@@ -396,28 +379,7 @@ export default function Home() {
 
                   {step === 2 && (
                     <div className="space-y-3">
-                      <p className="text-sm font-medium text-[#A52A25]">2. 语言</p>
-                      <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
-                        {LANGUAGES.map((lang) => (
-                          <button
-                            key={lang.value}
-                            onClick={() => setForm((prev) => ({ ...prev, language: lang.value }))}
-                            className={`px-3 py-2 rounded-lg border text-sm transition-all ${
-                              form.language === lang.value
-                                ? "bg-[#F8ECEA] border-[#EED1CC] text-[#A52A25]"
-                                : "bg-white border-[#DDD8D3] text-[#6B635D]"
-                            }`}
-                          >
-                            {lang.label}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {step === 3 && (
-                    <div className="space-y-3">
-                      <p className="text-sm font-medium text-[#A52A25]">3. 故事类型</p>
+                      <p className="text-sm font-medium text-[#A52A25]">2. 故事类型</p>
                       <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
                         {genres.map((genre) => (
                           <button
@@ -435,9 +397,9 @@ export default function Home() {
                     </div>
                   )}
 
-                  {step === 4 && (
+                  {step === 3 && (
                     <div className="space-y-3">
-                      <p className="text-sm font-medium text-[#A52A25]">4. 写作风格</p>
+                      <p className="text-sm font-medium text-[#A52A25]">3. 写作风格</p>
                       <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
                         {styles.map((style) => (
                           <button
@@ -455,9 +417,9 @@ export default function Home() {
                     </div>
                   )}
 
-                  {step === 5 && (
+                  {step === 4 && (
                     <div className="space-y-3">
-                      <p className="text-sm font-medium text-[#A52A25]">5. 生成参数</p>
+                      <p className="text-sm font-medium text-[#A52A25]">4. 生成参数</p>
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                         <Select
                           label="小说长度"
@@ -503,8 +465,8 @@ export default function Home() {
                     <Button variant="ghost" onClick={() => setStep((prev) => Math.max(1, prev - 1))} disabled={step === 1}>
                       上一步
                     </Button>
-                    {step < 5 ? (
-                      <Button className="bg-[#C8211B] hover:bg-[#AD1B16] shadow-none" onClick={() => setStep((prev) => Math.min(5, prev + 1))} disabled={!canProceed()}>
+                    {step < 4 ? (
+                      <Button className="bg-[#C8211B] hover:bg-[#AD1B16] shadow-none" onClick={() => setStep((prev) => Math.min(4, prev + 1))} disabled={!canProceed()}>
                         下一步
                       </Button>
                     ) : (
@@ -651,12 +613,11 @@ export default function Home() {
             <Card className="p-3 border border-[#DDD8D3] shadow-none rounded-[14px] bg-[#FBFAF8] h-full min-h-0 flex flex-col">
               <div className="flex items-center justify-between mb-2">
                 <h3 className="font-semibold text-[#1F1B18]">填写预览</h3>
-                <span className="text-xs text-[#8E8379]">{step}/5</span>
+                <span className="text-xs text-[#8E8379]">{step}/4</span>
               </div>
               <div className="grid grid-cols-1 gap-2 text-xs flex-1 min-h-0 overflow-y-auto pr-1">
                 <SummaryChip label="标题" value={form.title || "未填写"} />
                 <SummaryChip label="创意" value={form.idea || "未填写"} />
-                <SummaryChip label="语言" value={LANGUAGES.find((l) => l.value === form.language)?.label || "未选择"} />
                 <SummaryChip label="类型" value={genres.find((g) => g.id === form.genre)?.label || "未选择"} />
                 <SummaryChip label="风格" value={styles.find((s) => s.id === form.style)?.label || "未选择"} />
                 <SummaryChip label="读者" value={audiences.find((a) => a.id === form.audience)?.label || "未选择"} />
@@ -666,7 +627,7 @@ export default function Home() {
               </div>
               <div className="mt-3">
                 <div className="h-2 rounded-full bg-[#EFE9E3] overflow-hidden">
-                  <div className="h-full bg-[#C8211B]" style={{ width: `${(step / 5) * 100}%` }} />
+                  <div className="h-full bg-[#C8211B]" style={{ width: `${(step / 4) * 100}%` }} />
                 </div>
                 <p className="text-[11px] text-[#8E8379] mt-1">继续填写后可进入下一步。</p>
               </div>
