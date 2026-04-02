@@ -1,0 +1,15 @@
+<final_book_review_contract>
+输出 JSON：
+{
+  "score": 0.0,
+  "confidence": 0.0,
+  "feedback": "总体评语",
+  "must_fix": ["必须修复项"],
+  "should_improve": ["建议优化项"],
+  "fallback": false
+}
+
+要求：
+- 只根据输入进行评审，不要臆造未提供的情节。
+- `must_fix` 最多 5 条，`should_improve` 最多 5 条。
+</final_book_review_contract>

@@ -35,6 +35,157 @@ THREAD_LEDGER_MAX_CHARS = 1200
 RECENT_WINDOW_MAX_CHARS = 2000
 VOLUME_BRIEF_MAX_CHARS = 1600
 STORY_BIBLE_MAX_CHARS = 3200
+_SELECTION_TOKEN_RE = re.compile(r"[A-Za-z0-9_]{2,}|[\u4e00-\u9fff]{2,6}")
+
+
+def _expand_selection_token(token: str) -> set[str]:
+    expanded = {token}
+    if re.fullmatch(r"[\u4e00-\u9fff]{3,6}", token):
+        max_window = min(4, len(token))
+        for window in range(2, max_window + 1):
+            for index in range(0, len(token) - window + 1):
+                expanded.add(token[index:index + window])
+    return expanded
+
+
+def _selection_terms_from_outline(outline: dict | None) -> set[str]:
+    if not isinstance(outline, dict):
+        return set()
+    pieces: list[str] = []
+    for key in (
+        "title",
+        "outline",
+        "chapter_objective",
+        "conflict_axis",
+        "opening_scene",
+        "opening_time_state",
+        "relationship_delta",
+    ):
+        value = outline.get(key)
+        if value:
+            pieces.append(str(value))
+    for key in ("required_new_information", "opening_character_positions", "forbidden_repeats"):
+        values = outline.get(key) or []
+        if isinstance(values, list):
+            pieces.extend(str(item) for item in values if str(item).strip())
+    terms: set[str] = set()
+    for token in _SELECTION_TOKEN_RE.findall(" ".join(pieces)):
+        if token:
+            terms.update(_expand_selection_token(token))
+    return terms
+
+
+def select_context_candidates(
+    *,
+    chapter_num: int,
+    outline: dict | None,
+    candidates: list[Any],
+    max_items: int,
+    id_key: str = "id",
+    content_key: str = "content",
+) -> list[dict[str, Any]]:
+    """Select the most relevant optional context items with a soft-fail heuristic."""
+    del chapter_num
+    if max_items <= 0:
+        return []
+    outline_terms = _selection_terms_from_outline(outline)
+    scored: list[dict[str, Any]] = []
+    for index, candidate in enumerate(candidates or []):
+        if not isinstance(candidate, dict):
+            continue
+        candidate_id = candidate.get(id_key)
+        if candidate_id in (None, ""):
+            candidate_id = candidate.get("chapter_num")
+        if candidate_id in (None, ""):
+            continue
+        content = str(
+            candidate.get(content_key)
+            or candidate.get("summary")
+            or candidate.get("text")
+            or candidate.get("line")
+            or ""
+        )
+        score = 0
+        if content and outline_terms:
+            content_terms: set[str] = set()
+            for token in _SELECTION_TOKEN_RE.findall(content):
+                if token:
+                    content_terms.update(_expand_selection_token(token))
+            score += len(outline_terms.intersection(content_terms)) * 5
+            if "上一章" in content or "上章" in content or "结尾" in content:
+                score += 2
+        scored.append(
+            {
+                **candidate,
+                id_key: candidate_id,
+                "_selector_score": score,
+                "_selector_index": index,
+            }
+        )
+    scored.sort(
+        key=lambda item: (
+            -int(item.get("_selector_score") or 0),
+            int(item.get("_selector_index") or 0),
+        )
+    )
+    return [{k: v for k, v in item.items() if not k.startswith("_selector_")} for item in scored[:max_items]]
+
+
+def _select_recent_summary_window(
+    *,
+    chapter_num: int,
+    outline: dict | None,
+    recent_summaries: list[dict[str, Any]],
+    max_items: int,
+) -> list[dict[str, Any]]:
+    normalized = [item for item in recent_summaries if isinstance(item, dict)]
+    if max_items <= 0 or not normalized:
+        return []
+
+    target = min(max_items, len(normalized))
+    immediate_prior_chapter = max(0, chapter_num - 1)
+    preserved_chapters = {
+        int(item.get("chapter_num") or 0)
+        for item in normalized
+        if int(item.get("chapter_num") or 0) == immediate_prior_chapter
+    }
+    selector_pool = [
+        {
+            "id": str(item.get("chapter_num") or ""),
+            "chapter_num": item.get("chapter_num"),
+            "summary": item.get("summary"),
+            "content": item.get("summary"),
+        }
+        for item in reversed(normalized)
+        if int(item.get("chapter_num") or 0) not in preserved_chapters
+    ]
+    selected_chapters = set(preserved_chapters)
+    if len(selected_chapters) < target:
+        chosen = select_context_candidates(
+            chapter_num=chapter_num,
+            outline=outline,
+            candidates=selector_pool,
+            max_items=target - len(selected_chapters),
+        )
+        selected_chapters.update(
+            int(item.get("chapter_num") or item.get("id") or 0)
+            for item in chosen
+            if int(item.get("chapter_num") or item.get("id") or 0) > 0
+        )
+
+    if len(selected_chapters) < target:
+        for item in reversed(normalized):
+            chapter = int(item.get("chapter_num") or 0)
+            if chapter > 0 and chapter not in selected_chapters:
+                selected_chapters.add(chapter)
+            if len(selected_chapters) >= target:
+                break
+
+    return [
+        item
+        for item in normalized
+        if int(item.get("chapter_num") or 0) in selected_chapters
+    ]
 
 
 def _chapter_range_for_items(items: list[dict] | list[Any]) -> list[int] | None:
@@ -209,9 +360,23 @@ def _build_story_bible_context(
     try:
         rel_records = bible.list_relations(novel_id, limit=30, novel_version_id=novel_version_id, db=db)
         if rel_records:
+            rel_candidates = [
+                {
+                    "id": f"{rel.source}->{rel.target}",
+                    "line": f"{rel.source}→{rel.target}({rel.relation_type}): {rel.description}",
+                    "content": f"{rel.source} {rel.target} {rel.relation_type} {rel.description}",
+                }
+                for rel in rel_records
+            ]
+            chosen_relations = select_context_candidates(
+                chapter_num=chapter_num,
+                outline=outline,
+                candidates=rel_candidates,
+                max_items=8,
+            )
             rel_lines = ["【角色关系】"]
-            for rel in rel_records:
-                rel_lines.append(f"  {rel.source}→{rel.target}({rel.relation_type}): {rel.description}")
+            for rel in chosen_relations:
+                rel_lines.append(f"  {rel['line']}")
             lines.append("\n".join(rel_lines))
     except Exception as _exc:
         _log.warning("story_bible_context: char_relation read failed: %s", _exc)
@@ -249,7 +414,17 @@ def _build_story_bible_context(
                 name = entity_id_to_name.get(eid, "")
                 fact_lines.append(f"{name}: {'; '.join(fact_strs[:3])}")
             if fact_lines:
-                lines.append("角色事实: " + " | ".join(fact_lines))
+                fact_candidates = [
+                    {"id": str(index), "line": line, "content": line}
+                    for index, line in enumerate(fact_lines)
+                ]
+                chosen_facts = select_context_candidates(
+                    chapter_num=chapter_num,
+                    outline=outline,
+                    candidates=fact_candidates,
+                    max_items=4,
+                )
+                lines.append("角色事实: " + " | ".join(str(item["line"]) for item in chosen_facts))
     except Exception as _exc:
         _log.warning("story_bible_context: story_fact read failed: %s", _exc)
 
@@ -477,7 +652,20 @@ def build_chapter_context(
         transition_constraints = build_transition_constraints(previous_transition_state)
 
         all_before = summary_mgr.get_summaries_before(novel_id, novel_version_id, chapter_num, db=db)
-        recent_summaries = all_before[-RECENT_WINDOW_SIZE:]
+        full_recent_summaries = [
+            item for item in all_before[-RECENT_WINDOW_SIZE:] if isinstance(item, dict)
+        ]
+        recent_summaries = _select_recent_summary_window(
+            chapter_num=chapter_num,
+            outline=outline,
+            recent_summaries=full_recent_summaries,
+            max_items=min(3, len(full_recent_summaries)),
+        )
+        selected_recent_chapters = [
+            int(item.get("chapter_num") or 0)
+            for item in recent_summaries
+            if int(item.get("chapter_num") or 0) > 0
+        ]
         last_ending = _get_last_chapter_ending(novel_version_id, chapter_num, db)
         recent_parts = [f"第{s['chapter_num']}章: {s['summary']}" for s in recent_summaries]
         if last_ending:
@@ -522,11 +710,26 @@ def build_chapter_context(
         )
 
         knowledge_chunks: list[dict] = []
+        chunk_candidates: list[dict] = []
         if used < token_budget:
             outline_text = f"{outline.get('title', '')}\n{outline.get('outline', '')}".strip()
             query_text = "\n".join(x for x in [outline_text, thread_ledger_str, recent_window] if x).strip()
             chunks = vector_store.search(novel_id, novel_version_id, query_text=query_text, limit=5, db=db)
-            for c in chunks:
+            chunk_candidates = [
+                {
+                    **c,
+                    "id": str(c.get("id") or c.get("chunk_id") or index),
+                    "content": c.get("content", "") or str(c),
+                }
+                for index, c in enumerate(chunks)
+            ]
+            chosen_chunks = select_context_candidates(
+                chapter_num=chapter_num,
+                outline=outline,
+                candidates=chunk_candidates,
+                max_items=3,
+            )
+            for c in chosen_chunks:
                 content = c.get("content", "") or str(c)
                 if used + estimate_tokens(content) <= token_budget:
                     knowledge_chunks.append(c)
@@ -565,6 +768,22 @@ def build_chapter_context(
                 chapter_range=[prev_transition_ch, prev_transition_ch] if prev_transition_ch > 0 else [],
             )
         )
+        memory_governance_notes = [
+            "只把正文中明确发生的事实用于后续强约束。",
+            "outline 与卷规划属于目标，不等于正文已经兑现。",
+            "若记忆与当前正文冲突，以当前正文和已落库章节事实为准。",
+        ]
+        constraint_usage_notes = {
+            "anti_repeat_rule": "只有重复对象、动作和揭示都足够明确时才升级为 blocker；弱相似仅作提醒。",
+            "transition_rule": "只有上一章结尾状态明确且本章开头冲突明确时才升级为 must_fix。",
+            "selected_recent_chapters": selected_recent_chapters,
+            "selected_knowledge_chunk_ids": [str(item.get('id') or '') for item in knowledge_chunks][:3],
+        }
+        context_selector_meta = {
+            "recent_window_selected": selected_recent_chapters,
+            "knowledge_chunks_selected": [str(item.get('id') or '') for item in knowledge_chunks][:3],
+            "knowledge_chunks_candidate_count": len(chunk_candidates),
+        }
 
         return {
             "global_bible": global_bible,
@@ -578,9 +797,14 @@ def build_chapter_context(
             "book_progression_state": book_progression_state,
             "anti_repeat_constraints": anti_repeat_constraints,
             "transition_constraints": transition_constraints,
+            "full_recent_summaries": full_recent_summaries,
+            "summaries": recent_summaries,
             "recent_window": recent_window,
             "volume_brief": volume_brief,
             "knowledge_chunks": knowledge_chunks,
+            "memory_governance_notes": memory_governance_notes,
+            "constraint_usage_notes": constraint_usage_notes,
+            "context_selector_meta": context_selector_meta,
             "context_sources": context_sources,
             "budget_used": used,
             "budget_total": token_budget,
@@ -616,8 +840,17 @@ def get_context_for_chapter(
             db=db,
             volume_size=volume_size,
         )
-        all_before = summary_mgr.get_summaries_before(novel_id, novel_version_id, chapter_num, db=db)
-        ctx["summaries"] = all_before[-RECENT_WINDOW_SIZE:]
+        if "full_recent_summaries" in ctx:
+            ctx["full_recent_summaries"] = list(ctx.get("full_recent_summaries") or [])
+        elif "summaries" in ctx:
+            ctx["full_recent_summaries"] = list(ctx.get("summaries") or [])
+        else:
+            all_before = summary_mgr.get_summaries_before(novel_id, novel_version_id, chapter_num, db=db)
+            ctx["full_recent_summaries"] = all_before[-RECENT_WINDOW_SIZE:]
+        if "summaries" in ctx:
+            ctx["summaries"] = list(ctx.get("summaries") or [])
+        else:
+            ctx["summaries"] = list(ctx.get("full_recent_summaries") or [])
         from app.services.memory.character_state import CharacterStateManager
 
         char_mgr = CharacterStateManager()

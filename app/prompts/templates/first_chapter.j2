@@ -1,4 +1,17 @@
-{# v2 first chapter prompt: task semantics + shared contract include #}
+{# first_chapter.j2
+   目标：生成高抓力首章，确保主角、困境、钩子和首个不可逆变化落地。
+   防护：防止设定说明开篇、防止只写氛围不推进、防止风格与结构约束混杂后互相污染。
+   最近调整：引入 role / memory policy / style overlay 分层，便于后续统一治理。
+#}
+{% if role_section %}{{ role_section }}
+
+{% endif %}
+{% if memory_policy_section %}{{ memory_policy_section }}
+
+{% endif %}
+{% if style_overlay_section %}{{ style_overlay_section }}
+
+{% endif %}
 你是长篇网文作者，请创作第1章正文。
 
 <global_bible>
@@ -39,6 +52,20 @@
 <anti_repeat_constraints_json>
 {{ context.anti_repeat_constraints | tojson_pretty }}
 </anti_repeat_constraints_json>
+{% endif %}
+
+{% if context.memory_governance_notes %}
+<memory_governance_notes>
+{% for note in context.memory_governance_notes %}
+- {{ note }}
+{% endfor %}
+</memory_governance_notes>
+{% endif %}
+
+{% if context.constraint_usage_notes %}
+<constraint_usage_notes_json>
+{{ context.constraint_usage_notes | tojson_pretty }}
+</constraint_usage_notes_json>
 {% endif %}
 
 <writing_goals>

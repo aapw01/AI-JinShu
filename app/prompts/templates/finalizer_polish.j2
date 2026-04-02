@@ -1,3 +1,17 @@
+{# finalizer_polish.j2
+   目标：在不改坏章节骨架的前提下完成定稿与长度收口。
+   防护：禁止引入新设定补洞，禁止把 review 文案直接搬进正文，禁止为了压字数删主冲突和钩子。
+   注意：证据薄弱时优先保守，不要过修。
+#}
+{% if role_section %}{{ role_section }}
+
+{% endif %}
+{% if memory_policy_section %}{{ memory_policy_section }}
+
+{% endif %}
+{% if style_overlay_section %}{{ style_overlay_section }}
+
+{% endif %}
 你是资深小说定稿编辑。请在“尽量少改原文骨架”的前提下做定稿润色。
 
 <review_feedback>

@@ -386,3 +386,91 @@ def test_progression_memory_agent_trims_large_lists(monkeypatch):
     assert len(result["advancement"]["major_beats"]) == 5
     assert len(result["transition"]["character_positions"]) == 5
     assert len(result["validation_notes"]) == 6
+
+
+def test_progression_memory_agent_prompt_includes_constitution_and_memory_policy(monkeypatch):
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("app.services.generation.agents.get_llm_with_fallback", lambda *_args, **_kwargs: _FakeLLM())
+
+    def _capture(_llm, prompt, *_args, **_kwargs):
+        captured["prompt"] = prompt
+        return {
+            "advancement": {},
+            "transition": {},
+            "advancement_confidence": 0.2,
+            "transition_confidence": 0.2,
+            "validation_notes": [],
+        }
+
+    monkeypatch.setattr("app.services.generation.agents._invoke_json_with_schema", _capture)
+
+    ProgressionMemoryAgent().run(
+        chapter_num=4,
+        content="主角在旧宅中找到父亲遗留的账册，并决定主动入局。",
+        outline={"title": "旧宅夜探", "chapter_objective": "找到证据"},
+        provider="openai",
+        model="test-model",
+    )
+
+    prompt = str(captured["prompt"])
+    assert "你是推进记忆与衔接记忆抽取角色" in prompt
+    assert "只有正文中明确发生的事实才能进入后续强约束" in prompt
+
+
+def test_reviewer_factual_prompt_includes_constitution_and_memory_policy(monkeypatch):
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr("app.services.generation.agents.get_llm_with_fallback", lambda *_args, **_kwargs: _FakeLLM())
+
+    def _capture(_llm, prompt, *_args, **_kwargs):
+        captured["prompt"] = prompt
+        return {
+            "score": 0.8,
+            "confidence": 0.7,
+            "feedback": "ok",
+            "positives": [],
+            "must_fix": [],
+            "should_fix": [],
+            "risks": [],
+            "contradictions": [],
+        }
+
+    monkeypatch.setattr("app.services.generation.agents._invoke_json_with_schema", _capture)
+
+    ReviewerAgent().run_factual_structured(
+        draft="主角从医院瞬移回到旧宅。",
+        chapter_num=5,
+        context={
+            "previous_transition_state": {"ending_scene": "医院"},
+            "outline_contract": {"opening_scene": "旧宅"},
+        },
+        provider="openai",
+        model="test-model",
+    )
+
+    prompt = str(captured["prompt"])
+    assert "你是事实一致性审校角色" in prompt
+    assert "如果记忆与当前正文证据冲突，以当前正文和已落库章节事实为准" in prompt
+
+
+def test_finalizer_prompt_includes_constitution_and_style_overlay(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _capture(**kwargs):
+        captured["prompt"] = kwargs["prompt"]
+        return "定稿正文"
+
+    monkeypatch.setattr("app.services.generation.agents.invoke_chapter_body_structured", _capture)
+
+    FinalizerAgent().run(
+        draft="草稿正文",
+        feedback="修补衔接并收紧重复",
+        language="zh",
+        provider="openai",
+        model="test-model",
+    )
+
+    prompt = str(captured["prompt"])
+    assert "你是定稿编辑角色" in prompt
+    assert "保持网文的推进效率、钩子意识和信息密度" in prompt

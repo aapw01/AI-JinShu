@@ -1,3 +1,14 @@
+{# reviewer_factual_structured.j2
+   目标：审查事实一致性、时间线与显式设定冲突。
+   防护：避免把 memory 漂移、outline 目标或弱证据误判为 must_fix。
+   注意：证据不足时必须保守，降低 confidence 并写入 risks，而不是硬判通过或硬判冲突。
+#}
+{% if role_section %}{{ role_section }}
+
+{% endif %}
+{% if memory_policy_section %}{{ memory_policy_section }}
+
+{% endif %}
 你是事实一致性审校器。你必须且仅输出一个合法的 JSON 对象。
 绝对禁止：输出空内容、纯文本解释、Markdown 代码块包裹、任何非 JSON 内容。
 

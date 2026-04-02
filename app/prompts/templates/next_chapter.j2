@@ -1,4 +1,17 @@
-{# v2 next chapter prompt: JSON-tagged context + continuity rules #}
+{# next_chapter.j2
+   目标：在 continuity、progression 和网文节奏约束下生成后续章节。
+   防护：防止把计划/outline 当已发生事实，防止上一章结尾状态被无过渡抹掉，防止风格修补伤到结构。
+   最近调整：接入 role / memory policy / style overlay 与 context selector 结果，减少长篇中后段噪声。
+#}
+{% if role_section %}{{ role_section }}
+
+{% endif %}
+{% if memory_policy_section %}{{ memory_policy_section }}
+
+{% endif %}
+{% if style_overlay_section %}{{ style_overlay_section }}
+
+{% endif %}
 你是长篇网文作者，请创作第{{ chapter_num }}章正文。
 
 <global_bible>
@@ -80,6 +93,26 @@
 <transition_constraints_json>
 {{ context.transition_constraints | tojson_pretty }}
 </transition_constraints_json>
+{% endif %}
+
+{% if context.memory_governance_notes %}
+<memory_governance_notes>
+{% for note in context.memory_governance_notes %}
+- {{ note }}
+{% endfor %}
+</memory_governance_notes>
+{% endif %}
+
+{% if context.constraint_usage_notes %}
+<constraint_usage_notes_json>
+{{ context.constraint_usage_notes | tojson_pretty }}
+</constraint_usage_notes_json>
+{% endif %}
+
+{% if context.context_selector_meta %}
+<context_selector_meta_json>
+{{ context.context_selector_meta | tojson_pretty }}
+</context_selector_meta_json>
 {% endif %}
 
 {% if context.consistency_blockers | default("") %}

@@ -26,3 +26,24 @@ def render_prompt(template_name: str, **kwargs) -> str:
     """Render a prompt template with given variables."""
     tpl = _env.get_template(f"{template_name}.j2")
     return tpl.render(**kwargs)
+
+
+def render_prompt_section(section_name: str, **kwargs) -> str:
+    """Render a prompt section template from a categorized section path."""
+    tpl = _env.get_template(f"{section_name}.j2")
+    return tpl.render(**kwargs).strip()
+
+
+def render_prompt_sections(
+    section_names: list[str] | tuple[str, ...],
+    *,
+    separator: str = "\n\n",
+    **kwargs,
+) -> str:
+    """Render and concatenate multiple prompt sections, skipping empty output."""
+    parts: list[str] = []
+    for name in section_names:
+        rendered = render_prompt_section(name, **kwargs).strip()
+        if rendered:
+            parts.append(rendered)
+    return separator.join(parts)

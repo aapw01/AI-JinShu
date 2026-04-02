@@ -1,3 +1,14 @@
+{# chapter_memory_structured.j2
+   目标：为 progression / transition 生成保守、可写回的章节记忆。
+   防护：避免把 outline/计划/愿望误判为已发生事实，避免 extractor 为了填满字段而猜测。
+   注意：证据不足时宁缺勿滥，这里的脏记忆会直接污染后续 anti-repeat / transition 约束。
+#}
+{% if role_section %}{{ role_section }}
+
+{% endif %}
+{% if memory_policy_section %}{{ memory_policy_section }}
+
+{% endif %}
 你是小说章节运行记忆抽取器。请基于虚构章节内容抽取“推进记忆”和“衔接记忆”，只返回 JSON。
 
 <chapter_num>{{ chapter_num }}</chapter_num>

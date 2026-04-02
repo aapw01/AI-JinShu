@@ -174,3 +174,54 @@ def test_build_chapter_context_includes_context_sources(monkeypatch):
     assert ctx["context_sources"][-1]["included"] in {True, False}
     assert all("value" not in item for item in ctx["context_sources"])
     assert all(set(item.keys()) == {"source_type", "source_key", "chapter_range", "selection_reason", "priority", "approx_tokens", "included"} for item in ctx["context_sources"])
+
+
+def test_build_chapter_context_recent_window_preserves_immediate_predecessor(monkeypatch):
+    novel = _create_novel("context-recent-window")
+
+    monkeypatch.setattr(
+        "app.services.memory.context._build_story_bible_context",
+        lambda *_args, **_kwargs: "",
+    )
+    monkeypatch.setattr(
+        "app.services.memory.context.get_thread_ledger",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "app.services.memory.context._get_last_chapter_ending",
+        lambda *_args, **_kwargs: "",
+    )
+
+    class _SummaryMgr:
+        def get_summaries_before(self, *_args, **_kwargs):
+            return [
+                {"chapter_num": 4, "summary": "旧线索继续推进。"},
+                {"chapter_num": 5, "summary": "旧线索继续推进。"},
+                {"chapter_num": 6, "summary": "旧线索继续推进。"},
+                {"chapter_num": 7, "summary": "旧线索继续推进。"},
+                {"chapter_num": 8, "summary": "上一章刚刚发生正面冲突。"},
+            ]
+
+        def get_volume_brief(self, *_args, **_kwargs):
+            return ""
+
+    class _VectorStore:
+        def search(self, *_args, **_kwargs):
+            return []
+
+    monkeypatch.setattr("app.services.memory.context.SummaryManager", lambda: _SummaryMgr())
+    monkeypatch.setattr("app.services.memory.context.VectorStoreWrapper", lambda: _VectorStore())
+
+    ctx = build_chapter_context(
+        novel.id,
+        novel_version_id=None,
+        chapter_num=9,
+        prewrite={"specification": {"characters": []}},
+        outline={"chapter_num": 9, "title": "第9章", "outline": "本章延续上一章冲突"},
+    )
+
+    selected = ctx["summaries"]
+    selected_chapters = [item["chapter_num"] for item in selected]
+
+    assert 8 in selected_chapters
+    assert ctx["constraint_usage_notes"]["selected_recent_chapters"] == selected_chapters

@@ -1,4 +1,10 @@
 {# reviewer_combined.j2: 6维合并审校，1次调用替代6次独立调用 #}
+{% if role_section %}{{ role_section }}
+
+{% endif %}
+{% if memory_policy_section %}{{ memory_policy_section }}
+
+{% endif %}
 你是小说多维审校器。你必须且仅输出一个合法的 JSON 对象，包含 structure/factual/progression/aesthetic/ai_flavor/webnovel_principles 六个子对象。
 绝对禁止：输出空内容、纯文本解释、Markdown 代码块包裹、任何非 JSON 内容。
 
