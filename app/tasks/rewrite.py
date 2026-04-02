@@ -470,6 +470,8 @@ def submit_rewrite_task(
                     provider=finalizer_provider,
                     model=finalizer_model,
                     inference=finalizer_inference,
+                    strategy_key=strategy,
+                    native_style_profile=novel.native_style_profile or "",
                 ),
                 normalize_fn=normalize_chapter_content,
             )

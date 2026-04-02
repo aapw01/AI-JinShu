@@ -86,13 +86,22 @@ def node_load_context(state: GenerationState) -> GenerationState:
             db=db,
             novel_version_id=state.get("novel_version_id"),
         )
-        ctx["summaries"] = state["summary_mgr"].get_summaries_before(
-            state["novel_id"],
-            state.get("novel_version_id"),
-            chapter_num,
-            db=db,
-            limit=5,
-        )
+        if "full_recent_summaries" in ctx:
+            ctx["full_recent_summaries"] = list(ctx.get("full_recent_summaries") or [])
+        elif "summaries" in ctx:
+            ctx["full_recent_summaries"] = list(ctx.get("summaries") or [])
+        else:
+            ctx["full_recent_summaries"] = state["summary_mgr"].get_summaries_before(
+                state["novel_id"],
+                state.get("novel_version_id"),
+                chapter_num,
+                db=db,
+                limit=5,
+            )
+        if "summaries" in ctx:
+            ctx["summaries"] = list(ctx.get("summaries") or [])
+        else:
+            ctx["summaries"] = list(ctx.get("full_recent_summaries") or [])
     finally:
         db.close()
     return {

@@ -20,6 +20,15 @@ from app.services.generation.common import (
 )
 from app.services.generation.contracts import OutputContractError
 from app.services.generation.length_control import build_chapter_length_prompt_kwargs
+from app.services.generation.prompt_sections import (
+    build_fact_extractor_role_section,
+    build_finalizer_role_section,
+    build_memory_governance_sections,
+    build_progression_role_section,
+    build_reviewer_role_section,
+    build_style_overlay_sections,
+    build_writer_role_section,
+)
 from app.services.memory.progression_state import normalize_outline_contract
 
 logger = logging.getLogger(__name__)
@@ -117,6 +126,9 @@ def _build_reviewer_context_json(context: dict[str, Any], *, reviewer_kind: str)
             "story_bible_context",
             "character_states",
             "summaries",
+            "memory_governance_notes",
+            "constraint_usage_notes",
+            "context_selector_meta",
         ]
         max_chars = 180
         max_items = 5
@@ -1470,6 +1482,9 @@ class WriterAgent:
         model: str | None = None,
         inference: dict[str, Any] | None = None,
         word_count: int | None = None,
+        strategy_key: str | None = None,
+        pacing_mode: str | None = None,
+        closure_state: dict[str, Any] | None = None,
     ) -> str:
         template = "first_chapter" if chapter_num == 1 else "next_chapter"
         prompt = render_prompt(
@@ -1480,6 +1495,15 @@ class WriterAgent:
             context=context,
             language=language,
             native_style_profile=native_style_profile,
+            role_section=build_writer_role_section(),
+            memory_policy_section=build_memory_governance_sections(include_constraint_usage=True),
+            style_overlay_section=build_style_overlay_sections(
+                strategy_key=strategy_key,
+                native_style_profile=native_style_profile,
+                language=language,
+                pacing_mode=pacing_mode,
+                closure_state=closure_state or (context.get("closure_state") if isinstance(context, dict) else None),
+            ),
             **build_chapter_length_prompt_kwargs(word_count),
         )
         try:
@@ -1540,6 +1564,7 @@ class ReviewerAgent:
             language=language,
             native_style_profile=(native_style_profile or "默认"),
             draft=(draft[:7000]),
+            role_section=build_reviewer_role_section("结构审校角色"),
         )
         result = _invoke_json_with_schema(
             llm,
@@ -1619,6 +1644,8 @@ class ReviewerAgent:
             chapter_num=chapter_num,
             context_json=_build_reviewer_context_json(context, reviewer_kind="factual"),
             draft=(draft[:6000]),
+            role_section=build_reviewer_role_section("事实一致性审校角色"),
+            memory_policy_section=build_memory_governance_sections(include_constraint_usage=True),
         )
         result = _invoke_json_with_schema(
             llm,
@@ -1659,6 +1686,8 @@ class ReviewerAgent:
             language=language,
             context_json=_build_reviewer_context_json(context, reviewer_kind="progression"),
             draft=(draft[:6500]),
+            role_section=build_reviewer_role_section("推进与连续性审校角色"),
+            memory_policy_section=build_memory_governance_sections(include_constraint_usage=True),
         )
         result = _invoke_json_with_schema(
             llm,
@@ -1718,6 +1747,7 @@ class ReviewerAgent:
             template,
             chapter_num=chapter_num,
             draft=(draft[:6000]),
+            role_section=build_reviewer_role_section("审美审校角色"),
         )
         result = _invoke_json_with_schema(
             llm,
@@ -1783,6 +1813,8 @@ class ReviewerAgent:
                 context_json=factual_ctx,
                 progression_context_json=prog_ctx,
                 draft=(draft[:7000]),
+                role_section=build_reviewer_role_section("综合审校角色"),
+                memory_policy_section=build_memory_governance_sections(include_constraint_usage=True),
             )
             result = _invoke_json_with_schema(
                 llm,
@@ -1924,6 +1956,10 @@ class FinalizerAgent:
         model: str | None = None,
         inference: dict[str, Any] | None = None,
         word_count: int | None = None,
+        strategy_key: str | None = None,
+        native_style_profile: str = "",
+        pacing_mode: str | None = None,
+        closure_state: dict[str, Any] | None = None,
     ) -> str:
         # If no significant feedback, return draft as-is
         if not feedback or feedback == "Auto-review: acceptable quality":
@@ -1935,6 +1971,15 @@ class FinalizerAgent:
             feedback=feedback,
             draft=draft,
             language=language,
+            role_section=build_finalizer_role_section(),
+            memory_policy_section=build_memory_governance_sections(include_constraint_usage=True),
+            style_overlay_section=build_style_overlay_sections(
+                strategy_key=strategy_key,
+                native_style_profile=native_style_profile,
+                language=language,
+                pacing_mode=pacing_mode,
+                closure_state=closure_state,
+            ),
             **build_chapter_length_prompt_kwargs(word_count),
         )
 
@@ -2002,6 +2047,8 @@ class FinalReviewerAgent:
             recent_summaries=recent_summaries,
             unresolved_foreshadows=unresolved_foreshadows,
             language=language,
+            role_section=build_reviewer_role_section("整书终审角色"),
+            contract_section=render_prompt("contract/final_book_review_contract"),
         )
         try:
             data = _invoke_json_with_schema(
@@ -2044,6 +2091,7 @@ class FactExtractorAgent:
             language=language,
             outline_json=(json.dumps(outline or {}, ensure_ascii=False)[:1500]),
             content=(content[:7000]),
+            role_section=build_fact_extractor_role_section(),
         )
         data = _invoke_json_with_schema(
             llm,
@@ -2138,6 +2186,8 @@ class ProgressionMemoryAgent:
             language=language,
             outline_json=(json.dumps(outline or {}, ensure_ascii=False)[:2200]),
             content=(content[:7000]),
+            role_section=build_progression_role_section(),
+            memory_policy_section=build_memory_governance_sections(include_constraint_usage=True),
         )
         data = _invoke_json_with_schema(
             llm,

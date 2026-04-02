@@ -1,6 +1,7 @@
 """Writer node — AB-test writing with retry."""
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 from app.core.constants import DEFAULT_CHAPTER_WORD_COUNT
@@ -13,6 +14,24 @@ from app.services.generation.state import GenerationState
 
 
 def node_writer(state: GenerationState) -> GenerationState:
+    def _call_writer_run(
+        *args: Any,
+        **kwargs: Any,
+    ) -> str:
+        run_fn = state["writer"].run
+        signature = inspect.signature(run_fn)
+        accepts_var_kw = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        )
+        if not accepts_var_kw:
+            kwargs = {
+                key: value
+                for key, value in kwargs.items()
+                if key in signature.parameters
+            }
+        return run_fn(*args, **kwargs)
+
     def _is_invalid_draft(text: str) -> bool:
         t = str(text or "").strip().lower()
         if not t:
@@ -27,7 +46,7 @@ def node_writer(state: GenerationState) -> GenerationState:
         model_: str | None,
         inference_: dict[str, Any] | None,
     ) -> str:
-        draft = state["writer"].run(
+        draft = _call_writer_run(
             state["novel_id"],
             chapter_num_,
             outline_,
@@ -36,8 +55,11 @@ def node_writer(state: GenerationState) -> GenerationState:
             state["native_style_profile"],
             provider_,
             model_,
-            inference_,
-            DEFAULT_CHAPTER_WORD_COUNT,
+            inference=inference_,
+            word_count=DEFAULT_CHAPTER_WORD_COUNT,
+            strategy_key=state["strategy"],
+            pacing_mode=pacing_mode,
+            closure_state=state.get("closure_state") or {},
         )
         if _is_invalid_draft(draft):
             raise RuntimeError("writer returned invalid placeholder draft")

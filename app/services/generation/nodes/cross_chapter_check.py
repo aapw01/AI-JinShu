@@ -34,6 +34,7 @@ def node_cross_chapter_check(state: GenerationState) -> dict:
 
     db_ctx = state["context"]
     summaries = db_ctx.get("summaries") or []
+    full_recent_summaries = db_ctx.get("full_recent_summaries") or summaries
     char_states = db_ctx.get("character_states") or []
     prewrite = state.get("prewrite") or {}
 
@@ -53,14 +54,14 @@ def node_cross_chapter_check(state: GenerationState) -> dict:
             })
 
     # --- LLM: cross-chapter contradiction check (only when prior summaries exist) ---
-    if summaries and len(summaries) >= 2:
+    if full_recent_summaries and len(full_recent_summaries) >= 2:
         try:
             r_provider, r_model = get_model_for_stage(state["strategy"], "reviewer")
             factual_inference = get_inference_for_stage(state["strategy"], "reviewer.factual")
             cross_result = state["reviewer"].run_cross_chapter_check(
                 draft=draft,
                 chapter_num=chapter_num,
-                recent_summaries=summaries[-5:],
+                recent_summaries=full_recent_summaries[-5:],
                 char_states=char_states,
                 target_language=state["target_language"],
                 provider=r_provider,
@@ -87,7 +88,7 @@ def node_cross_chapter_check(state: GenerationState) -> dict:
                 chapter_num=chapter_num,
                 unknown_names=list(unknown_chars),
                 roster=roster_names,
-                recent_summaries=summaries[-3:],
+                recent_summaries=full_recent_summaries[-3:],
                 target_language=state["target_language"],
                 provider=r_provider,
                 model=r_model,

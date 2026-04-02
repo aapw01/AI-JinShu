@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import re
 
 from sqlalchemy import select
@@ -141,6 +142,39 @@ def _is_quality_passed(
 
 
 def node_finalize(state: GenerationState) -> GenerationState:
+    def _call_finalizer_run(
+        draft: str,
+        feedback: str,
+    ) -> str:
+        run_fn = state["finalizer"].run
+        signature = inspect.signature(run_fn)
+        kwargs = {
+            "inference": finalizer_inference,
+            "word_count": DEFAULT_CHAPTER_WORD_COUNT,
+            "strategy_key": state["strategy"],
+            "native_style_profile": state.get("native_style_profile") or "",
+            "pacing_mode": state.get("pacing_mode"),
+            "closure_state": state.get("closure_state") or {},
+        }
+        accepts_var_kw = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        )
+        if not accepts_var_kw:
+            kwargs = {
+                key: value
+                for key, value in kwargs.items()
+                if key in signature.parameters
+            }
+        return run_fn(
+            draft,
+            feedback,
+            state["target_language"],
+            f_provider,
+            f_model,
+            **kwargs,
+        )
+
     chapter_num = state["current_chapter"]
     progress(state, "finalizer", chapter_num, chapter_progress(state, 0.70), "定稿...", {"current_phase": "chapter_finalizing", "total_chapters": state["num_chapters"]})
     novel_config = (state.get("novel_info") or {}).get("config")
@@ -162,15 +196,7 @@ def node_finalize(state: GenerationState) -> GenerationState:
     feedback_for_attempt = base_feedback
     for attempt in range(2):
         try:
-            final_content = state["finalizer"].run(
-                state["draft"],
-                feedback_for_attempt,
-                state["target_language"],
-                f_provider,
-                f_model,
-                finalizer_inference,
-                DEFAULT_CHAPTER_WORD_COUNT,
-            ).strip()
+            final_content = _call_finalizer_run(state["draft"], feedback_for_attempt).strip()
             break
         except OutputContractError as exc:
             if exc.code != "MODEL_OUTPUT_POLICY_VIOLATION" or attempt >= 1:
@@ -189,30 +215,14 @@ def node_finalize(state: GenerationState) -> GenerationState:
         try:
             compaction_feedback = _paragraph_compaction_feedback(fragment_metrics)
             final_content = normalize_chapter_content(
-                state["finalizer"].run(
-                    final_content,
-                    compaction_feedback,
-                    state["target_language"],
-                    f_provider,
-                    f_model,
-                    finalizer_inference,
-                    DEFAULT_CHAPTER_WORD_COUNT,
-                ).strip()
+                _call_finalizer_run(final_content, compaction_feedback).strip()
             )
         except Exception:
             logger.warning("finalizer paragraph compaction skipped after failure", exc_info=True)
     final_content, length_diagnostics = maybe_compact_chapter_length(
         content=final_content,
         word_count=DEFAULT_CHAPTER_WORD_COUNT,
-        compact_fn=lambda draft, feedback: state["finalizer"].run(
-            draft,
-            feedback,
-            state["target_language"],
-            f_provider,
-            f_model,
-            finalizer_inference,
-            DEFAULT_CHAPTER_WORD_COUNT,
-        ),
+        compact_fn=_call_finalizer_run,
         normalize_fn=normalize_chapter_content,
     )
     if bool(length_diagnostics.get("length_compaction_attempted")):

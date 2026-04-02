@@ -1,4 +1,10 @@
-{# final_book_review.j2: 全书终审 #}
+{# final_book_review.j2
+   目标：从卷级质量趋势、结局摘要和伏笔回收情况做整书终审。
+   防护：防止模型臆造未提供剧情，防止把数据不足的结论说得过满。
+#}
+{% if role_section %}{{ role_section }}
+
+{% endif %}
 你是专业网文终审编辑。请对整本小说做终审，给出可执行改进建议。
 
 语言：{{ language }}
@@ -50,3 +56,7 @@
 - 只根据输入进行评审，不要臆造未提供的情节。
 - `must_fix` 最多 5 条，`should_improve` 最多 5 条。
 </task>
+
+{% if contract_section %}
+{{ contract_section }}
+{% endif %}

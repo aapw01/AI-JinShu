@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.prompts import render_prompt
+from app.prompts import render_prompt, render_prompt_sections
 
 
 def test_next_chapter_prompt_renders_tagged_json_context():
@@ -73,3 +73,14 @@ def test_storyboard_character_prompt_has_structured_contract():
     assert '"identity_lock"' in prompt
     assert '"negative_prompt_text"' in prompt
     assert '"camera_safe_notes"' in prompt
+
+
+def test_render_prompt_sections_combines_policy_sections():
+    prompt = render_prompt_sections(
+        [
+            "policy/memory_policy_fact_boundary",
+            "policy/memory_policy_plan_vs_fact",
+        ]
+    )
+    assert "只有正文中明确发生的事实" in prompt
+    assert "不能直接当作已发生事实" in prompt
