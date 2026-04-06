@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
+from app.core.database import SessionLocal
 from app.models.creation_task import CreationTask
 
 SUBTASK_LABELS: dict[str, str] = {
@@ -54,8 +55,6 @@ GENERATION_TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 GENERATION_NON_LIVE_STATUSES = GENERATION_TERMINAL_STATUSES | {"paused"}
 
 _redis_pool: redis.ConnectionPool | None = None
-
-
 def get_generation_redis() -> redis.Redis:
     global _redis_pool
     if _redis_pool is None:
@@ -75,8 +74,50 @@ def read_generation_cache(key: str) -> dict[str, Any] | None:
     try:
         raw = get_generation_redis().get(key)
     except redis.RedisError:
-        return None
-    return decode_generation_cache(raw)
+        raw = None
+    payload = decode_generation_cache(raw)
+    if payload is not None:
+        return payload
+    return read_generation_cache_from_db(key)
+
+
+def read_generation_cache_from_db(key: str) -> dict[str, Any] | None:
+    db = SessionLocal()
+    try:
+        if key.startswith("generation:novel:"):
+            novel_id = key.removeprefix("generation:novel:")
+            active = latest_active_generation_task(db, novel_id=int(novel_id))
+            if not active:
+                return None
+            return build_generation_snapshot(active)
+
+        if not key.startswith("generation:"):
+            return None
+
+        task_or_worker_id = key.removeprefix("generation:")
+        row = db.execute(
+            select(CreationTask).where(
+                CreationTask.public_id == task_or_worker_id,
+                CreationTask.task_type == "generation",
+                CreationTask.resource_type == "novel",
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            row = db.execute(
+                select(CreationTask)
+                .where(
+                    CreationTask.worker_task_id == task_or_worker_id,
+                    CreationTask.task_type == "generation",
+                    CreationTask.resource_type == "novel",
+                )
+                .order_by(CreationTask.updated_at.desc(), CreationTask.id.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+        if row is None:
+            return None
+        return build_generation_snapshot(row)
+    finally:
+        db.close()
 
 
 def decode_generation_cache(raw: bytes | str | None) -> dict[str, Any] | None:
