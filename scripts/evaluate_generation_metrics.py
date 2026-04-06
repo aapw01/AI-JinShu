@@ -15,7 +15,7 @@ from sqlalchemy import select, func
 from sqlalchemy.exc import OperationalError
 
 from app.core.database import SessionLocal
-from app.models.novel import Chapter, GenerationCheckpoint, Novel
+from app.models.novel import ChapterVersion, GenerationCheckpoint, Novel, NovelVersion
 from app.services.generation.evaluation_metrics import (
     compute_abrupt_ending_risk,
     compute_closure_action_metrics,
@@ -34,7 +34,65 @@ class NovelMetric:
     progress_signal_median: float
 
 
+def _default_version(db, novel: Novel) -> NovelVersion | None:
+    return db.execute(
+        select(NovelVersion).where(
+            NovelVersion.novel_id == novel.id,
+            NovelVersion.is_default == 1,
+        )
+    ).scalar_one_or_none()
+
+
+def _is_evaluable_novel(db, novel: Novel) -> bool:
+    version = _default_version(db, novel)
+    if version is None:
+        return False
+
+    completed_chapter_count = (
+        db.execute(
+            select(func.count())
+            .select_from(ChapterVersion)
+            .where(
+                ChapterVersion.novel_version_id == version.id,
+                ChapterVersion.status == "completed",
+                ChapterVersion.content.is_not(None),
+                ChapterVersion.content != "",
+            )
+        ).scalar_one()
+        or 0
+    )
+    if int(completed_chapter_count) < 3:
+        return False
+
+    closure_count = (
+        db.execute(
+            select(func.count())
+            .select_from(GenerationCheckpoint)
+            .where(
+                GenerationCheckpoint.novel_id == novel.id,
+                GenerationCheckpoint.node == "closure_gate",
+            )
+        ).scalar_one()
+        or 0
+    )
+    if int(closure_count) <= 0:
+        return False
+
+    progress_rows = (
+        db.execute(
+            select(GenerationCheckpoint.state_json)
+            .where(
+                GenerationCheckpoint.novel_id == novel.id,
+                GenerationCheckpoint.node == "chapter_done",
+            )
+        )
+        .all()
+    )
+    return any(isinstance(row[0], dict) and "progress_signal" in row[0] for row in progress_rows)
+
+
 def _evaluate_one(db, novel: Novel) -> NovelMetric:
+    version = _default_version(db, novel)
     closure_rows = (
         db.execute(
             select(GenerationCheckpoint)
@@ -51,16 +109,18 @@ def _evaluate_one(db, novel: Novel) -> NovelMetric:
     closure_metrics = compute_closure_action_metrics(actions)
     latest_state = (closure_rows[-1].state_json or {}) if closure_rows else {}
     unresolved_mainline = int(latest_state.get("unresolved_count") or 0) > 0
-    tails = (
-        db.execute(
-            select(Chapter.content)
-            .where(Chapter.novel_id == novel.id)
-            .order_by(Chapter.chapter_num.desc())
-            .limit(3)
+    tails: list[str] = []
+    if version is not None:
+        tails = (
+            db.execute(
+                select(ChapterVersion.content)
+                .where(ChapterVersion.novel_version_id == version.id)
+                .order_by(ChapterVersion.chapter_num.desc())
+                .limit(3)
+            )
+            .scalars()
+            .all()
         )
-        .scalars()
-        .all()
-    )
     abrupt = compute_abrupt_ending_risk(latest_state, tails)
     total_consistency = (
         db.execute(
@@ -172,9 +232,9 @@ def main() -> None:
     db = SessionLocal()
     try:
         novels = db.execute(
-            select(Novel).where(Novel.status.in_(("completed", "generating", "failed"))).order_by(Novel.id.desc()).limit(500)
+            select(Novel).where(Novel.status == "completed").order_by(Novel.id.desc()).limit(500)
         ).scalars().all()
-        metrics = [_evaluate_one(db, n) for n in novels]
+        metrics = [_evaluate_one(db, n) for n in novels if _is_evaluable_novel(db, n)]
     except OperationalError as e:
         print(
             json.dumps(
