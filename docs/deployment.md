@@ -22,6 +22,12 @@ cp .env.deploy.example .env.deploy
 docker compose -f docker-compose.deploy.yml --env-file .env.deploy up -d
 ```
 
+默认发布镜像地址：
+
+```bash
+ghcr.io/aapw01/ai-jinshu:latest
+```
+
 4. 健康检查：
 
 ```bash
