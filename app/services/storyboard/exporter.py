@@ -32,6 +32,7 @@ CSV_COLUMNS = [
 
 
 def export_shots_to_csv(shots: list[StoryboardShot]) -> str:
+    """执行 export shots to csv 相关辅助逻辑。"""
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=CSV_COLUMNS)
     writer.writeheader()

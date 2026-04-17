@@ -16,6 +16,7 @@ from app.services.generation.status_snapshot import (
 
 
 def main() -> None:
+    """从数据库重建 generation Redis 快照，并清理陈旧 worker key。"""
     db = SessionLocal()
     repaired_tasks = 0
     cleared_worker_keys = 0

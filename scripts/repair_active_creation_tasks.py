@@ -6,6 +6,7 @@ from app.services.scheduler.scheduler_service import repair_active_dispatching_t
 
 
 def main() -> None:
+    """执行一次 dispatching 任务修复，并打印修复条数。"""
     db = SessionLocal()
     try:
         repaired = repair_active_dispatching_tasks(db)

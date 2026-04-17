@@ -41,6 +41,7 @@ from app.services.task_runtime.checkpoint_repo import get_resume_runtime_state
 
 
 def _covers_outline_range(outlines: list[dict] | None, start_chapter: int, end_chapter: int) -> bool:
+    """执行 covers outline range 相关辅助逻辑。"""
     required = set(range(int(start_chapter), int(end_chapter) + 1))
     if not required:
         return False
@@ -55,6 +56,7 @@ def _covers_outline_range(outlines: list[dict] | None, start_chapter: int, end_c
 
 
 def _is_resume_like(state: GenerationState) -> bool:
+    """执行 is resume like 相关辅助逻辑。"""
     current = int(state.get("current_chapter") or state.get("start_chapter") or 1)
     segment_start = int(state.get("segment_start_chapter") or state.get("start_chapter") or 1)
     book_start = int(state.get("book_start_chapter") or segment_start)
@@ -62,6 +64,7 @@ def _is_resume_like(state: GenerationState) -> bool:
 
 
 def node_init(state: GenerationState) -> GenerationState:
+    """执行 node init 相关辅助逻辑。"""
     db = SessionLocal()
     try:
         novel_stmt = select(Novel).where(Novel.id == state["novel_id"])
@@ -166,6 +169,7 @@ def node_init(state: GenerationState) -> GenerationState:
 
 
 def node_prewrite(state: GenerationState) -> GenerationState:
+    """执行 node prewrite 相关辅助逻辑。"""
     if _is_resume_like(state):
         existing = load_prewrite_artifacts(state["novel_id"])
         if existing:
@@ -185,6 +189,7 @@ def node_prewrite(state: GenerationState) -> GenerationState:
 
 
 def node_outline(state: GenerationState) -> GenerationState:
+    """执行 node outline 相关辅助逻辑。"""
     segment_start = int(state.get("segment_start_chapter") or state["start_chapter"])
     segment_end = int(state.get("segment_end_chapter") or state["end_chapter"])
     existing = load_outlines_from_db(state["novel_id"], state.get("novel_version_id"))

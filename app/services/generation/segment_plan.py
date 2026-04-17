@@ -12,6 +12,7 @@ def merge_outlines(
     existing: list[dict[str, Any]] | None,
     additions: list[dict[str, Any]] | None,
 ) -> list[dict[str, Any]]:
+    """执行 merge outlines 相关辅助逻辑。"""
     merged: dict[int, dict[str, Any]] = {}
     for source in (existing or []):
         if not isinstance(source, dict):
@@ -38,6 +39,7 @@ def build_segment_plan(
     outlines: list[dict[str, Any]] | None,
     plan_kind: str = "normal",
 ) -> dict[str, Any]:
+    """构建分段计划。"""
     start = int(start_chapter)
     end = int(end_chapter)
     normalized: list[dict[str, Any]] = []
@@ -69,6 +71,7 @@ def segment_plan_covers_range(
     start_chapter: int,
     end_chapter: int,
 ) -> bool:
+    """执行 segment plan covers range 相关辅助逻辑。"""
     if not isinstance(segment_plan, dict):
         return False
     start = int(start_chapter)
@@ -93,6 +96,7 @@ def restore_segment_plan_outlines(
     segment_plan: dict[str, Any],
     db=None,
 ) -> list[dict[str, Any]]:
+    """执行 restore segment plan outlines 相关辅助逻辑。"""
     restored: list[dict[str, Any]] = []
     for item in (segment_plan.get("outlines") or []):
         if not isinstance(item, dict):

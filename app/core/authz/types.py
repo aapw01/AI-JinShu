@@ -8,6 +8,7 @@ from typing import Any
 
 
 class Permission(str, Enum):
+    """Permission。"""
     NOVEL_READ = "novel:read"
     NOVEL_CREATE = "novel:create"
     NOVEL_UPDATE = "novel:update"
@@ -29,6 +30,7 @@ class Permission(str, Enum):
 
 @dataclass(slots=True)
 class Principal:
+    """当前主体。"""
     user_uuid: str | None
     role: str
     status: str
@@ -37,6 +39,7 @@ class Principal:
 
 @dataclass(slots=True)
 class ResourceContext:
+    """Resource上下文。"""
     resource_type: str
     resource_id: str
     owner_uuid: str | None = None

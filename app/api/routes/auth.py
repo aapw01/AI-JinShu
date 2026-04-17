@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 
 
 def _set_auth_cookie(response: Response, token: str) -> None:
+    """设置认证cookie。"""
     settings = get_settings()
     response.set_cookie(
         key="access_token",
@@ -60,11 +61,13 @@ def _set_auth_cookie(response: Response, token: str) -> None:
 
 
 def _clear_auth_cookie(response: Response) -> None:
+    """执行 clear auth cookie 相关辅助逻辑。"""
     settings = get_settings()
     response.delete_cookie("access_token", domain=settings.auth_cookie_domain, path="/")
 
 
 def _user_payload(u: User) -> dict:
+    """执行 user payload 相关辅助逻辑。"""
     return {
         "uuid": u.uuid,
         "email": u.email,
@@ -75,11 +78,13 @@ def _user_payload(u: User) -> dict:
 
 
 def _is_email_like(email: str) -> bool:
+    """执行 is email like 相关辅助逻辑。"""
     value = (email or "").strip()
     return "@" in value and "." in value.split("@")[-1]
 
 
 def _purge_old_tokens(db: Session, user_id: int) -> None:
+    """执行 purge old tokens 相关辅助逻辑。"""
     now = utc_now()
     db.execute(
         update(EmailVerificationToken)
@@ -95,6 +100,7 @@ def _purge_old_tokens(db: Session, user_id: int) -> None:
 
 @router.post("/register")
 def register(data: RegisterRequest, response: Response, db: Session = Depends(get_db)):
+    """执行 register 相关辅助逻辑。"""
     settings = get_settings()
     if settings.auth_require_email_verification and not can_send_email():
         log_event(
@@ -167,6 +173,7 @@ def register(data: RegisterRequest, response: Response, db: Session = Depends(ge
 
 @router.post("/login", response_model=AuthTokenResponse)
 def login(data: LoginRequest, response: Response, db: Session = Depends(get_db)):
+    """执行 login 相关辅助逻辑。"""
     settings = get_settings()
     if not _is_email_like(data.email):
         log_event(logger, "auth.login.failed", level=logging.WARNING, reason="invalid_email", email=data.email)
@@ -219,6 +226,7 @@ def login(data: LoginRequest, response: Response, db: Session = Depends(get_db))
 
 @router.post("/logout")
 def logout(response: Response):
+    """执行 logout 相关辅助逻辑。"""
     _clear_auth_cookie(response)
     log_event(logger, "auth.logout")
     return {"ok": True}
@@ -226,6 +234,7 @@ def logout(response: Response):
 
 @router.get("/me")
 def me(principal: Principal = Depends(require_auth()), db: Session = Depends(get_db)):
+    """执行 me 相关辅助逻辑。"""
     user = db.execute(select(User).where(User.uuid == principal.user_uuid)).scalar_one_or_none()
     if not user:
         return error_response(404, "user_not_found", "User not found")
@@ -234,6 +243,7 @@ def me(principal: Principal = Depends(require_auth()), db: Session = Depends(get
 
 @router.post("/verify-email/request")
 def request_verify_email(data: VerifyEmailRequestSend, db: Session = Depends(get_db)):
+    """执行 request verify email 相关辅助逻辑。"""
     if not _is_email_like(data.email):
         return {"ok": True}
     user = db.execute(select(User).where(User.email == data.email.lower())).scalar_one_or_none()
@@ -257,6 +267,7 @@ def request_verify_email(data: VerifyEmailRequestSend, db: Session = Depends(get
 
 @router.post("/verify-email/confirm")
 def confirm_verify_email(data: VerifyEmailRequest, db: Session = Depends(get_db)):
+    """执行 confirm verify email 相关辅助逻辑。"""
     now = utc_now()
     row = db.execute(
         select(EmailVerificationToken).where(
@@ -279,6 +290,7 @@ def confirm_verify_email(data: VerifyEmailRequest, db: Session = Depends(get_db)
 
 @router.post("/password/forgot")
 def forgot_password(data: ForgotPasswordRequest, db: Session = Depends(get_db)):
+    """执行 forgot password 相关辅助逻辑。"""
     if not _is_email_like(data.email):
         return {"ok": True}
     user = db.execute(select(User).where(User.email == data.email.lower())).scalar_one_or_none()
@@ -300,6 +312,7 @@ def forgot_password(data: ForgotPasswordRequest, db: Session = Depends(get_db)):
 
 @router.post("/password/reset")
 def reset_password(data: ResetPasswordRequest, db: Session = Depends(get_db)):
+    """执行 reset password 相关辅助逻辑。"""
     ok, message = validate_password_complexity(data.new_password)
     if not ok:
         return error_response(400, "weak_password", message)
@@ -330,6 +343,7 @@ def change_password(
     principal: Principal = Depends(require_auth()),
     db: Session = Depends(get_db),
 ):
+    """执行 change password 相关辅助逻辑。"""
     user = db.execute(select(User).where(User.uuid == principal.user_uuid)).scalar_one_or_none()
     if not user:
         return error_response(404, "user_not_found", "User not found")

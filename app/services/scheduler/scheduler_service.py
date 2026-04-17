@@ -1,4 +1,19 @@
-"""Unified task submission and dispatching for creation workloads."""
+"""统一任务状态机与调度服务。
+
+模块职责：
+- 维护 `CreationTask` 的提交、状态流转、暂停恢复、取消、终态收敛。
+- 基于用户并发限制把 queued 任务分发成具体 Celery worker 执行实例。
+- 配合租约与心跳做失联任务回收，支撑长时间 AI 任务自动恢复。
+
+系统位置：
+- 上游是 API 路由、任务创建入口。
+- 下游是 Celery worker、Redis 快照、小说状态镜像。
+
+面试可讲点：
+- 为什么 Celery 状态不足以表达业务状态，仍需要 `CreationTask`。
+- 为什么恢复时复用原任务记录、但重建新的 worker 执行实例。
+- 为什么 stale finalize、lease、recovery_count 要一起设计。
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -35,6 +50,14 @@ RESUMABLE_STATUSES = {"paused", "failed"}
 
 @dataclass(frozen=True)
 class DispatchReservation:
+    """一次待发布 worker 任务的只读预留对象。
+
+    调度分两段：
+    1. 先在数据库里把任务安全地占位到 `dispatching`。
+    2. 事务提交后再真正发布给 Celery。
+
+    这样可以避免 worker 读到未提交状态，也能在发布失败时回滚业务语义。
+    """
     creation_task_id: int
     public_id: str
     task_type: str
@@ -45,10 +68,12 @@ class DispatchReservation:
 
 
 def _utc_now() -> datetime:
+    """返回当前 UTC 时间，统一任务与数据库时间基准。"""
     return datetime.now(timezone.utc)
 
 
 def _lease_ttl_seconds() -> int:
+    """统一读取 worker 租约 TTL，避免调度与恢复逻辑出现魔法数字。"""
     return CREATION_WORKER_LEASE_TTL_SECONDS
 
 
@@ -63,6 +88,11 @@ def submit_task(
     priority: int = 100,
     max_retries: int = 3,
 ) -> CreationTask:
+    """创建一条新的统一任务记录。
+
+    注意这里只负责把任务写入业务表并进入 `queued`，不直接发布 Celery。
+    这样提交和调度可以解耦，便于做暂停、恢复、并发限流与队列排序。
+    """
     task = CreationTask(
         user_uuid=user_uuid,
         task_type=task_type,
@@ -83,6 +113,7 @@ def submit_task(
 
 
 def list_user_tasks(db: Session, *, user_uuid: str, limit: int = 50) -> list[CreationTask]:
+    """列出 user tasks。"""
     stmt: Select[tuple[CreationTask]] = (
         select(CreationTask)
         .where(CreationTask.user_uuid == user_uuid)
@@ -93,6 +124,7 @@ def list_user_tasks(db: Session, *, user_uuid: str, limit: int = 50) -> list[Cre
 
 
 def get_task_by_public_id(db: Session, *, public_id: str, user_uuid: str | None = None) -> CreationTask | None:
+    """按公开任务 ID 查询任务，可选校验任务归属用户。"""
     stmt: Select[tuple[CreationTask]] = select(CreationTask).where(CreationTask.public_id == public_id)
     if user_uuid:
         stmt = stmt.where(CreationTask.user_uuid == user_uuid)
@@ -100,10 +132,15 @@ def get_task_by_public_id(db: Session, *, public_id: str, user_uuid: str | None 
 
 
 def get_task_by_id(db: Session, *, task_id: int) -> CreationTask | None:
+    """按数据库主键查询统一任务记录。"""
     return db.execute(select(CreationTask).where(CreationTask.id == task_id)).scalar_one_or_none()
 
 
 def mark_task_running(db: Session, *, task_id: int, worker_task_id: str) -> CreationTask:
+    """在 worker 真正启动后，把任务从 `dispatching` 切到 `running`。
+
+    这里会校验 worker 所有权，避免旧 worker 的迟到上报把新任务状态冲掉。
+    """
     task = db.execute(
         select(CreationTask).where(CreationTask.id == task_id).with_for_update()
     ).scalar_one_or_none()
@@ -138,6 +175,10 @@ def update_task_progress(
     token_usage_output: int | None = None,
     estimated_cost: float | None = None,
 ) -> CreationTask | None:
+    """更新进度、阶段信息与累计 token/cost 指标。
+
+    运行中顺带刷新 lease，保证 recovery tick 不会把健康任务误判成失联。
+    """
     task = get_task_by_id(db, task_id=task_id)
     if not task:
         return None
@@ -175,6 +216,12 @@ def transition_task_status(
     error_detail: str | None = None,
     progress: float | None = None,
 ) -> CreationTask:
+    """按白名单规则执行一次任务状态迁移。
+
+    这是统一任务状态机的核心入口。面试里可以强调两个不变量：
+    - 非法跳转立即拒绝。
+    - 终态一旦写入就只允许极少数受控场景再变更。
+    """
     allowed: dict[str, set[str]] = {
         "queued": {"dispatching", "paused", "cancelled"},
         "dispatching": {"running", "paused", "cancelled", "queued", "failed"},
@@ -221,6 +268,13 @@ def finalize_task(
     error_detail: str | None = None,
     result_json: dict[str, Any] | None = None,
 ) -> CreationTask | None:
+    """把任务收敛到最终状态，或在恢复场景下重新放回队列。
+
+    这里有几个关键保护：
+    - 旧 worker 的 stale finalize 不允许覆盖已经 re-queue 的任务。
+    - `queued`/`paused` 会清掉旧 worker 绑定，等待新实例接管。
+    - 某些终态会同步更新 Novel 镜像状态，保证前端看到的资源状态一致。
+    """
     task = db.execute(
         select(CreationTask).where(CreationTask.id == task_id).with_for_update()
     ).scalar_one_or_none()
@@ -283,6 +337,7 @@ def finalize_task(
 
 
 def pause_task(db: Session, *, public_id: str, user_uuid: str) -> CreationTask:
+    """把活动任务切到暂停态，并撤销当前 worker 绑定。"""
     task = get_task_by_public_id(db, public_id=public_id, user_uuid=user_uuid)
     if not task:
         raise ValueError("task_not_found")
@@ -300,10 +355,11 @@ def pause_task(db: Session, *, public_id: str, user_uuid: str) -> CreationTask:
 
 
 def resume_task(db: Session, *, public_id: str, user_uuid: str) -> CreationTask:
-    """Transition task back to queued.
+    """把失败/暂停任务恢复到 `queued`，等待重新调度。
 
-    NOTE: Caller must call ``dispatch_user_queue`` **after** committing the DB
-    transaction to avoid a race where the dispatcher reads stale state.
+    恢复时不会新建 `CreationTask`，而是复用原记录保留 checkpoint 与 cursor。
+    真正重新执行时会拿到一个新的 `worker_task_id`，因此“业务任务复用，
+    执行实例重建”是这个项目恢复语义的关键点。
     """
     task = get_task_by_public_id(db, public_id=public_id, user_uuid=user_uuid)
     if not task:
@@ -331,6 +387,7 @@ def resume_task(db: Session, *, public_id: str, user_uuid: str) -> CreationTask:
 
 
 def cancel_task(db: Session, *, public_id: str, user_uuid: str) -> CreationTask:
+    """取消任务，并尽力 revoke 当前 worker 执行实例。"""
     task = get_task_by_public_id(db, public_id=public_id, user_uuid=user_uuid)
     if not task:
         raise ValueError("task_not_found")
@@ -350,11 +407,16 @@ def cancel_task(db: Session, *, public_id: str, user_uuid: str) -> CreationTask:
 
 
 def heartbeat_task(db: Session, *, task_id: int) -> CreationTask | None:
+    """刷新任务心跳与租约过期时间。"""
     ttl = _lease_ttl_seconds()
     return acquire_or_refresh_lease(db, creation_task_id=task_id, ttl_seconds=ttl)
 
 
 def repair_active_dispatching_tasks(db: Session) -> int:
+    """修复“数据库还停在 dispatching，但 worker 实际已经在跑”的任务。
+
+    这是恢复巡检里的第一层纠偏，避免把健康任务误当成僵尸任务回收掉。
+    """
     now = _utc_now()
     rows = list(
         db.execute(
@@ -389,6 +451,13 @@ def repair_active_dispatching_tasks(db: Session) -> int:
 
 
 def reclaim_stale_running_tasks(db: Session) -> int:
+    """回收租约过期的 `dispatching/running` 任务。
+
+    这就是面试里常说的 recovery tick 自愈逻辑核心：
+    - 健康任务靠 heartbeat 续租。
+    - 失联任务 lease 过期后被重新入队。
+    - 恢复次数超限则直接失败，避免死循环。
+    """
     now = _utc_now()
     dispatching_timeout = now - timedelta(seconds=120)
     stale = list(
@@ -471,6 +540,12 @@ def reclaim_stale_running_tasks(db: Session) -> int:
 
 
 def _reserve_dispatch_batch(db: Session, *, user_uuid: str) -> list[DispatchReservation]:
+    """为单个用户预留一批可安全派发的任务。
+
+    这里先算剩余并发槽位，再按优先级和 queue_seq 排序选任务。
+    预留成功只代表“数据库里占到了 dispatching 名额”，还不代表
+    Celery publish 一定成功，所以返回的是 reservation 而不是最终结果。
+    """
     if not bool(get_effective_runtime_setting("creation_scheduler_enabled", bool, True)):
         return []
     acquire_user_dispatch_lock(db, user_uuid=user_uuid)
@@ -531,6 +606,7 @@ def _reserve_dispatch_batch(db: Session, *, user_uuid: str) -> list[DispatchRese
 
 
 def dispatch_user_queue_for_user(*, user_uuid: str) -> list[CreationTask]:
+    """分发单个用户的 queued 任务，并在事务提交后发布 Celery 消息。"""
     db = SessionLocal()
     dispatched_rows: list[CreationTask] = []
     reservations: list[DispatchReservation] = []
@@ -584,6 +660,7 @@ def dispatch_user_queue(db: Session, *, user_uuid: str) -> list[CreationTask]:
 
 
 def dispatch_global(db: Session) -> int:
+    """扫描所有存在 queued 任务的用户，并逐个触发分发。"""
     users = list(
         db.execute(
             select(CreationTask.user_uuid)
@@ -598,6 +675,11 @@ def dispatch_global(db: Session) -> int:
 
 
 def _prepare_worker_task_dispatch(db: Session, *, task: CreationTask) -> None:
+    """在正式 publish 前校验 payload，并写入各任务类型的辅助上下文。
+
+    这层看似啰嗦，实际上是为了把“坏历史数据”隔离在调度前：
+    如果这里不校验，坏 payload 会在 worker 里才炸掉，排查成本会高很多。
+    """
     if task.task_type == "generation":
         from app.models.novel import GenerationTask
 
@@ -726,6 +808,7 @@ def _prepare_worker_task_dispatch(db: Session, *, task: CreationTask) -> None:
 
 
 def _publish_worker_task(reservation: DispatchReservation) -> None:
+    """发布Worker任务。"""
     if reservation.task_type == "generation":
         from app.tasks.generation import submit_generation_task
 
@@ -800,6 +883,7 @@ def _publish_worker_task(reservation: DispatchReservation) -> None:
 
 
 def _publish_generation_dispatch_snapshot(task: CreationTask) -> None:
+    """发布生成dispatchsnapshot。"""
     if task.task_type != "generation" or task.resource_type != "novel":
         return
     snapshot = build_generation_snapshot(task)
@@ -814,6 +898,7 @@ def _publish_generation_dispatch_snapshot(task: CreationTask) -> None:
 
 
 def _requeue_failed_dispatch(reservation: DispatchReservation, exc: Exception) -> None:
+    """执行 requeue failed dispatch 相关辅助逻辑。"""
     db = SessionLocal()
     try:
         task = db.execute(

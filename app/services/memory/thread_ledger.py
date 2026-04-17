@@ -9,6 +9,7 @@ from app.models.novel import ChapterOutline
 
 
 def _ensure_list(val) -> list:
+    """确保list存在并可用。"""
     if val is None:
         return []
     if isinstance(val, list):

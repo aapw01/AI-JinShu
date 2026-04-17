@@ -10,6 +10,7 @@ from app.services.storyboard.scene_planner import EpisodePlan, ScenePlan
 
 @dataclass(slots=True)
 class ShotDraft:
+    """ShotDraft。"""
     episode_no: int
     scene_no: int
     shot_no: int
@@ -53,6 +54,7 @@ def expand_shots(
     platform: PlatformIntent,
     director: DirectorIntent,
 ) -> list[ShotDraft]:
+    """执行 expand shots 相关辅助逻辑。"""
     pattern = VERTICAL_SHOT_PATTERN if lane == "vertical_feed" else HORIZONTAL_SHOT_PATTERN
     drafts: list[ShotDraft] = []
     for idx, (shot_size, angle, move, motivation) in enumerate(pattern, start=1):
@@ -121,6 +123,7 @@ def expand_shots(
 
 
 def _dialogue_line(scene: ScenePlan, lane: str, shot_idx: int) -> str:
+    """执行 dialogue line 相关辅助逻辑。"""
     if lane == "vertical_feed":
         variants = [
             "你现在退一步，我就当没发生。",

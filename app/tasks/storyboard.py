@@ -67,6 +67,7 @@ _redis_pool = None
 
 
 def _get_redis() -> redis.Redis:
+    """返回当前任务模块复用的 Redis 客户端。"""
     global _redis_pool
     if _redis_pool is None:
         _redis_pool = redis.ConnectionPool.from_url(get_settings().redis_url)
@@ -74,10 +75,12 @@ def _get_redis() -> redis.Redis:
 
 
 def _redis_key(task_id: str) -> str:
+    """构造当前业务使用的 Redis 键。"""
     return f"storyboard:task:{task_id}"
 
 
 def _publish(task: StoryboardTask) -> None:
+    """向 Redis 发布分镜任务的实时状态更新。"""
     payload = {
         "storyboard_project_id": task.storyboard_project_id,
         "task_id": task.task_id,
@@ -98,10 +101,12 @@ def _publish(task: StoryboardTask) -> None:
 
 
 def _reload_task(db, task_db_id: int) -> StoryboardTask | None:
+    """重新从数据库加载统一任务记录。"""
     return db.execute(select(StoryboardTask).where(StoryboardTask.id == task_db_id)).scalar_one_or_none()
 
 
 def _get_creation_task_state(task_db_id: int) -> str | None:
+    """读取统一任务表中的当前任务状态。"""
     db = SessionLocal()
     try:
         row = get_creation_task_by_id(db, task_id=task_db_id)
@@ -111,6 +116,7 @@ def _get_creation_task_state(task_db_id: int) -> str | None:
 
 
 def _check_worker_superseded(task_db_id: int, current_celery_id: str) -> None:
+    """检测当前 worker 是否已被新的调度实例取代。"""
     db = SessionLocal()
     try:
         row = get_creation_task_by_id(db, task_id=task_db_id)
@@ -126,6 +132,7 @@ def _check_worker_superseded(task_db_id: int, current_celery_id: str) -> None:
 
 
 def _activate_creation_task(task_db_id: int, *, current_celery_id: str) -> None:
+    """把统一任务切到 running，并绑定当前 Celery worker。"""
     db = SessionLocal()
     try:
         row = get_creation_task_by_id(db, task_id=task_db_id)
@@ -150,6 +157,7 @@ def _activate_creation_task(task_db_id: int, *, current_celery_id: str) -> None:
 
 
 def _heartbeat_creation(task_db_id: int) -> None:
+    """刷新统一任务的心跳和租约过期时间。"""
     db = SessionLocal()
     try:
         heartbeat_creation_task(db, task_id=task_db_id)
@@ -159,6 +167,7 @@ def _heartbeat_creation(task_db_id: int) -> None:
 
 
 def _update_creation_progress(task_db_id: int, *, progress: float, phase: str, message: str) -> None:
+    """把当前章节进度和 Token 用量同步到统一任务表。"""
     db = SessionLocal()
     try:
         usage = snapshot_usage()
@@ -189,6 +198,7 @@ def _finalize_creation(
     error_detail: str | None = None,
     result_json: dict | None = None,
 ) -> None:
+    """把统一任务收敛到最终状态，并在需要时触发后续调度。"""
     db = SessionLocal()
     user_uuid: str | None = None
     try:
@@ -223,6 +233,7 @@ def run_storyboard_pipeline(
     creation_task_id: int | None = None,
 ):
     # Load prior token totals so resume continues from the correct baseline.
+    """执行整套分镜生成主流程。"""
     _prior_in, _prior_out = 0, 0
     if creation_task_id is not None:
         _db_tmp = SessionLocal()
@@ -747,6 +758,7 @@ def run_storyboard_pipeline(
 
 
 def _ensure_lane_creation_state(creation_task_id: int | None, *, current_celery_id: str | None = None) -> None:
+    """确保分镜分道任务具备独立的统一任务状态。"""
     if creation_task_id is None:
         return
     if current_celery_id:
@@ -759,6 +771,7 @@ def _ensure_lane_creation_state(creation_task_id: int | None, *, current_celery_
 
 
 def _chapters_from_snapshot(snapshot: StoryboardSourceSnapshot) -> list[AdaptedChapter]:
+    """从章节快照中提取后续分镜生成需要的章节列表。"""
     out: list[AdaptedChapter] = []
     for row in list(snapshot.chapters_json or []):
         out.append(
@@ -780,6 +793,7 @@ def _build_character_cards(
     style_profile: str | None,
     genre: str | None,
 ) -> tuple[list[dict], list[dict]]:
+    """根据角色画像和镜头结果构建分镜角色卡片。"""
     from app.services.generation.character_profiles import normalize_ethnicity, normalize_skin_tone
 
     cards: list[dict] = []
@@ -830,6 +844,7 @@ def _build_character_cards(
 
 
 def _refresh_run_after_lane(db, run_id: int) -> None:
+    """在单个分镜分道完成后刷新整次 run 的聚合状态。"""
     refreshed = refresh_run_status(db, run_id=run_id)
     if refreshed:
         log_event(
@@ -856,6 +871,7 @@ def run_storyboard_lane(
     creation_task_id: int | None = None,
 ):
     # Load prior token totals so resume continues from the correct baseline.
+    """执行单条分镜分道的生成流程。"""
     _prior_in, _prior_out = 0, 0
     if creation_task_id is not None:
         _db_tmp = SessionLocal()
@@ -1152,6 +1168,7 @@ def run_storyboard_lane(
 
 @app.task(bind=True, acks_late=True, reject_on_worker_lost=True)
 def run_storyboard_export(self, *, export_db_id: int):
+    """执行分镜导出任务。"""
     db = SessionLocal()
     try:
         row = db.execute(select(StoryboardExport).where(StoryboardExport.id == export_db_id)).scalar_one_or_none()

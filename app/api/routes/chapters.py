@@ -28,11 +28,13 @@ router = APIRouter()
 
 
 class ChapterUpdate(BaseModel):
+    """章节Update。"""
     title: str | None = None
     content: str | None = None
 
 
 def _resolve_volume_size(config: dict | None) -> int:
+    """从小说配置中解析安全可用的分卷大小。"""
     raw = (config or {}).get("volume_size", 30) if isinstance(config, dict) else 30
     try:
         size = int(raw)
@@ -42,10 +44,12 @@ def _resolve_volume_size(config: dict | None) -> int:
 
 
 def _resolve_volume_no(chapter_num: int, volume_size: int) -> int:
+    """根据章节号和分卷大小计算当前所属卷号。"""
     return ((max(chapter_num, 1) - 1) // volume_size) + 1
 
 
 def _count_content_words(content: str | None) -> int:
+    """统计contentwords。"""
     text = (content or "").strip()
     if not text:
         return 0
@@ -53,6 +57,7 @@ def _count_content_words(content: str | None) -> int:
 
 
 def _resolve_progress_title(chapter_num: int, outline_title: str | None, chapter_title: str | None) -> str:
+    """为章节进度卡片选择一个最合适的展示标题。"""
     if is_effective_title(chapter_title, chapter_num):
         return str(chapter_title).strip()
     if is_effective_title(outline_title, chapter_num):
@@ -87,6 +92,7 @@ def _get_generating_chapter_from_redis(novel_db_id: int) -> int | None:
 
 
 def _get_generating_chapter_from_creation_task(task: CreationTask) -> int | None:
+    """返回generating章节来源creation任务。"""
     payload = task.payload_json if isinstance(task.payload_json, dict) else {}
     cursor = task.resume_cursor_json if isinstance(task.resume_cursor_json, dict) else {}
     runtime_state = cursor.get("runtime_state") if isinstance(cursor.get("runtime_state"), dict) else {}
@@ -110,6 +116,7 @@ def _to_version_response(
     c: ChapterVersion,
     novel_uuid: str,
 ) -> ChapterResponse:
+    """执行 to version response 相关辅助逻辑。"""
     return ChapterResponse(
         id=c.id,
         novel_id=novel_uuid,

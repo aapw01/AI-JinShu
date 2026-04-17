@@ -22,6 +22,7 @@ from app.services.system_settings.runtime import get_effective_runtime_setting
 
 
 class QuotaReason(str, Enum):
+    """枚举配额校验失败时可返回给调用方的原因。"""
     QUOTA_SUSPENDED = "quota_suspended"
     CONCURRENCY_LIMIT_EXCEEDED = "concurrency_limit_exceeded"
     MONTHLY_CHAPTER_LIMIT_EXCEEDED = "monthly_chapter_limit_exceeded"
@@ -30,12 +31,14 @@ class QuotaReason(str, Enum):
 
 @dataclass
 class QuotaCheckResult:
+    """封装配额检查的结果、原因和用户提示。"""
     ok: bool
     reason: QuotaReason | None = None
     user_message: str | None = None
 
 
 def _quota_user_message(reason: QuotaReason) -> str:
+    """执行 quota user message 相关辅助逻辑。"""
     mapping = {
         QuotaReason.MONTHLY_TOKEN_LIMIT_EXCEEDED: "本月可用 token 已用尽，请下月再试或联系管理员调整额度",
         QuotaReason.MONTHLY_CHAPTER_LIMIT_EXCEEDED: "本月可生成章节额度已用尽，请下月再试或联系管理员调整额度",
@@ -46,6 +49,7 @@ def _quota_user_message(reason: QuotaReason) -> str:
 
 
 def _month_range_utc(now: datetime) -> tuple[datetime, datetime]:
+    """执行 month range utc 相关辅助逻辑。"""
     start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
     if now.month == 12:
         end = datetime(now.year + 1, 1, 1, tzinfo=timezone.utc)
@@ -55,6 +59,7 @@ def _month_range_utc(now: datetime) -> tuple[datetime, datetime]:
 
 
 def ensure_user_quota(db: Session, user: User) -> UserQuota:
+    """确保用户配额存在并可用。"""
     quota = db.execute(select(UserQuota).where(UserQuota.user_id == user.id)).scalar_one_or_none()
     if quota:
         return quota
@@ -92,6 +97,7 @@ def check_generation_quota(
     user: User,
     requested_chapters: int,
 ) -> QuotaCheckResult:
+    """检查生成配额。"""
     quota = ensure_user_quota(db, user)
     if quota.status != "active":
         return QuotaCheckResult(False, QuotaReason.QUOTA_SUSPENDED, _quota_user_message(QuotaReason.QUOTA_SUSPENDED))
@@ -162,6 +168,7 @@ def record_generation_usage(
     novel_id: int,
     source: str = "generation",
 ) -> None:
+    """记录生成用量。"""
     task = db.execute(
         select(CreationTask)
         .where(

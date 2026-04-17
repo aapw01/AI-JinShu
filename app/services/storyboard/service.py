@@ -41,6 +41,7 @@ RUNNING_STATES = {"submitted", "running", "retrying", "paused"}
 
 
 def normalize_lanes(values: list[str] | None) -> list[str]:
+    """把 lanes 规范化为统一格式。"""
     if not values:
         return ["vertical_feed", "horizontal_cinematic"]
     out: list[str] = []
@@ -56,10 +57,12 @@ def normalize_lanes(values: list[str] | None) -> list[str]:
 
 
 def get_project_or_404(db: Session, project_id: int) -> StoryboardProject | None:
+    """返回project或404。"""
     return db.execute(select(StoryboardProject).where(StoryboardProject.id == project_id)).scalar_one_or_none()
 
 
 def list_projects(db: Session, principal_role: str, principal_user_uuid: str | None) -> list[StoryboardProject]:
+    """列出projects。"""
     stmt = select(StoryboardProject).order_by(StoryboardProject.created_at.desc())
     if principal_role != "admin":
         stmt = stmt.where(StoryboardProject.owner_user_uuid == (principal_user_uuid or ""))
@@ -83,6 +86,7 @@ def create_project(
     audience_goal: str | None,
     copyright_assertion: bool,
 ) -> StoryboardProject:
+    """创建project。"""
     lanes = normalize_lanes(output_lanes)
     chapter_text = " ".join(
         [(c.summary or c.content or "")[:180] for c in load_novel_chapters(db, novel.id, source_novel_version_id)[:8]]
@@ -138,6 +142,7 @@ def create_project(
 
 
 def get_latest_task(db: Session, project_id: int) -> StoryboardTask | None:
+    """返回latest任务。"""
     return db.execute(
         select(StoryboardTask)
         .where(StoryboardTask.storyboard_project_id == project_id)
@@ -151,6 +156,7 @@ def create_generation_versions(
     lanes: list[str],
     source_novel_version_id: int,
 ) -> list[StoryboardVersion]:
+    """创建生成版本。"""
     created: list[StoryboardVersion] = []
     for lane in lanes:
         version: StoryboardVersion | None = None
@@ -190,6 +196,7 @@ def create_task_record(
     task_id: str,
     trace_id: str | None = None,
 ) -> StoryboardTask:
+    """创建任务record。"""
     task = StoryboardTask(
         storyboard_project_id=project_id,
         task_id=task_id,
@@ -207,6 +214,7 @@ def create_task_record(
 
 
 def to_adapted_chapters(chapters: list[ChapterVersion]) -> list[AdaptedChapter]:
+    """执行 to adapted chapters 相关辅助逻辑。"""
     out: list[AdaptedChapter] = []
     for row in chapters:
         out.append(
@@ -221,6 +229,7 @@ def to_adapted_chapters(chapters: list[ChapterVersion]) -> list[AdaptedChapter]:
 
 
 def load_novel_chapters(db: Session, novel_id: int, novel_version_id: int | None) -> list[AdaptedChapter]:
+    """加载小说章节。"""
     if novel_version_id is None:
         return []
     rows = db.execute(
@@ -247,6 +256,7 @@ def generate_lane_shots(
     genre_style_key: str | None = None,
     director_style_key: str | None = None,
 ) -> tuple[list[ShotDraft], dict[str, Any], QualityGateResult]:
+    """执行 generate lane shots 相关辅助逻辑。"""
     genre_style = find_genre_style(genre_style_key)
     director_style = find_director_style(director_style_key)
     effective_style = style_profile or (genre_style.label if genre_style else None) or novel.style
@@ -307,6 +317,7 @@ def generate_lane_shots(
 
 
 def rewrite_shots_by_style(shots: list[ShotDraft], style_tags: list[str]) -> list[ShotDraft]:
+    """执行 rewrite shots by style 相关辅助逻辑。"""
     out: list[ShotDraft] = []
     style_hint = " / ".join(style_tags[:3]) if style_tags else "题材一致"
     for s in shots:
@@ -344,6 +355,7 @@ def rewrite_shots_by_style(shots: list[ShotDraft], style_tags: list[str]) -> lis
 
 
 def persist_shots(db: Session, version_id: int, shots: list[ShotDraft]) -> int:
+    """执行 persist shots 相关辅助逻辑。"""
     db.execute(delete(StoryboardShot).where(StoryboardShot.storyboard_version_id == version_id))
     for s in shots:
         db.add(
@@ -414,6 +426,7 @@ def persist_episode_shots(db: Session, version_id: int, episode_no: int, shots: 
 
 
 def format_eta(seconds: int | None) -> str | None:
+    """把剩余秒数转换成适合前端展示的中文 ETA 文案。"""
     if seconds is None:
         return None
     sec = max(0, int(seconds))
@@ -430,6 +443,7 @@ def format_eta(seconds: int | None) -> str | None:
 
 
 def set_default_version(db: Session, project_id: int, version_id: int) -> None:
+    """设置default版本。"""
     versions = db.execute(
         select(StoryboardVersion).where(StoryboardVersion.storyboard_project_id == project_id)
     ).scalars().all()
@@ -443,6 +457,7 @@ def build_quality_report(
     quality: QualityGateResult,
     prompt_contract_json: dict[str, Any],
 ) -> dict[str, Any]:
+    """构建质量report。"""
     return {
         "lane": lane,
         "style_consistency_score": quality.style_consistency_score,
@@ -456,6 +471,7 @@ def build_quality_report(
 
 
 def task_status_payload(task: StoryboardTask) -> dict[str, Any]:
+    """执行 task status payload 相关辅助逻辑。"""
     gate = task.gate_report_json if isinstance(task.gate_report_json, dict) else {}
     return {
         "storyboard_project_id": task.storyboard_project_id,
@@ -484,6 +500,7 @@ def task_status_payload(task: StoryboardTask) -> dict[str, Any]:
 
 
 def project_config(project: StoryboardProject) -> dict[str, Any]:
+    """执行 project config 相关辅助逻辑。"""
     cfg = project.config_json if isinstance(project.config_json, dict) else {}
     return {
         "mode": cfg.get("mode") or "quick",
@@ -498,6 +515,7 @@ def apply_rewrite_suggestions_to_shots(
     shots: list[StoryboardShot],
     suggestions: list[str],
 ) -> int:
+    """执行 apply rewrite suggestions to shots 相关辅助逻辑。"""
     changed = 0
     for shot in shots:
         original = (
@@ -550,6 +568,7 @@ def update_task_state(
     retryable: int | None = None,
     gate_report: dict[str, Any] | None = None,
 ) -> None:
+    """更新任务状态。"""
     if status is not None:
         task.status = status
     if run_state is not None:

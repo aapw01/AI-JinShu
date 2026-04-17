@@ -1,4 +1,19 @@
-"""Multi-LLM support via a single canonical primary model connection."""
+"""统一的 LLM / Embedding 适配层。
+
+模块职责：
+- 把 OpenAI-compatible、Gemini、Anthropic 收敛成一套调用入口。
+- 负责 provider 解析、推理参数归一化、重试、用量统计。
+- 对上层暴露 `get_llm()` / `get_embedding_model()`，屏蔽底层 SDK 差异。
+
+系统位置：
+- 上游是系统设置运行时 `app.services.system_settings.runtime`。
+- 下游是 Prompt 渲染、结构化输出、记忆检索、生成节点。
+
+面试可讲点：
+- 为什么项目没有把 provider 差异散落到业务节点里。
+- 为什么“主模型连接”和“embedding 连接”要分开配置但允许复用。
+- 为什么要在 SDK 外再包一层 proxy 做 token 统计与统一重试。
+"""
 
 from __future__ import annotations
 
@@ -26,6 +41,12 @@ _GEMINI_HARM_THRESHOLD_MAP = {item.value: item for item in HarmBlockThreshold}
 
 
 def _coerce_part_text(part: Any) -> str:
+    """把不同 SDK 的消息片段统一压平成纯文本。
+
+    LangChain / OpenAI / Gemini 返回的 content 结构并不一致：
+    有的直接是字符串，有的是分块列表，有的嵌套在 dict / 对象属性里。
+    上层只关心“模型到底说了什么”，所以这里先把形态差异吃掉。
+    """
     if part is None:
         return ""
     if isinstance(part, str):
@@ -63,15 +84,18 @@ def response_to_text(resp: Any) -> str:
 
 
 def _resolve_api_key(_provider: str | None = None) -> str:
+    """读取当前主模型运行时的 API Key。"""
     return str(get_primary_chat_runtime().get("api_key") or "")
 
 
 def _resolve_base_url(_provider: str | None = None) -> str | None:
+    """读取当前主模型运行时的 base_url，并去掉尾部斜杠。"""
     base_url = str(get_primary_chat_runtime().get("base_url") or "").strip()
     return base_url.rstrip("/") or None
 
 
 def resolve_effective_adapter(provider_key: str | None) -> tuple[str, str]:
+    """返回本次调用最终采用的协议适配器及其命中来源。"""
     primary = get_primary_chat_runtime()
     provider = str(provider_key or primary.get("provider") or "openai").strip().lower() or "openai"
     protocol_override = str(primary.get("protocol_override") or "").strip().lower() or None
@@ -88,6 +112,7 @@ def resolve_effective_adapter(provider_key: str | None) -> tuple[str, str]:
 
 
 def _resolve_chat_provider_and_model(provider: str | None, model: str | None) -> tuple[str, str]:
+    """返回当前调用真正生效的 provider 和 model。"""
     primary = get_primary_chat_runtime()
     resolved_provider = str(primary.get("provider") or "openai").strip().lower() or "openai"
     resolved_model = str(model or primary.get("model") or "gpt-4o-mini").strip() or "gpt-4o-mini"
@@ -104,6 +129,7 @@ def _resolve_chat_provider_and_model(provider: str | None, model: str | None) ->
 
 
 def _normalize_temperature(value: Any) -> float | None:
+    """把温度参数转换为 provider SDK 能稳定接收的浮点值。"""
     if value in (None, ""):
         return None
     return float(value)
@@ -112,6 +138,11 @@ def _normalize_temperature(value: Any) -> float | None:
 def _normalize_gemini_safety_settings(
     value: Any,
 ) -> dict[HarmCategory, HarmBlockThreshold] | None:
+    """把配置层的 Gemini safety settings 规范化为 SDK 枚举。
+
+    配置文件里用字符串最容易维护，但 SDK 需要的是枚举类型。
+    这一步把“人类可配”转换成“SDK 可执行”。
+    """
     if value in (None, "", []):
         return None
     if isinstance(value, dict):
@@ -138,6 +169,11 @@ def _normalize_gemini_safety_settings(
 
 
 def normalize_inference_for_provider(provider_key: str | None, inference: dict[str, Any] | None) -> dict[str, Any]:
+    """把通用 inference 参数裁剪成当前 provider 真正支持的子集。
+
+    例如 Gemini 的 `safety_settings` 只应在 Gemini adapter 下生效；
+    如果把所有 provider 特有参数都无差别透传，最容易出现运行时兼容性问题。
+    """
     raw = deepcopy(inference or {})
     if not raw:
         return {}
@@ -168,7 +204,9 @@ def normalize_inference_for_provider(provider_key: str | None, inference: dict[s
 
 
 def extract_provider_block(resp: Any) -> dict[str, str] | None:
+    """从 provider 响应里提取“被安全策略拦截”的结构化信息。"""
     def _extract_meta_dict(payload: Any) -> dict[str, Any] | None:
+        """从 dict 或 SDK 响应对象中提取最可能携带 provider 元数据的字典。"""
         if isinstance(payload, dict):
             return payload
         for attr in ("response_metadata", "additional_kwargs"):
@@ -204,6 +242,11 @@ def extract_provider_block(resp: Any) -> dict[str, str] | None:
 
 
 def _build_chat_model(provider_key: str, model_name: str, *, inference: dict[str, Any] | None = None) -> BaseChatModel:
+    """按最终 adapter 构造底层 LangChain chat model。
+
+    这里是 provider 差异的唯一汇聚点。上层生成节点不需要知道
+    `ChatOpenAI`、`ChatAnthropic`、`ChatGoogleGenerativeAI` 的细节。
+    """
     adapter_type, adapter_source = resolve_effective_adapter(provider_key)
     primary = get_primary_chat_runtime()
     resolved_base_url = _resolve_base_url(provider_key)
@@ -263,6 +306,11 @@ _RETRY_BACKOFF = [1.0, 2.0, 4.0]
 
 
 def _is_retryable(exc: Exception) -> bool:
+    """判断一次模型调用失败是否值得自动重试。
+
+    只对明显的连接类、限流类、服务不可用类错误做退避重试，
+    避免把确定性业务错误也重放三遍。
+    """
     if isinstance(exc, _RETRYABLE_EXCEPTIONS):
         return True
     name = type(exc).__name__
@@ -278,10 +326,12 @@ class _TrackedLLMProxy:
     """Thin proxy that records provider usage for every invoke call with retry."""
 
     def __init__(self, inner: Any, *, stage_prefix: str):
+        """保存真实 LLM 对象，并为后续用量统计准备 stage 前缀。"""
         self._inner = inner
         self._stage_prefix = stage_prefix
 
     def invoke(self, *args: Any, **kwargs: Any):
+        """同步调用模型，并统一做 token 统计与有限次重试。"""
         if not hasattr(self._inner, "invoke"):
             return self._inner
         last_exc: Exception | None = None
@@ -307,6 +357,7 @@ class _TrackedLLMProxy:
         raise last_exc  # type: ignore[misc]
 
     async def ainvoke(self, *args: Any, **kwargs: Any):
+        """异步调用模型，并统一做 token 统计与有限次重试。"""
         import asyncio
 
         if not hasattr(self._inner, "ainvoke"):
@@ -334,21 +385,27 @@ class _TrackedLLMProxy:
         raise last_exc  # type: ignore[misc]
 
     def __getattr__(self, item: str):
+        """把未知属性访问委托给被包装对象。"""
         return getattr(self._inner, item)
 
     def __getitem__(self, item: Any):
+        """把下标访问转发给被包装对象。"""
         return self._inner[item]
 
     def __iter__(self):
+        """暴露被包装对象的迭代接口。"""
         return iter(self._inner)
 
     def __len__(self) -> int:
+        """返回被包装对象的长度。"""
         return len(self._inner)
 
     def __contains__(self, item: Any) -> bool:
+        """判断被包装对象是否包含指定元素。"""
         return item in self._inner
 
     def __repr__(self) -> str:
+        """返回当前对象的调试字符串表示。"""
         return repr(self._inner)
 
     def with_structured_output(self, schema: Any, **kwargs: Any) -> Any:
@@ -369,6 +426,7 @@ class _TrackedLLMProxy:
             invoke/ainvoke only."""
 
             def invoke(self, input_: Any, *args: Any, **kw: Any) -> Any:
+                """同步执行 structured output 调用，并优先从 raw 响应记录 token 用量。"""
                 result = inner_chain.invoke(input_, *args, **kw)
                 if isinstance(result, dict) and "raw" in result:
                     raw = result.get("raw")
@@ -381,6 +439,7 @@ class _TrackedLLMProxy:
                 return result
 
             async def ainvoke(self, input_: Any, *args: Any, **kw: Any) -> Any:
+                """异步执行 structured output 调用，并优先从 raw 响应记录 token 用量。"""
                 result = await inner_chain.ainvoke(input_, *args, **kw)
                 if isinstance(result, dict) and "raw" in result:
                     raw = result.get("raw")
@@ -393,6 +452,7 @@ class _TrackedLLMProxy:
                 return result
 
             def __getattr__(self, item: str) -> Any:
+                """把未覆写的方法继续委托给原始 structured chain。"""
                 return getattr(inner_chain, item)
 
         return _StructuredOutputProxy()
@@ -404,7 +464,12 @@ def get_llm(
     *,
     inference: dict[str, Any] | None = None,
 ) -> BaseChatModel:
-    """Get LLM from the canonical primary model connection."""
+    """返回统一包装后的聊天模型对象。
+
+    对业务层来说，最重要的不变量只有两个：
+    1. 无论底层 provider 是谁，调用接口保持一致。
+    2. 每次调用都会自动记录 token 用量和基础重试日志。
+    """
     prov, resolved_model = _resolve_chat_provider_and_model(provider, model)
     log_event(logger, "llm.call.start", provider=prov, model=resolved_model)
     started = time.perf_counter()
@@ -426,12 +491,19 @@ def get_llm_with_fallback(
     *,
     inference: dict[str, Any] | None = None,
 ) -> BaseChatModel:
-    """Compatibility wrapper. The system no longer supports multi-provider fallback."""
+    """兼容旧调用点的包装器。
+
+    现在项目已经收敛到“单主模型连接”，这里保留只是为了减少旧代码迁移成本。
+    """
     return get_llm(provider, model, inference=inference)
 
 
 def get_embedding_model() -> OpenAIEmbeddings:
-    """Build the single configured embedding connection."""
+    """构建 embedding 连接。
+
+    当前实现只支持 OpenAI-compatible embedding 协议。之所以和主模型分开，
+    是因为生成模型可能走 Anthropic / Gemini，但向量检索仍常常依赖 OpenAI 兼容接口。
+    """
     embedding = get_embedding_runtime()
     if not embedding.get("enabled"):
         raise RuntimeError("Embedding is disabled")
@@ -460,7 +532,11 @@ def get_embedding_model() -> OpenAIEmbeddings:
 
 
 def embed_query(text: str) -> list[float] | None:
-    """Best-effort query embedding. Returns None when embedding is unavailable."""
+    """尽力而为地生成 query embedding，失败时返回 `None`。
+
+    这里选择 soft-fail，而不是让所有调用方都因为 embedding 不可用而报错。
+    对这个项目来说，向量检索是“增强项”，不是主生成链路的硬依赖。
+    """
     if not text.strip():
         return None
     try:

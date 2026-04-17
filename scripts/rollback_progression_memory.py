@@ -8,6 +8,7 @@ from app.services.memory.progression_control import rollback_progression_range
 
 
 def main() -> None:
+    """从指定章节开始回滚 progression memory，并打印回滚结果。"""
     parser = argparse.ArgumentParser(description="Rollback promoted progression memory from chapter N onward.")
     parser.add_argument("--novel-id", type=int, required=True)
     parser.add_argument("--version-id", type=int, required=False, default=None)

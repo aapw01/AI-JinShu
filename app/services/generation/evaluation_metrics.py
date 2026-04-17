@@ -6,6 +6,7 @@ from typing import Any
 
 
 def compute_closure_action_metrics(actions: list[str]) -> dict[str, Any]:
+    """统计收束动作序列的波动情况。"""
     seq = [str(a or "").strip() for a in actions if str(a or "").strip()]
     distribution = dict(Counter(seq))
     if len(seq) <= 1:
@@ -31,6 +32,7 @@ def compute_abrupt_ending_risk(
     latest_closure_state: dict[str, Any] | None,
     tail_contents: list[str] | None,
 ) -> dict[str, Any]:
+    """评估当前结尾是否存在突兀收束风险。"""
     state = latest_closure_state or {}
     tails = [str(x or "") for x in (tail_contents or []) if str(x or "").strip()]
     reasons: list[str] = []

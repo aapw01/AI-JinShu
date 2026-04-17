@@ -17,22 +17,26 @@ from app.services.storyboard.exporter import export_shots_to_csv
 
 
 def _utc_now() -> datetime:
+    """返回当前 UTC 时间，统一任务与数据库时间基准。"""
     return datetime.now(timezone.utc)
 
 
 def artifact_root() -> Path:
+    """执行 artifact root 相关辅助逻辑。"""
     root = Path("tmp/storyboard_exports")
     root.mkdir(parents=True, exist_ok=True)
     return root
 
 
 def make_download_signature(export_id: str, expires_ts: int) -> str:
+    """执行 make download signature 相关辅助逻辑。"""
     secret = (get_settings().auth_jwt_secret or "").encode("utf-8")
     payload = f"{export_id}:{expires_ts}".encode("utf-8")
     return hmac.new(secret, payload, hashlib.sha256).hexdigest()
 
 
 def verify_download_signature(export_id: str, expires_ts: int, signature: str) -> bool:
+    """执行 verify download signature 相关辅助逻辑。"""
     if int(expires_ts) < int(_utc_now().timestamp()):
         return False
     expected = make_download_signature(export_id, expires_ts)
@@ -40,6 +44,7 @@ def verify_download_signature(export_id: str, expires_ts: int, signature: str) -
 
 
 def build_export_download_url(*, project_id: int, export_id: str, expires_seconds: int = 600) -> str:
+    """构建导出downloadURL。"""
     expires_ts = int(_utc_now().timestamp()) + max(60, int(expires_seconds))
     sig = make_download_signature(export_id, expires_ts)
     return f"/api/storyboards/{project_id}/exports/{export_id}/download?expires={expires_ts}&sig={sig}"
@@ -47,6 +52,7 @@ def build_export_download_url(*, project_id: int, export_id: str, expires_second
 
 def _minimal_pdf_bytes(lines: list[str]) -> bytes:
     # Minimal PDF fallback (Latin-1 only) used when reportlab is unavailable.
+    """执行 minimal pdf bytes 相关辅助逻辑。"""
     safe = [str(x).encode("latin-1", errors="replace").decode("latin-1") for x in lines]
     text = "\\n".join([f"({line[:120].replace('(', '[').replace(')', ']')}) Tj" for line in safe[:120]])
     stream = f"BT /F1 10 Tf 40 780 Td 12 TL {text} ET"
@@ -69,6 +75,7 @@ def _minimal_pdf_bytes(lines: list[str]) -> bytes:
 
 
 def _render_pdf_bytes(payload: dict[str, Any]) -> bytes:
+    """执行 render pdf bytes 相关辅助逻辑。"""
     lines = [
         "Storyboard Version Report",
         f"Project #{payload.get('storyboard_project_id')}",
@@ -109,6 +116,7 @@ def _render_pdf_bytes(payload: dict[str, Any]) -> bytes:
 
 
 def _export_json_payload(version: StoryboardVersion, shots: list[StoryboardShot], cards: list[StoryboardCharacterCard]) -> dict[str, Any]:
+    """执行 export json payload 相关辅助逻辑。"""
     return {
         "storyboard_project_id": int(version.storyboard_project_id),
         "storyboard_version_id": int(version.id),
@@ -164,6 +172,7 @@ def render_export_blob(
     version_id: int,
     export_format: str,
 ) -> tuple[bytes, str, str]:
+    """执行 render export blob 相关辅助逻辑。"""
     version = db.execute(select(StoryboardVersion).where(StoryboardVersion.id == version_id)).scalar_one_or_none()
     if not version:
         raise ValueError("storyboard_version_not_found")
@@ -191,6 +200,7 @@ def render_export_blob(
 
 
 def save_export_blob(*, export_public_id: str, extension: str, content: bytes) -> tuple[str, int]:
+    """保存导出blob。"""
     root = artifact_root()
     folder = root / export_public_id[:2]
     folder.mkdir(parents=True, exist_ok=True)
@@ -200,4 +210,5 @@ def save_export_blob(*, export_public_id: str, extension: str, content: bytes) -
 
 
 def open_export_blob(storage_path: str) -> bytes:
+    """执行 open export blob 相关辅助逻辑。"""
     return Path(storage_path).read_bytes()

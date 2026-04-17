@@ -23,6 +23,7 @@ _REFINABLE_FIELDS = {
 
 
 def node_load_context(state: GenerationState) -> GenerationState:
+    """执行 node load context 相关辅助逻辑。"""
     from app.services.memory.context import build_chapter_context
 
     chapter_num = state["current_chapter"]
@@ -123,6 +124,7 @@ def node_load_context(state: GenerationState) -> GenerationState:
 
 
 def node_beats(state: GenerationState) -> GenerationState:
+    """执行 node beats 相关辅助逻辑。"""
     chapter_num = state["current_chapter"]
     outline = state.get("outline") or {}
     beats = [
@@ -186,6 +188,7 @@ def node_beats(state: GenerationState) -> GenerationState:
 
 
 def node_consistency_check(state: GenerationState) -> GenerationState:
+    """执行 node consistency check 相关辅助逻辑。"""
     from app.services.generation.consistency import check_consistency, inject_consistency_context
     from app.services.generation.common import logger
 
@@ -219,6 +222,7 @@ def node_consistency_check(state: GenerationState) -> GenerationState:
 
 
 def node_save_blocked(state: GenerationState) -> GenerationState:
+    """执行 node save blocked 相关辅助逻辑。"""
     chapter_num = state["current_chapter"]
     report = state.get("consistency_report")
     chapter_title = resolve_chapter_title(
@@ -285,6 +289,7 @@ def node_save_blocked(state: GenerationState) -> GenerationState:
 
 
 def node_advance_chapter(state: GenerationState) -> GenerationState:
+    """执行 node advance chapter 相关辅助逻辑。"""
     return {"current_chapter": state["current_chapter"] + 1}
 
 
