@@ -35,6 +35,7 @@ from app.services.generation.segment_plan import (
 from app.services.generation.state import GenerationState
 from app.services.memory.character_state import CharacterStateManager
 from app.services.memory.progression_state import ProgressionMemoryManager
+from app.services.memory.retriever import KnowledgeRetriever
 from app.services.memory.story_bible import CheckpointStore, QualityReportStore, StoryBibleStore
 from app.services.memory.summary_manager import SummaryManager
 from app.services.task_runtime.checkpoint_repo import get_resume_runtime_state
@@ -170,9 +171,15 @@ def node_init(state: GenerationState) -> GenerationState:
 
 def node_prewrite(state: GenerationState) -> GenerationState:
     """执行 node prewrite 相关辅助逻辑。"""
+    retriever = KnowledgeRetriever()
     if _is_resume_like(state):
         existing = load_prewrite_artifacts(state["novel_id"])
         if existing:
+            retriever.upsert_global_spec_chunks_from_prewrite(
+                novel_id=state["novel_id"],
+                novel_version_id=state.get("novel_version_id"),
+                prewrite=existing,
+            )
             logger.info("Resume: loaded existing prewrite for novel %s (current_chapter=%s)", state["novel_id"], state["current_chapter"])
             progress(state, "constitution", 0, 2, "加载已有创作宪法...", {"current_phase": "prewrite", "total_chapters": state["num_chapters"]})
             return {"prewrite": existing}
@@ -185,6 +192,11 @@ def node_prewrite(state: GenerationState) -> GenerationState:
         novel_config=(state.get("novel_info") or {}).get("config"),
     )
     save_prewrite_artifacts(state["novel_id"], prewrite)
+    retriever.upsert_global_spec_chunks_from_prewrite(
+        novel_id=state["novel_id"],
+        novel_version_id=state.get("novel_version_id"),
+        prewrite=prewrite,
+    )
     return {"prewrite": prewrite}
 
 

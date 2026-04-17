@@ -22,6 +22,14 @@ def test_next_chapter_prompt_renders_tagged_json_context():
             "global_bible": "世界设定",
             "thread_ledger_text": "线索A",
             "recent_window": "上一章结尾",
+            "retrieved_memory_brief": "历史事实: 林舟已经知道云家真正操盘者。",
+            "retrieved_evidence": [
+                {
+                    "chapter_num": 1,
+                    "source_type": "chapter_fact_delta",
+                    "short_excerpt": "林舟在仓库里确认了云家的幕后指令。",
+                }
+            ],
             "prompt_contract": {"NarrativeIntent": {"goal": "推进冲突"}},
             "closure_state": {"phase_mode": "closing"},
         },
@@ -33,6 +41,8 @@ def test_next_chapter_prompt_renders_tagged_json_context():
     assert "{'NarrativeIntent'" not in prompt
     assert "<global_bible>" in prompt
     assert "<outline_json>" in prompt
+    assert "<retrieved_memory_brief>" in prompt
+    assert "<retrieved_evidence_json>" in prompt
 
 
 def test_rewrite_prompt_uses_annotations_json_tag():

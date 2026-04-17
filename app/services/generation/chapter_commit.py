@@ -17,9 +17,140 @@ from app.services.generation.events import EventBus, GenerationEvent
 from app.services.generation.heuristics import extract_item_mentions, extract_timeline_markers
 from app.services.generation.progress import volume_no_for_chapter
 from app.services.generation.state import GenerationState
+from app.services.memory.retriever import KnowledgeRetriever
 from app.services.memory.progression_state import ProgressionMemoryManager
 
 logger = logging.getLogger(__name__)
+
+
+def _build_fact_delta_summary(
+    extracted_facts: dict[str, Any],
+    chapter_num: int,
+    *,
+    fallback: str = "",
+) -> str:
+    """生成一行高信号事实摘要，避免写入低信息量标签。"""
+    parts: list[str] = []
+    for event in (extracted_facts.get("events") or [])[:2]:
+        if not isinstance(event, dict):
+            continue
+        title = str(event.get("title") or event.get("summary") or "").strip()
+        if title:
+            parts.append(f"事件:{title}")
+    for fact in (extracted_facts.get("facts") or [])[:2]:
+        if not isinstance(fact, dict):
+            continue
+        entity_name = str(fact.get("entity_name") or "").strip()
+        fact_type = str(fact.get("fact_type") or "").strip()
+        value = str(fact.get("value") or "").strip()
+        summary = " / ".join(part for part in [entity_name, fact_type, value] if part)
+        if summary:
+            parts.append(f"事实:{summary}")
+    if not parts and str(fallback or "").strip():
+        parts.append(str(fallback).strip())
+    if not parts:
+        parts.append(f"第{chapter_num}章新增事实")
+    return "；".join(parts)[:220]
+
+
+def _build_continuity_summary(
+    *,
+    chapter_num: int,
+    summary_text: str,
+    outline: dict[str, Any],
+    progression_payload: dict[str, Any],
+) -> str:
+    """生成一行高信号连续性摘要，优先保留目标、变化和承接点。"""
+    advancement = progression_payload.get("advancement") if isinstance(progression_payload.get("advancement"), dict) else {}
+    transition = progression_payload.get("transition") if isinstance(progression_payload.get("transition"), dict) else {}
+    parts: list[str] = []
+    objective = str(
+        advancement.get("chapter_objective")
+        or outline.get("chapter_objective")
+        or outline.get("purpose")
+        or ""
+    ).strip()
+    if objective:
+        parts.append(f"目标:{objective}")
+    required_new_information = advancement.get("new_information") or outline.get("required_new_information") or []
+    compact_new_information = "、".join(
+        str(item).strip()
+        for item in required_new_information[:2]
+        if str(item).strip()
+    )
+    if compact_new_information:
+        parts.append(f"新信息:{compact_new_information}")
+    relationship_delta = str(
+        advancement.get("relationship_delta")
+        or outline.get("relationship_delta")
+        or ""
+    ).strip()
+    if relationship_delta:
+        parts.append(f"关系变化:{relationship_delta}")
+    transition_line = str(
+        transition.get("last_action")
+        or transition.get("ending_scene")
+        or outline.get("opening_scene")
+        or ""
+    ).strip()
+    if transition_line:
+        parts.append(f"承接点:{transition_line}")
+    if not parts and str(summary_text or "").strip():
+        parts.append(str(summary_text).strip())
+    if not parts:
+        parts.append(f"第{chapter_num}章连续性要点")
+    return "；".join(parts)[:220]
+
+
+def _render_fact_delta_text(extracted_facts: dict[str, Any], chapter_num: int) -> str:
+    """把 facts/events 压成适合检索的事实增量文本。"""
+    parts: list[str] = [f"第{chapter_num}章事实增量"]
+    for event in (extracted_facts.get("events") or [])[:5]:
+        if not isinstance(event, dict):
+            continue
+        title = str(event.get("title") or "").strip()
+        summary = str(event.get("summary") or event.get("description") or "").strip()
+        line = " / ".join(part for part in [title, summary] if part)
+        if line:
+            parts.append(f"- 事件: {line}")
+    for fact in (extracted_facts.get("facts") or [])[:8]:
+        if not isinstance(fact, dict):
+            continue
+        entity_name = str(fact.get("entity_name") or "").strip()
+        fact_type = str(fact.get("fact_type") or "").strip()
+        value = str(fact.get("value") or "").strip()
+        line = " / ".join(part for part in [entity_name, fact_type, value] if part)
+        if line:
+            parts.append(f"- 事实: {line}")
+    return "\n".join(parts)
+
+
+def _render_continuity_text(
+    *,
+    chapter_num: int,
+    summary_text: str,
+    outline: dict[str, Any],
+    progression_payload: dict[str, Any],
+) -> str:
+    """把连续性约束相关信息压成一段可检索文本。"""
+    advancement = progression_payload.get("advancement") if isinstance(progression_payload.get("advancement"), dict) else {}
+    transition = progression_payload.get("transition") if isinstance(progression_payload.get("transition"), dict) else {}
+    required_new_information = advancement.get("new_information") or outline.get("required_new_information") or []
+    relationship_delta = advancement.get("relationship_delta") or outline.get("relationship_delta") or ""
+    conflict_axis = advancement.get("conflict_axis") or outline.get("conflict_axis") or outline.get("chapter_objective") or ""
+    parts = [
+        f"第{chapter_num}章连续性摘要",
+        f"章节目标: {str(advancement.get('chapter_objective') or outline.get('chapter_objective') or outline.get('purpose') or '').strip()}",
+        f"连续性回顾: {summary_text.strip()}",
+        f"新信息: {'；'.join(str(item) for item in required_new_information[:4] if str(item).strip())}",
+        f"关系变化: {str(relationship_delta).strip()}",
+        f"冲突轴: {str(conflict_axis).strip()}",
+        f"开场场景: {str(outline.get('opening_scene') or '').strip()}",
+        f"开场时间状态: {str(outline.get('opening_time_state') or '').strip()}",
+        f"上一章结束场景: {str(transition.get('ending_scene') or '').strip()}",
+        f"上一章最后动作: {str(transition.get('last_action') or '').strip()}",
+    ]
+    return "\n".join(line for line in parts if line.split(":", 1)[-1].strip())
 
 
 def _chapter_finalized_story_bible_handler(event: GenerationEvent) -> None:
@@ -374,11 +505,80 @@ def _chapter_finalized_telemetry_handler(event: GenerationEvent) -> None:
     _ = event  # telemetry placeholder for future extension
 
 
+def _chapter_finalized_knowledge_chunk_handler(event: GenerationEvent) -> None:
+    """章节完成后写入 summary / continuity / fact_delta 三类检索 chunk。"""
+    payload = event.payload
+    state: GenerationState = payload["state"]
+    db = payload.get("db")
+    chapter_num = int(payload["chapter_num"])
+    summary_text = str(payload.get("summary_text") or "").strip()
+    final_content = str(payload.get("final_content") or "").strip()
+    outline = payload.get("outline") or {}
+    progression_payload = payload.get("progression_payload") or {}
+    extracted_facts = payload.get("extracted_facts") or {}
+    retriever = KnowledgeRetriever()
+
+    retriever.upsert_chunk(
+        novel_id=state["novel_id"],
+        novel_version_id=state.get("novel_version_id"),
+        source_type="chapter_summary",
+        source_key=f"chapter_summary:{chapter_num}",
+        chapter_num=chapter_num,
+        summary=summary_text[:220],
+        content=summary_text or final_content[:1000],
+        importance_score=0.62,
+        metadata={"chapter_num": chapter_num},
+        db=db,
+    )
+    retriever.upsert_chunk(
+        novel_id=state["novel_id"],
+        novel_version_id=state.get("novel_version_id"),
+        source_type="chapter_continuity",
+        source_key=f"chapter_continuity:{chapter_num}",
+        chapter_num=chapter_num,
+        summary=_build_continuity_summary(
+            chapter_num=chapter_num,
+            summary_text=summary_text,
+            outline=outline,
+            progression_payload=progression_payload if isinstance(progression_payload, dict) else {},
+        ),
+        content=_render_continuity_text(
+            chapter_num=chapter_num,
+            summary_text=summary_text,
+            outline=outline,
+            progression_payload=progression_payload if isinstance(progression_payload, dict) else {},
+        ),
+        importance_score=0.95,
+        metadata={"chapter_num": chapter_num, "kind": "continuity"},
+        db=db,
+    )
+    retriever.upsert_chunk(
+        novel_id=state["novel_id"],
+        novel_version_id=state.get("novel_version_id"),
+        source_type="chapter_fact_delta",
+        source_key=f"chapter_fact_delta:{chapter_num}",
+        chapter_num=chapter_num,
+        summary=_build_fact_delta_summary(
+            extracted_facts if isinstance(extracted_facts, dict) else {},
+            chapter_num,
+            fallback=summary_text,
+        ),
+        content=_render_fact_delta_text(
+            extracted_facts if isinstance(extracted_facts, dict) else {},
+            chapter_num,
+        ) or (summary_text or final_content[:1000]),
+        importance_score=0.9,
+        metadata={"chapter_num": chapter_num, "kind": "fact_delta"},
+        db=db,
+    )
+
+
 def _build_chapter_finalized_event_bus() -> EventBus:
     """构建章节finalized事件bus。"""
     bus = EventBus()
     bus.register("chapter.finalized", _chapter_finalized_story_bible_handler, required=True)
     bus.register("chapter.finalized", _chapter_finalized_progression_handler, required=True)
+    bus.register("chapter.finalized", _chapter_finalized_knowledge_chunk_handler, required=True)
     bus.register("chapter.finalized", _chapter_finalized_quality_report_handler, required=True)
     bus.register("chapter.finalized", _chapter_finalized_checkpoint_handler, required=True)
     bus.register("chapter.finalized", _chapter_finalized_telemetry_handler, required=False)

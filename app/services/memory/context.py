@@ -32,9 +32,13 @@ from app.services.memory.progression_state import (
     normalize_outline_contract,
 )
 from app.services.memory.summary_manager import SummaryManager
+from app.services.memory.retriever import (
+    KnowledgeRetriever,
+    build_retrieved_evidence,
+    build_retrieved_memory_brief,
+)
 from app.services.memory.story_bible import StoryBibleStore
 from app.services.memory.thread_ledger import get_thread_ledger
-from app.services.memory.vector_store import VectorStoreWrapper
 
 CONTEXT_TOKEN_BUDGET = 8000
 RECENT_WINDOW_SIZE = 5
@@ -152,6 +156,7 @@ def _select_recent_summary_window(
     outline: dict | None,
     recent_summaries: list[dict[str, Any]],
     max_items: int,
+    preserve_chapters: set[int] | None = None,
 ) -> list[dict[str, Any]]:
     """在近期章节摘要里选出本章最值得注入的一小窗内容。
 
@@ -164,11 +169,12 @@ def _select_recent_summary_window(
 
     target = min(max_items, len(normalized))
     immediate_prior_chapter = max(0, chapter_num - 1)
-    preserved_chapters = {
+    preserved_chapters = set(preserve_chapters or set())
+    preserved_chapters.update({
         int(item.get("chapter_num") or 0)
         for item in normalized
         if int(item.get("chapter_num") or 0) == immediate_prior_chapter
-    }
+    })
     selector_pool = [
         {
             "id": str(item.get("chapter_num") or ""),
@@ -206,6 +212,107 @@ def _select_recent_summary_window(
         for item in normalized
         if int(item.get("chapter_num") or 0) in selected_chapters
     ]
+
+
+def _select_thread_items(
+    items: list[dict[str, Any]],
+    *,
+    outline: dict | None,
+    label_key: str,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """根据当前章大纲相关性缩窄 thread ledger，减少无关噪声。"""
+    candidates = [
+        {
+            **item,
+            "id": str(item.get("chapter_num") or item.get("id") or index),
+            "content": item.get(label_key) or item.get("title") or "",
+        }
+        for index, item in enumerate(items or [])
+        if isinstance(item, dict)
+    ]
+    selected = select_context_candidates(
+        chapter_num=int(outline.get("chapter_num") or 0) if isinstance(outline, dict) else 0,
+        outline=outline,
+        candidates=candidates,
+        max_items=limit,
+    )
+    if not selected:
+        return list(items or [])[:limit]
+    selected_ids = {str(item.get("id") or "") for item in selected}
+    return [
+        item
+        for index, item in enumerate(items or [])
+        if str(item.get("chapter_num") or item.get("id") or index) in selected_ids
+    ][:limit]
+
+
+def _select_retrieved_chunks(
+    *,
+    chapter_num: int,
+    outline: dict | None,
+    candidates: list[dict[str, Any]],
+    max_items: int,
+) -> list[dict[str, Any]]:
+    """在保留 hybrid retrieval 主排序的前提下，用 outline 相关性做轻量打分。"""
+    if max_items <= 0:
+        return []
+    outline_terms = _selection_terms_from_outline(outline)
+    scored: list[dict[str, Any]] = []
+    for index, candidate in enumerate(candidates or []):
+        if not isinstance(candidate, dict):
+            continue
+        content = str(
+            candidate.get("summary")
+            or candidate.get("content")
+            or candidate.get("short_excerpt")
+            or ""
+        )
+        lexical_score = 0
+        if content and outline_terms:
+            content_terms: set[str] = set()
+            for token in _SELECTION_TOKEN_RE.findall(content):
+                if token:
+                    content_terms.update(_expand_selection_token(token))
+            lexical_score = len(outline_terms.intersection(content_terms))
+        scored.append(
+            {
+                **candidate,
+                "_retrieval_index": index,
+                "_fusion_score": float(candidate.get("fusion_score") or 0.0),
+                "_lexical_score": lexical_score,
+                "_recency_bias": max(0, chapter_num - int(candidate.get("chapter_num") or 0)),
+            }
+        )
+    scored.sort(
+        key=lambda item: (
+            -float(item.get("_fusion_score") or 0.0),
+            -int(item.get("_lexical_score") or 0),
+            float(item.get("_recency_bias") or 0),
+            int(item.get("_retrieval_index") or 0),
+        )
+    )
+    return [
+        {k: v for k, v in item.items() if not k.startswith("_")}
+        for item in scored[:max_items]
+    ]
+
+
+def _dedupe_retrieved_evidence(
+    evidence: list[dict[str, Any]],
+    *,
+    story_bible_context: str,
+) -> list[dict[str, Any]]:
+    """避免 story bible 已明确表达的事实再次原样注入检索证据。"""
+    if not story_bible_context.strip():
+        return evidence
+    filtered: list[dict[str, Any]] = []
+    for item in evidence:
+        summary = str(item.get("summary") or item.get("short_excerpt") or "").strip()
+        if summary and summary in story_bible_context:
+            continue
+        filtered.append(item)
+    return filtered
 
 
 def _chapter_range_for_items(items: list[dict] | list[Any]) -> list[int] | None:
@@ -573,7 +680,7 @@ def build_chapter_context(
     should_close = db is None
     db = db or SessionLocal()
     summary_mgr = SummaryManager()
-    vector_store = VectorStoreWrapper()
+    retriever = KnowledgeRetriever()
     progression_mgr = ProgressionMemoryManager()
 
     try:
@@ -591,6 +698,21 @@ def build_chapter_context(
             )
         )
         thread_ledger = get_thread_ledger(novel_id, chapter_num, prewrite, db=db)
+        thread_ledger = {
+            **thread_ledger,
+            "active_foreshadowing": _select_thread_items(
+                list(thread_ledger.get("active_foreshadowing") or []),
+                outline=outline,
+                label_key="foreshadowing",
+                limit=6,
+            ),
+            "unresolved_hooks": _select_thread_items(
+                list(thread_ledger.get("unresolved_hooks") or []),
+                outline=outline,
+                label_key="hook",
+                limit=4,
+            ),
+        }
         thread_ledger_str = _format_thread_ledger(thread_ledger)
         context_sources.append(
             _make_context_source(
@@ -699,6 +821,7 @@ def build_chapter_context(
             outline=outline,
             recent_summaries=full_recent_summaries,
             max_items=min(3, len(full_recent_summaries)),
+            preserve_chapters={prev_transition_ch} if prev_transition_ch > 0 else set(),
         )
         selected_recent_chapters = [
             int(item.get("chapter_num") or 0)
@@ -748,12 +871,32 @@ def build_chapter_context(
             + estimate_tokens(str(transition_constraints))
         )
 
-        knowledge_chunks: list[dict] = []
+        knowledge_chunks: list[dict[str, Any]] = []
         chunk_candidates: list[dict] = []
+        retrieved_memory_brief = ""
+        retrieved_evidence: list[dict[str, Any]] = []
+        retrieval_mode = "none"
         if used < token_budget:
             outline_text = f"{outline.get('title', '')}\n{outline.get('outline', '')}".strip()
-            query_text = "\n".join(x for x in [outline_text, thread_ledger_str, recent_window] if x).strip()
-            chunks = vector_store.search(novel_id, novel_version_id, query_text=query_text, limit=5, db=db)
+            query_text = "\n".join(
+                x
+                for x in [
+                    outline_text,
+                    thread_ledger_str,
+                    recent_window,
+                    str(previous_transition_state or ""),
+                    str(recent_advancement_window or ""),
+                ]
+                if x
+            ).strip()
+            chunks = retriever.retrieve(
+                novel_id=novel_id,
+                novel_version_id=novel_version_id,
+                query_text=query_text,
+                current_chapter=chapter_num,
+                limit=6,
+                db=db,
+            )
             chunk_candidates = [
                 {
                     **c,
@@ -762,26 +905,51 @@ def build_chapter_context(
                 }
                 for index, c in enumerate(chunks)
             ]
-            chosen_chunks = select_context_candidates(
+            chosen_chunks = _select_retrieved_chunks(
                 chapter_num=chapter_num,
                 outline=outline,
                 candidates=chunk_candidates,
                 max_items=3,
             )
-            for c in chosen_chunks:
-                content = c.get("content", "") or str(c)
-                if used + estimate_tokens(content) <= token_budget:
-                    knowledge_chunks.append(c)
-                    used += estimate_tokens(content)
-                else:
+            retrieval_mode = (
+                "hybrid"
+                if any(item.get("vector_rank") for item in chosen_chunks) and any(item.get("fts_rank") for item in chosen_chunks)
+                else "vector"
+                if any(item.get("vector_rank") for item in chosen_chunks)
+                else "fts"
+                if any(item.get("fts_rank") for item in chosen_chunks)
+                else "trigram"
+                if any(item.get("trigram_rank") for item in chosen_chunks)
+                else "none"
+            )
+            knowledge_chunks = list(chosen_chunks)
+            retrieved_memory_candidate = build_retrieved_memory_brief(knowledge_chunks)
+            if retrieved_memory_candidate:
+                memory_tokens = estimate_tokens(retrieved_memory_candidate)
+                if used + memory_tokens <= token_budget:
+                    retrieved_memory_brief = retrieved_memory_candidate
+                    used += memory_tokens
+            evidence_candidates = _dedupe_retrieved_evidence(
+                build_retrieved_evidence(knowledge_chunks, limit=3),
+                story_bible_context=story_bible_context,
+            )
+            for evidence_item in evidence_candidates:
+                candidate_evidence = retrieved_evidence + [evidence_item]
+                candidate_cost = estimate_tokens(str(candidate_evidence))
+                current_cost = estimate_tokens(str(retrieved_evidence))
+                incremental_cost = max(0, candidate_cost - current_cost)
+                if used + incremental_cost > token_budget:
                     break
+                retrieved_evidence = candidate_evidence
+                used += incremental_cost
+        retrieval_payload_tokens = estimate_tokens(retrieved_memory_brief) + estimate_tokens(str(retrieved_evidence))
         context_sources.append(
             _make_context_source(
                 source_type="knowledge_chunks",
                 source_key="vector_store",
                 selection_reason="outline_similarity_search",
                 priority=10,
-                approx_tokens=_estimate_source_tokens(knowledge_chunks),
+                approx_tokens=retrieval_payload_tokens,
                 included=bool(knowledge_chunks),
             )
         )
@@ -822,6 +990,13 @@ def build_chapter_context(
             "recent_window_selected": selected_recent_chapters,
             "knowledge_chunks_selected": [str(item.get('id') or '') for item in knowledge_chunks][:3],
             "knowledge_chunks_candidate_count": len(chunk_candidates),
+            "retrieval_mode": retrieval_mode,
+            "retrieved_chunk_ids": [str(item.get("id") or item.get("chunk_id") or "") for item in knowledge_chunks][:3],
+            "retrieved_source_types": [str(item.get("source_type") or "") for item in knowledge_chunks][:3],
+            "retrieved_chapter_range": _chapter_range_for_items(knowledge_chunks),
+            "retrieved_fusion_scores": [round(float(item.get("fusion_score") or 0.0), 4) for item in knowledge_chunks][:3],
+            "vector_hit_count": len([item for item in chunk_candidates if item.get("vector_rank")]),
+            "fts_hit_count": len([item for item in chunk_candidates if item.get("fts_rank")]),
         }
 
         return {
@@ -841,6 +1016,17 @@ def build_chapter_context(
             "recent_window": recent_window,
             "volume_brief": volume_brief,
             "knowledge_chunks": knowledge_chunks,
+            "retrieved_memory_brief": retrieved_memory_brief,
+            "retrieved_evidence": retrieved_evidence,
+            "retrieval_debug": {
+                "retrieval_mode": retrieval_mode,
+                "retrieved_chunk_ids": [str(item.get("id") or item.get("chunk_id") or "") for item in knowledge_chunks][:3],
+                "retrieved_source_types": [str(item.get("source_type") or "") for item in knowledge_chunks][:3],
+                "retrieved_chapter_range": _chapter_range_for_items(knowledge_chunks),
+                "retrieved_fusion_scores": [round(float(item.get("fusion_score") or 0.0), 4) for item in knowledge_chunks][:3],
+                "vector_hit_count": len([item for item in chunk_candidates if item.get("vector_rank")]),
+                "fts_hit_count": len([item for item in chunk_candidates if item.get("fts_rank")]),
+            },
             "memory_governance_notes": memory_governance_notes,
             "constraint_usage_notes": constraint_usage_notes,
             "context_selector_meta": context_selector_meta,

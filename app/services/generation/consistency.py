@@ -460,6 +460,12 @@ def _check_progression_conflicts(
 
     required_information = [str(x) for x in (outline_contract.get("required_new_information") or []) if str(x).strip()]
     already_revealed = [str(x) for x in (anti_repeat.get("book_revealed_information") or []) if str(x).strip()]
+    retrieved_evidence = context.get("retrieved_evidence") or []
+    retrieved_signals = [
+        str(item.get("summary") or item.get("short_excerpt") or "").strip()
+        for item in retrieved_evidence
+        if isinstance(item, dict)
+    ]
     for item in required_information[:4]:
         revealed, matched_info = similarity_against_constraints(item, already_revealed, threshold=0.82)
         if revealed:
@@ -468,6 +474,17 @@ def _check_progression_conflicts(
                     "blocker",
                     "plot",
                     f"本章计划揭示的信息疑似已在前文揭示：{matched_info[:80]}",
+                    chapter_num,
+                )
+            )
+            continue
+        recalled, matched_retrieval = similarity_against_constraints(item, retrieved_signals, threshold=0.88)
+        if recalled:
+            report.issues.append(
+                ConsistencyIssue(
+                    "warning",
+                    "plot",
+                    f"检索结果显示该信息可能已在前文处理过：{matched_retrieval[:80]}",
                     chapter_num,
                 )
             )
@@ -501,6 +518,7 @@ def _check_transition_conflicts(
         return
     outline_contract = normalize_outline_contract(outline, chapter_num)
     previous_transition = context.get("previous_transition_state") or {}
+    retrieved_evidence = context.get("retrieved_evidence") or []
     opening_scene = str(outline_contract.get("opening_scene") or "").strip()
     transition_mode = str(outline_contract.get("transition_mode") or "").strip().lower()
     previous_scene = str(previous_transition.get("ending_scene") or "").strip()
@@ -525,6 +543,22 @@ def _check_transition_conflicts(
                     "warning",
                     "timeline",
                     f"上一章以「{previous_action[:40]}」结束，本章开场需显式交代过渡到「{opening_scene}」",
+                    chapter_num,
+                )
+            )
+    if opening_scene:
+        recalled_recent = [
+            str(item.get("short_excerpt") or item.get("summary") or "").strip()
+            for item in retrieved_evidence
+            if isinstance(item, dict) and int(item.get("chapter_num") or 0) >= max(1, chapter_num - 2)
+        ]
+        recalled, _ = similarity_against_constraints(opening_scene, recalled_recent, threshold=0.32)
+        if not recalled and recalled_recent and transition_mode in {"direct", "continuous", ""}:
+            report.issues.append(
+                ConsistencyIssue(
+                    "warning",
+                    "timeline",
+                    f"最近检索证据主要指向其它场景/后果，本章开场「{opening_scene}」请确认承接是否充分",
                     chapter_num,
                 )
             )
