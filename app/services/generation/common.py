@@ -1,4 +1,8 @@
-"""Shared constants and helpers for generation pipeline modules."""
+"""生成链路通用常量与清洗辅助。
+
+这里主要负责处理“模型输出虽然看着像文本，但不一定适合直接落库”的问题，
+例如标题占位、前言污染、章节 heading 残留、outline 持久化等。
+"""
 import logging
 import re
 from typing import Any
@@ -88,6 +92,7 @@ _OUTLINE_METADATA_KEYS = (
 
 
 def _strip_markdown_wrappers(text: str) -> str:
+    """剥离标题外侧常见的 Markdown 包裹符号。"""
     out = str(text or "").strip()
     out = re.sub(r"^[#*_`~\-\s]+", "", out)
     out = re.sub(r"[#*_`~\-\s]+$", "", out)
@@ -95,6 +100,7 @@ def _strip_markdown_wrappers(text: str) -> str:
 
 
 def _looks_like_meta_text(text: str) -> bool:
+    """判断一段文本是否更像提示词/元说明，而不像小说内容。"""
     source = str(text or "").strip()
     if not source:
         return False
@@ -108,6 +114,7 @@ def _looks_like_meta_text(text: str) -> bool:
 
 
 def _is_preface_line(line: str, *, dropped_any: bool = False) -> bool:
+    """判断一行是否属于需要从正文前部剔除的前言/元说明。"""
     stripped = str(line or "").strip()
     if not stripped:
         return True
@@ -206,10 +213,12 @@ def normalize_outline_payload(chapter_num: int, outline: dict[str, Any] | None) 
 
 
 def _outline_metadata_payload(outline: dict[str, Any]) -> dict[str, Any]:
+    """抽取章节大纲里需要持久化的元数据字段。"""
     return {key: outline.get(key) for key in _OUTLINE_METADATA_KEYS}
 
 
 def _outline_stmt(*, novel_id: int, chapter_num: int, novel_version_id: int | None):
+    """构造按小说/章节/版本查询大纲的基础 SQLAlchemy 语句。"""
     stmt = select(ChapterOutline).where(
         ChapterOutline.novel_id == int(novel_id),
         ChapterOutline.chapter_num == int(chapter_num),
@@ -272,6 +281,7 @@ def upsert_chapter_outline(
 
 
 def _extract_title_suffix(text: str | None) -> str:
+    """提取titlesuffix。"""
     source = str(text or "").strip()
     if not source:
         return ""
@@ -546,6 +556,7 @@ def load_outlines_from_db(
 
 
 def save_prewrite_artifacts(novel_id: int, prewrite: dict) -> None:
+    """保存prewriteartifacts。"""
     db = SessionLocal()
     try:
         for spec_type, content in prewrite.items():
@@ -573,6 +584,7 @@ def save_prewrite_artifacts(novel_id: int, prewrite: dict) -> None:
 
 
 def save_full_outlines(novel_id: int, outlines: list[dict], novel_version_id: int | None = None, *, replace_all: bool = True) -> None:
+    """保存full大纲。"""
     db = SessionLocal()
     try:
         if replace_all:
@@ -605,6 +617,7 @@ def save_full_outlines(novel_id: int, outlines: list[dict], novel_version_id: in
 def generate_chapter_summary(
     content: str, outline: dict, chapter_num: int, language: str, strategy: str
 ) -> str:
+    """执行 generate chapter summary 相关辅助逻辑。"""
     from app.core.llm import get_llm_with_fallback, response_to_text
     from app.core.strategy import get_model_for_stage
 
@@ -634,6 +647,7 @@ def update_character_states_from_content(
     db=None,
     novel_version_id: int | None = None,
 ) -> None:
+    """更新角色states来源content。"""
     from app.core.llm import get_llm_with_fallback
     from app.core.strategy import get_model_for_stage
     from app.services.generation.agents import CharacterStateUpdatesSchema, _invoke_json_with_schema

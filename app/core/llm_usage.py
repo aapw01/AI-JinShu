@@ -7,6 +7,7 @@ from typing import Any
 
 
 def _to_int(value: Any) -> int:
+    """执行 to int 相关辅助逻辑。"""
     try:
         return int(value or 0)
     except Exception:
@@ -15,6 +16,7 @@ def _to_int(value: Any) -> int:
 
 @dataclass
 class UsageSession:
+    """保存一次 LLM 用量会话的累计统计结果。"""
     session_id: str
     input_tokens: int = 0
     output_tokens: int = 0
@@ -43,6 +45,7 @@ def begin_usage_session(
 
 
 def end_usage_session() -> dict[str, Any]:
+    """执行 end usage session 相关辅助逻辑。"""
     session = _usage_session_var.get()
     _usage_session_var.set(None)
     if not session:
@@ -70,6 +73,7 @@ def end_usage_session() -> dict[str, Any]:
 
 
 def snapshot_usage() -> dict[str, Any]:
+    """执行 snapshot usage 相关辅助逻辑。"""
     session = _usage_session_var.get()
     if not session:
         return {
@@ -95,10 +99,12 @@ def snapshot_usage() -> dict[str, Any]:
 
 
 def estimate_cost(input_tokens: int, output_tokens: int) -> float:
+    """执行 estimate cost 相关辅助逻辑。"""
     return round((max(0, int(input_tokens)) / 1000) * 0.0015 + (max(0, int(output_tokens)) / 1000) * 0.002, 6)
 
 
 def _extract_usage(response: Any) -> tuple[int, int, int]:
+    """提取用量。"""
     usage = getattr(response, "usage_metadata", None) or {}
     if isinstance(usage, dict):
         in_t = _to_int(usage.get("input_tokens") or usage.get("prompt_tokens"))
@@ -132,6 +138,7 @@ def _extract_usage(response: Any) -> tuple[int, int, int]:
 
 
 def record_usage_from_response(response: Any, *, stage: str | None = None) -> dict[str, int]:
+    """记录用量来源响应。"""
     session = _usage_session_var.get()
     in_t, out_t, total_t = _extract_usage(response)
     if not session:

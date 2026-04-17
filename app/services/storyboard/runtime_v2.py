@@ -39,14 +39,17 @@ TERMINAL_LANE_STATES = {"completed", "failed", "cancelled"}
 
 
 def _utc_now() -> datetime:
+    """返回当前 UTC 时间，统一任务与数据库时间基准。"""
     return datetime.now(timezone.utc)
 
 
 def _lane_label(lane: str) -> str:
+    """执行 lane label 相关辅助逻辑。"""
     return "竖屏版" if lane == "vertical_feed" else "横屏版"
 
 
 def _serialize_chapter(row: ChapterVersion) -> dict[str, Any]:
+    """执行 serialize chapter 相关辅助逻辑。"""
     return {
         "chapter_num": int(row.chapter_num),
         "title": row.title or f"第{row.chapter_num}章",
@@ -56,6 +59,7 @@ def _serialize_chapter(row: ChapterVersion) -> dict[str, Any]:
 
 
 def _serialize_profile(row: StoryCharacterProfile) -> dict[str, Any]:
+    """执行 serialize profile 相关辅助逻辑。"""
     return {
         "character_key": row.character_key or "",
         "display_name": row.display_name or "",
@@ -77,6 +81,7 @@ def _serialize_profile(row: StoryCharacterProfile) -> dict[str, Any]:
 
 
 def _snapshot_hash(chapters: list[dict[str, Any]], profiles: list[dict[str, Any]]) -> str:
+    """执行 snapshot hash 相关辅助逻辑。"""
     payload = {"chapters": chapters, "profiles": profiles}
     data = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(data.encode("utf-8")).hexdigest()
@@ -92,6 +97,7 @@ def _audit(
     version_id: int | None = None,
     detail: dict[str, Any] | None = None,
 ) -> None:
+    """执行 audit 相关辅助逻辑。"""
     db.add(
         StoryboardAuditLog(
             storyboard_project_id=project_id,
@@ -106,10 +112,12 @@ def _audit(
 
 
 def get_project_or_404(db: Session, project_id: int) -> StoryboardProject | None:
+    """返回project或404。"""
     return db.execute(select(StoryboardProject).where(StoryboardProject.id == project_id)).scalar_one_or_none()
 
 
 def get_run_by_public_id(db: Session, *, project_id: int, run_public_id: str) -> StoryboardRun | None:
+    """获取 run by public id。"""
     return db.execute(
         select(StoryboardRun).where(
             StoryboardRun.storyboard_project_id == project_id,
@@ -119,6 +127,7 @@ def get_run_by_public_id(db: Session, *, project_id: int, run_public_id: str) ->
 
 
 def list_run_lanes(db: Session, *, run_id: int) -> list[StoryboardRunLane]:
+    """列出runlanes。"""
     return db.execute(
         select(StoryboardRunLane)
         .where(StoryboardRunLane.storyboard_run_id == run_id)
@@ -127,6 +136,7 @@ def list_run_lanes(db: Session, *, run_id: int) -> list[StoryboardRunLane]:
 
 
 def ensure_project_source_version(db: Session, *, project: StoryboardProject) -> int:
+    """确保projectsource版本存在并可用。"""
     source_version_id = int(project.source_novel_version_id or 0)
     if source_version_id <= 0:
         source_version_id = int(get_default_version_id(db, project.novel_id))
@@ -141,6 +151,7 @@ def build_source_snapshot(
     project: StoryboardProject,
     force_refresh: bool = False,
 ) -> tuple[int, list[dict[str, Any]], list[dict[str, Any]], str]:
+    """构建sourcesnapshot。"""
     source_version_id = ensure_project_source_version(db, project=project)
     if not force_refresh:
         latest = db.execute(
@@ -200,6 +211,7 @@ def run_preflight(
     actor_user_uuid: str,
     force_refresh_snapshot: bool = False,
 ) -> dict[str, Any]:
+    """执行preflight。"""
     source_version_id, chapters, profiles, digest = build_source_snapshot(
         db,
         project=project,
@@ -264,6 +276,7 @@ def run_preflight(
 
 
 def _next_version_no(db: Session, *, project_id: int) -> int:
+    """执行 next version no 相关辅助逻辑。"""
     val = db.execute(
         select(func.max(StoryboardVersion.version_no)).where(StoryboardVersion.storyboard_project_id == project_id)
     ).scalar_one_or_none()
@@ -277,6 +290,7 @@ def _create_run_lane_version(
     lane: str,
     source_novel_version_id: int,
 ) -> StoryboardVersion:
+    """创建runlane版本。"""
     version = StoryboardVersion(
         storyboard_project_id=project.id,
         source_novel_version_id=source_novel_version_id,
@@ -300,6 +314,7 @@ def create_run_and_dispatch(
     trace_id: str | None = None,
     idempotency_key: str | None = None,
 ) -> tuple[StoryboardRun, list[StoryboardRunLane]]:
+    """创建runanddispatch。"""
     if project.status != "preflight_passed":
         raise ValueError("preflight_required")
     if idempotency_key:
@@ -431,6 +446,7 @@ def update_run_lane_state(
     error_category: str | None = None,
     gate_report_json: dict[str, Any] | None = None,
 ) -> StoryboardRunLane | None:
+    """更新runlane状态。"""
     lane = db.execute(select(StoryboardRunLane).where(StoryboardRunLane.id == run_lane_id)).scalar_one_or_none()
     if not lane:
         return None
@@ -460,6 +476,7 @@ def update_run_lane_state(
 
 
 def refresh_run_status(db: Session, *, run_id: int) -> StoryboardRun | None:
+    """执行 refresh run status 相关辅助逻辑。"""
     run = db.execute(select(StoryboardRun).where(StoryboardRun.id == run_id)).scalar_one_or_none()
     if not run:
         return None
@@ -537,6 +554,7 @@ def run_action(
     action: str,
     actor_user_uuid: str,
 ) -> StoryboardRun:
+    """执行action。"""
     if run.run_state in {"completed", "failed", "cancelled"} and action != "cancel":
         raise ValueError("run_already_terminal")
     lanes = list_run_lanes(db, run_id=run.id)
@@ -643,6 +661,7 @@ def persist_character_cards(
     lane: str,
     cards: list[dict[str, Any]],
 ) -> int:
+    """执行 persist character cards 相关辅助逻辑。"""
     db.execute(delete(StoryboardCharacterCard).where(StoryboardCharacterCard.storyboard_version_id == version_id))
     db.execute(delete(StoryboardCharacterPrompt).where(StoryboardCharacterPrompt.storyboard_version_id == version_id))
     created = 0
@@ -691,6 +710,7 @@ def get_export_by_public_id(
     project_id: int,
     export_public_id: str,
 ) -> StoryboardExport | None:
+    """获取 export by public id。"""
     return db.execute(
         select(StoryboardExport).where(
             StoryboardExport.storyboard_project_id == project_id,

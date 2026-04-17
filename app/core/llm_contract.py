@@ -1,4 +1,19 @@
-"""Structured-output contract invoker for chapter prose."""
+"""章节正文结构化输出契约层。
+
+模块职责：
+- 强制模型按 `ChapterBodySchema` 产出结构化结果，而不是裸文本。
+- 统一处理 method 选择、schema 重试、错误归一化、prompt 元数据追踪。
+- 为后续排查提供 prompt template / version / hash 级别的观测信息。
+
+系统位置：
+- 上游是 prompt 模板渲染与章节写作节点。
+- 下游是 `validate_chapter_body()` 等正文质量校验逻辑。
+
+面试可讲点：
+- 为什么“让模型严格输出 JSON”还不够，必须再做 schema 校验和重试。
+- 为什么 prompt hash/模板版本要和失败日志绑定。
+- 为什么这里的失败类型要区分 parse/schema/provider call 三层。
+"""
 from __future__ import annotations
 
 import hashlib
@@ -17,6 +32,7 @@ _LAST_PROMPT_META: ContextVar[dict[str, Any] | None] = ContextVar("llm_contract_
 
 
 def _method_order(adapter_type: str) -> list[str]:
+    """按 provider 兼容性决定结构化输出方法尝试顺序。"""
     if adapter_type == "anthropic":
         return ["function_calling", "json_schema"]
     if adapter_type == "gemini":
@@ -25,6 +41,7 @@ def _method_order(adapter_type: str) -> list[str]:
 
 
 def _extract_parsed_body(parsed: Any) -> str:
+    """执行 extract parsed body 相关辅助逻辑。"""
     if parsed is None:
         return ""
     if isinstance(parsed, ChapterBodySchema):
@@ -43,16 +60,23 @@ def _provider_candidates(
     model: str | None,
     _unused: int,
 ) -> list[tuple[str | None, str | None]]:
+    """返回本次调用允许尝试的 provider / model 候选。
+
+    当前项目已收敛为单主模型，因此这里只保留一个候选位，接口形状
+    则为未来扩展 provider fallback 预留。
+    """
     if provider is not None:
         return [(provider, model)]
     return [(None, model)]
 
 
 def prompt_hash(prompt: str) -> str:
+    """计算 prompt 的短 hash，供日志和问题回放定位使用。"""
     return hashlib.sha256(str(prompt or "").encode("utf-8")).hexdigest()[:16]
 
 
 def get_last_prompt_meta() -> dict[str, Any] | None:
+    """返回最后一个提示词元数据。"""
     value = _LAST_PROMPT_META.get()
     if not value:
         return None
@@ -73,7 +97,16 @@ def invoke_chapter_body_structured(
     prompt_template: str | None = None,
     prompt_version: str = "v2",
 ) -> str:
-    """Invoke LLM with strict chapter-body structured contract."""
+    """以严格结构化契约调用 LLM 生成章节正文。
+
+    这层的职责不是“帮模型写文”，而是把模型输出约束到工程系统能消费的形态：
+    - 先选 provider 支持的方法顺序。
+    - 再按 schema 失败重试若干次。
+    - 最后把失败压缩成统一的 `OutputContractError`。
+
+    面试里可以把它概括为：
+    “Prompt 工程负责提高成功率，contract 层负责保证可消费性。”
+    """
 
     schema_retries = max(0, int(retries if retries is not None else LLM_OUTPUT_MAX_SCHEMA_RETRIES))
     min_body_chars = int(min_chars if min_chars is not None else LLM_OUTPUT_MIN_CHARS)

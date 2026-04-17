@@ -106,6 +106,7 @@ _PAREN_HINT_RE = re.compile(r"[（(][^）)]*[）)]")
 
 
 def normalize_character_key(name: str) -> str:
+    """把 character key 规范化为统一格式。"""
     raw = (name or "").strip().lower()
     if not raw:
         return ""
@@ -113,6 +114,7 @@ def normalize_character_key(name: str) -> str:
 
 
 def _safe_json_loads(text: str) -> dict[str, Any]:
+    """执行 safe json loads 相关辅助逻辑。"""
     raw = (text or "").strip()
     if raw.startswith("```"):
         lines = raw.splitlines()
@@ -129,10 +131,12 @@ def _safe_json_loads(text: str) -> dict[str, Any]:
 
 
 def _normalize_enum_token(value: str | None) -> str:
+    """把 enum token 规范化为统一格式。"""
     return re.sub(r"[\s\-]+", "_", str(value or "").strip().lower())
 
 
 def _clean_enum(value: str | None, allowed: set[str], aliases: dict[str, str] | None = None) -> str | None:
+    """执行 clean enum 相关辅助逻辑。"""
     text = _normalize_enum_token(value)
     if not text:
         return None
@@ -145,14 +149,17 @@ def _clean_enum(value: str | None, allowed: set[str], aliases: dict[str, str] | 
 
 
 def normalize_skin_tone(value: str | None) -> str | None:
+    """把 skin tone 规范化为统一格式。"""
     return _clean_enum(value, SKIN_TONES, SKIN_TONE_ALIASES)
 
 
 def normalize_ethnicity(value: str | None) -> str | None:
+    """把 ethnicity 规范化为统一格式。"""
     return _clean_enum(value, ETHNICITIES, ETHNICITY_ALIASES)
 
 
 def _name_candidates(name: str) -> list[str]:
+    """执行 name candidates 相关辅助逻辑。"""
     raw = str(name or "").strip()
     if not raw:
         return []
@@ -164,11 +171,13 @@ def _name_candidates(name: str) -> list[str]:
 
 
 def _name_norm(name: str) -> str:
+    """执行 name norm 相关辅助逻辑。"""
     base = _PAREN_HINT_RE.sub("", str(name or "")).strip().lower()
     return re.sub(r"\s+", "", base)
 
 
 def list_character_profiles(db: Session, novel_id: int, novel_version_id: int | None = None) -> list[StoryCharacterProfile]:
+    """列出角色画像。"""
     stmt = select(StoryCharacterProfile).where(StoryCharacterProfile.novel_id == novel_id)
     if novel_version_id is not None:
         stmt = stmt.where(StoryCharacterProfile.novel_version_id == novel_version_id)
@@ -182,6 +191,7 @@ def _upsert_stub_profiles_from_prewrite(
     novel_version_id: int | None,
     prewrite: dict,
 ) -> None:
+    """插入或更新stub画像来源prewrite。"""
     chars = ((prewrite or {}).get("specification") or {}).get("characters") or []
     if not isinstance(chars, list):
         return
@@ -221,6 +231,7 @@ def _upsert_stub_profiles_from_prewrite(
 
 
 def _should_process_character(name: str, content: str, extracted_facts: dict[str, Any]) -> bool:
+    """执行 should process character 相关辅助逻辑。"""
     names = _name_candidates(name)
     if not names:
         return False
@@ -242,11 +253,13 @@ def _should_process_character(name: str, content: str, extracted_facts: dict[str
 
 
 def _merge_profile(existing: StoryCharacterProfile, candidate: dict[str, Any], chapter_num: int) -> None:
+    """执行 merge profile 相关辅助逻辑。"""
     confidence = float(candidate.get("confidence", 0.0) or 0.0)
     existing_conf = float(existing.confidence or 0.0)
     replace = confidence >= existing_conf
 
     def assign(attr: str, val: Any, *, allow_empty: bool = False):
+        """按置信度和现有值情况，把候选字段合并进已有角色画像。"""
         if val is None:
             return
         text = str(val).strip() if isinstance(val, str) else val

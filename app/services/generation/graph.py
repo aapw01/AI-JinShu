@@ -1,6 +1,18 @@
-"""LangGraph generation graph: construction, routing, and public entry points.
+"""长篇生成 LangGraph 工作流定义。
 
-Graph is compiled once at module level (singleton) to avoid per-invocation overhead.
+模块职责：
+- 定义节点、条件路由、回路与公共入口。
+- 把长篇生成拆成 `init -> prewrite -> outline -> writer -> review -> finalize`
+  以及桥接章、尾章重写、终审等补充分支。
+
+系统位置：
+- 上游是 Celery generation task。
+- 下游是各个 generation node 的实际业务逻辑。
+
+面试可讲点：
+- 当前项目为什么选择 LangGraph：重点在有状态、多分支、可回路流程编排。
+- 当前项目没有直接用 LangGraph 官方 checkpointer，而是业务侧自己做章节 checkpoint。
+- 为什么图在模块级 compile 一次，而不是每次调用都重建。
 """
 import time
 
@@ -43,10 +55,16 @@ from app.services.generation.state import GenerationState
 # ---------------------------------------------------------------------------
 
 def _route_consistency(state: GenerationState) -> str:
+    """一致性检查后的路由。
+
+    当前策略选择始终继续到 beats，把一致性问题以约束形式注入后续写作，
+    而不是在这里直接中断整条链路。
+    """
     return "beats"  # always proceed; consistency issues injected into writer context
 
 
 def _route_review(state: GenerationState) -> str:
+    """为审校选择路由。"""
     review_gate = state.get("review_gate") or {}
     if review_gate.get("decision") == "accept_with_minor_polish":
         return "finalizer"
@@ -61,12 +79,14 @@ def _route_review(state: GenerationState) -> str:
 
 
 def _route_after_confirmation(state: GenerationState) -> str:
+    """确认起始状态后决定进入分卷重规划还是直接加载上下文。"""
     if state["current_chapter"] > state["end_chapter"]:
         return "segment_done"
     return "volume_replan" if is_volume_start(state, state["current_chapter"]) else "load_context"
 
 
 def _route_finalize(state: GenerationState) -> str:
+    """finalizer 之后决定直接推进章节，还是回滚重跑一次。"""
     if state.get("quality_passed", True):
         return "advance_chapter"
     max_retries = get_max_retries(state.get("strategy"))
@@ -76,6 +96,7 @@ def _route_finalize(state: GenerationState) -> str:
 
 
 def _route_after_closure_gate(state: GenerationState) -> str:
+    """卷末收束判断后，决定尾章重写、桥接章还是进入下一段。"""
     action = str((state.get("closure_state") or {}).get("action") or "")
     if action == "rewrite_tail":
         return "tail_rewrite"
@@ -87,12 +108,14 @@ def _route_after_closure_gate(state: GenerationState) -> str:
 
 
 def _route_after_tail_rewrite(state: GenerationState) -> str:
+    """尾章重写或桥接章完成后，回到正常章节推进流程。"""
     if state["current_chapter"] > state["end_chapter"]:
         return "segment_done"
     return "volume_replan" if is_volume_start(state, state["current_chapter"]) else "load_context"
 
 
 def _route_after_final_review(state: GenerationState) -> str:
+    """整书终审后，决定是否进入质量补写模式。"""
     blocked = state.get("quality_blocked_chapters") or []
     if blocked:
         return "quality_rewrite_init"
@@ -100,6 +123,11 @@ def _route_after_final_review(state: GenerationState) -> str:
 
 
 def _route_after_advance_chapter(state: GenerationState) -> str:
+    """章节推进后的公共出口。
+
+    正常模式下会进入 `closure_gate` 判断卷末节奏；如果整书终审已经标记出
+    被阻塞章节，则改走质量重写回路。
+    """
     # If in quality-rewrite mode (key set by final_book_review), route accordingly
     blocked = state.get("quality_blocked_chapters")
     if blocked is not None:
@@ -115,8 +143,15 @@ def _route_after_advance_chapter(state: GenerationState) -> str:
 # ---------------------------------------------------------------------------
 
 def _build_generation_graph():
+    """构建并编译整条生成工作流图。
+
+    这里把每个节点都包了一层 `_timed_node`，不是为了“好看”，而是为了
+    把节点级耗时、异常、慢调用日志统一打平到同一套事件模型里。
+    """
     def _timed_node(name: str, fn):
+        """为节点函数包上一层统一的开始/结束/慢调用/异常日志。"""
         def _wrapped(state: GenerationState):
+            """执行单个图节点，并把节点级观测事件写入日志系统。"""
             started = time.perf_counter()
             chapter = int(state.get("current_chapter") or 0)
             task_id = state.get("task_id")
@@ -256,6 +291,11 @@ def run_generation_pipeline_langgraph(
     task_id: str | None = None,
     creation_task_id: int | None = None,
 ) -> None:
+    """运行一段章节生成流程。
+
+    注意这里传入的是“当前 segment”的边界，而不是整本书所有章节。
+    当前项目采用按卷/按段渐进式生成，因此图每次只负责一段可恢复窗口。
+    """
     _compiled_graph.invoke(
         {
             "novel_id": novel_id,
@@ -287,6 +327,7 @@ def run_final_book_review_only_langgraph(
     task_id: str | None = None,
     creation_task_id: int | None = None,
 ) -> None:
+    """仅运行整书终审，不再继续写新章节。"""
     state = node_init(
         {
             "novel_id": novel_id,

@@ -9,6 +9,38 @@
 
 ---
 
+## 0. 当前仓库代码坐标速查（优先按这一版回答）
+
+下面这些是 2026-04 这版仓库里最值得直接引用的代码坐标。面试时如果你不想讲得太散，优先围绕这几处展开。
+
+| 主题 | 关键文件 | 该怎么讲 |
+| --- | --- | --- |
+| 应用入口 | `app/main.py` | 统一注册路由、中间件、trace_id、启动校验。 |
+| 数据库与连接池 | `app/core/database.py` | API 走普通连接池，Celery worker 切 `NullPool` 防 fork 复用。 |
+| LLM 适配 | `app/core/llm.py` | provider 差异被收口，上层只拿统一 `get_llm()`。 |
+| 结构化输出 | `app/core/llm_contract.py` | Prompt + schema + retry 共同保证输出可消费。 |
+| 统一任务状态机 | `app/models/creation_task.py` + `app/services/scheduler/scheduler_service.py` | 业务状态不依赖 Celery 原生状态。 |
+| 心跳与租约 | `app/services/task_runtime/lease_service.py` | worker 失联后靠 lease 过期回收。 |
+| 章节 checkpoint | `app/services/task_runtime/checkpoint_repo.py` | 恢复锚点是章节边界，不是进程内存。 |
+| 自动恢复 | `app/tasks/scheduler.py` | `recovery_tick` 周期巡检并触发重新调度。 |
+| 任务恢复执行 | `app/tasks/generation.py` | `_resolve_generation_resume` 负责拼回恢复方案。 |
+| LangGraph 编排 | `app/services/generation/graph.py` | 真正的图结构、条件分支、回路都在这里。 |
+| 上下文治理 | `app/services/memory/context.py` | 分层注入上下文，不走全量拼接。 |
+| Prompt 工程 | `app/prompts/templates/next_chapter.j2` + `app/prompts/templates/chapter_body_contract.j2` | 模板化输入 + 输出 contract。 |
+
+最常用的 8 个函数：
+
+- `trace_id_middleware`
+- `get_llm`
+- `invoke_chapter_body_structured`
+- `transition_task_status`
+- `finalize_task`
+- `reclaim_stale_running_tasks`
+- `_resolve_generation_resume`
+- `build_chapter_context`
+
+---
+
 ## A. 统一回答框架（建议你固定成口头习惯）
 
 任何架构题都按这 5 句答：

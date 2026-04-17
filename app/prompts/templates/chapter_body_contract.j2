@@ -1,3 +1,8 @@
+{# chapter_body_contract.j2
+   目标：把章节正文输出严格收敛到单字段 JSON，供 llm_contract.py 做 schema 校验。
+   防护：禁止解释性前后缀、禁止标题回显、禁止输出额外键，避免结构化输出在工程侧不可消费。
+   面试可讲：prompt 只是第一层约束，真正兜底还依赖 Pydantic schema + contract retry。
+#}
 <output_contract>
 你必须只返回一个 JSON 对象，且仅包含以下字段：
 {

@@ -48,6 +48,7 @@ router = APIRouter()
 
 
 class UserAdminItem(BaseModel):
+    """用户AdminItem。"""
     uuid: str
     email: str
     role: str
@@ -62,6 +63,7 @@ class UserAdminItem(BaseModel):
 
 
 class UpdateQuotaRequest(BaseModel):
+    """Update配额请求体模型。"""
     plan_key: str | None = None
     max_concurrent_tasks: int | None = None
     monthly_chapter_limit: int | None = None
@@ -69,6 +71,7 @@ class UpdateQuotaRequest(BaseModel):
 
 
 def _percentile(samples: list[float], p: float) -> float:
+    """执行 percentile 相关辅助逻辑。"""
     if not samples:
         return 0.0
     arr = sorted(float(x) for x in samples)
@@ -84,6 +87,7 @@ def _log_settings_audit(
     action: str,
     metadata: dict[str, object] | None = None,
 ) -> None:
+    """执行 log settings audit 相关辅助逻辑。"""
     actor = db.execute(select(User).where(User.uuid == principal.user_uuid)).scalar_one_or_none()
     db.add(
         AdminAuditLog(
@@ -105,6 +109,7 @@ def list_users(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission(Permission.USER_READ)),
 ):
+    """列出用户。"""
     stmt = select(User).order_by(User.created_at.desc())
     if query:
         q = f"%{query.lower()}%"
@@ -160,6 +165,7 @@ def disable_user(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission(Permission.USER_DISABLE)),
 ):
+    """执行 disable user 相关辅助逻辑。"""
     user = db.execute(select(User).where(User.uuid == user_uuid)).scalar_one_or_none()
     if not user:
         raise HTTPException(404, "User not found")
@@ -187,6 +193,7 @@ def enable_user(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission(Permission.USER_DISABLE)),
 ):
+    """执行 enable user 相关辅助逻辑。"""
     user = db.execute(select(User).where(User.uuid == user_uuid)).scalar_one_or_none()
     if not user:
         raise HTTPException(404, "User not found")
@@ -213,6 +220,7 @@ def update_user_quota(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission(Permission.USER_QUOTA_UPDATE)),
 ):
+    """更新用户配额。"""
     user = db.execute(select(User).where(User.uuid == user_uuid)).scalar_one_or_none()
     if not user:
         raise HTTPException(404, "User not found")
@@ -268,6 +276,7 @@ def observability_summary(
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.USER_READ)),
 ):
+    """执行 observability summary 相关辅助逻辑。"""
     tasks = (
         db.execute(
             select(GenerationTask)
@@ -352,6 +361,7 @@ def get_system_model_settings(
     include_secrets: bool = Query(default=False),
     principal: Principal = Depends(require_permission(Permission.SYSTEM_SETTINGS_READ)),
 ):
+    """返回系统模型设置。"""
     if include_secrets:
         allowed = authorize(principal, Permission.SYSTEM_SETTINGS_WRITE, None)
         if not allowed.allowed:
@@ -367,6 +377,7 @@ def put_system_model_settings(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission(Permission.SYSTEM_SETTINGS_WRITE)),
 ):
+    """执行 put system model settings 相关辅助逻辑。"""
     try:
         replace_model_settings(db, primary_chat=req.primary_chat.model_dump(), embedding=req.embedding.model_dump())
         _log_settings_audit(
@@ -392,6 +403,7 @@ def put_system_model_settings(
 def get_system_runtime_settings(
     _: Principal = Depends(require_permission(Permission.SYSTEM_SETTINGS_READ)),
 ):
+    """返回系统运行时设置。"""
     payload = get_runtime_settings_with_sources(_RUNTIME_KEYS_IN_ORDER)
     items = [
         {"key": key, "value": payload.get(key, {}).get("value"), "source": payload.get(key, {}).get("source", "env")}
@@ -406,6 +418,7 @@ def put_system_runtime_settings(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission(Permission.SYSTEM_SETTINGS_WRITE)),
 ):
+    """执行 put system runtime settings 相关辅助逻辑。"""
     bad_keys = [k for k in req.updates.keys() if k not in RUNTIME_SETTING_KEYS]
     if bad_keys:
         raise HTTPException(status_code=400, detail=f"Unsupported setting key(s): {', '.join(sorted(bad_keys))}")
@@ -434,6 +447,7 @@ def put_system_runtime_settings(
 def get_effective_system_settings(
     _: Principal = Depends(require_permission(Permission.SYSTEM_SETTINGS_READ)),
 ):
+    """返回生效值系统设置。"""
     return {
         "models": get_model_settings_for_admin(),
         "runtime_overrides": get_runtime_overrides(),

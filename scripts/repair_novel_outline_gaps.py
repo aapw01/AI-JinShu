@@ -1,3 +1,4 @@
+"""修复已完成小说缺失的章节大纲，并顺带校正任务总章数字段。"""
 from __future__ import annotations
 
 import argparse
@@ -14,11 +15,13 @@ DEFAULT_TITLE = "人前不熟！人后备孕！夜夜被宠亲"
 
 
 def _clean_excerpt(text: str | None, limit: int = 320) -> str:
+    """把章节正文压缩成适合回填 outline 的短摘要片段。"""
     collapsed = re.sub(r"\s+", " ", str(text or "")).strip()
     return collapsed[:limit]
 
 
 def _purpose_from_summary(summary: str | None) -> str:
+    """从章节摘要提取一个简短的 purpose 文案，供历史补写使用。"""
     cleaned = str(summary or "").strip()
     if not cleaned:
         return "历史补写目录元数据"
@@ -27,6 +30,7 @@ def _purpose_from_summary(summary: str | None) -> str:
 
 
 def _latest_generation_task(db, novel_id: int) -> CreationTask | None:
+    """返回某本小说最新的一条统一生成任务记录。"""
     return db.execute(
         select(CreationTask)
         .where(
@@ -39,6 +43,7 @@ def _latest_generation_task(db, novel_id: int) -> CreationTask | None:
 
 
 def _latest_legacy_generation_task(db, novel_id: int) -> GenerationTask | None:
+    """返回某本小说最新的旧版 GenerationTask 记录。"""
     return db.execute(
         select(GenerationTask)
         .where(GenerationTask.novel_id == novel_id)
@@ -47,6 +52,7 @@ def _latest_legacy_generation_task(db, novel_id: int) -> GenerationTask | None:
 
 
 def _repair_task_totals(task: CreationTask | None, legacy_task: GenerationTask | None, *, chapter_max: int) -> tuple[int, int, int]:
+    """根据真实章节上限回填 current/total/completed 等派生统计字段。"""
     current = int(chapter_max or 0)
     total = int(chapter_max or 0)
     completed = 0
@@ -80,6 +86,7 @@ def _repair_task_totals(task: CreationTask | None, legacy_task: GenerationTask |
 
 
 def main() -> None:
+    """按书名查找小说，补齐缺失 outline，并同步修复相关任务统计。"""
     parser = argparse.ArgumentParser(description="Repair missing chapter outlines for a completed novel task.")
     parser.add_argument("--title", default=DEFAULT_TITLE, help="Novel title to repair")
     args = parser.parse_args()

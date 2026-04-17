@@ -39,6 +39,7 @@ def ensure_default_version(db: Session, novel_id: int) -> NovelVersion:
 
 
 def list_versions(db: Session, novel_id: int) -> list[NovelVersion]:
+    """列出版本。"""
     ensure_default_version(db, novel_id)
     return db.execute(
         select(NovelVersion)
@@ -48,6 +49,7 @@ def list_versions(db: Session, novel_id: int) -> list[NovelVersion]:
 
 
 def get_version_or_default(db: Session, novel_id: int, version_id: int | None) -> NovelVersion:
+    """返回版本或default。"""
     if version_id is not None:
         version = db.execute(
             select(NovelVersion)
@@ -61,6 +63,7 @@ def get_version_or_default(db: Session, novel_id: int, version_id: int | None) -
 
 
 def activate_version(db: Session, novel_id: int, version_id: int) -> NovelVersion:
+    """执行 activate version 相关辅助逻辑。"""
     version = db.execute(
         select(NovelVersion)
         .where(NovelVersion.id == version_id, NovelVersion.novel_id == novel_id)
@@ -76,6 +79,7 @@ def activate_version(db: Session, novel_id: int, version_id: int) -> NovelVersio
 
 
 def list_chapter_versions(db: Session, novel_id: int, version_id: int | None) -> tuple[NovelVersion, list[ChapterVersion]]:
+    """列出章节版本。"""
     version = get_version_or_default(db, novel_id, version_id)
     rows = db.execute(
         select(ChapterVersion)
@@ -86,6 +90,7 @@ def list_chapter_versions(db: Session, novel_id: int, version_id: int | None) ->
 
 
 def get_chapter_version(db: Session, novel_id: int, chapter_num: int, version_id: int | None) -> tuple[NovelVersion, ChapterVersion | None]:
+    """返回章节版本。"""
     version = get_version_or_default(db, novel_id, version_id)
     row = db.execute(
         select(ChapterVersion)
@@ -95,6 +100,7 @@ def get_chapter_version(db: Session, novel_id: int, chapter_num: int, version_id
 
 
 def create_target_version(db: Session, novel_id: int, base_version: NovelVersion, rewrite_from_chapter: int) -> NovelVersion:
+    """创建target版本。"""
     target: NovelVersion | None = None
     for _ in range(3):
         current_max = db.execute(
@@ -155,6 +161,7 @@ def get_default_version_id(db: Session, novel_id: int) -> int:
 
 
 def validate_annotation_payload(content: str, start_offset: int | None, end_offset: int | None, selected_text: str | None) -> None:
+    """校验annotation载荷。"""
     if start_offset is None and end_offset is None and not selected_text:
         return
 
@@ -183,6 +190,7 @@ def persist_annotations(
     base_version_id: int,
     annotations: list[dict],
 ) -> None:
+    """执行 persist annotations 相关辅助逻辑。"""
     for item in annotations:
         issue_type = str(item.get("issue_type") or "other").strip()
         priority = str(item.get("priority") or "should").strip()
@@ -208,6 +216,7 @@ def persist_annotations(
 
 
 def group_annotations_by_chapter(db: Session, request_id: int) -> dict[int, list[RewriteAnnotation]]:
+    """执行 group annotations by chapter 相关辅助逻辑。"""
     rows = db.execute(
         select(RewriteAnnotation)
         .where(RewriteAnnotation.rewrite_request_id == request_id)

@@ -10,6 +10,7 @@ from app.services.storyboard.shot_planner import ShotDraft
 
 @dataclass(slots=True)
 class QualityGateResult:
+    """质量GateResult。"""
     style_consistency_score: float
     hook_score_episode: dict[str, float]
     quality_gate_reasons: list[str]
@@ -25,6 +26,7 @@ def validate_storyboard(
     target_episode_seconds: int,
     style_keywords: list[str],
 ) -> QualityGateResult:
+    """校验分镜。"""
     reasons: list[str] = []
     hook_scores: dict[str, float] = {}
 
@@ -106,6 +108,7 @@ def validate_storyboard(
 
 
 def _score_episode_hook(shots: list[ShotDraft], lane: str) -> float:
+    """执行 score episode hook 相关辅助逻辑。"""
     if not shots:
         return 0.0
     first_two = shots[:2]
@@ -119,6 +122,7 @@ def _score_episode_hook(shots: list[ShotDraft], lane: str) -> float:
 
 
 def _build_rewrite_suggestions(reasons: list[str]) -> list[str]:
+    """构建重写suggestions。"""
     out: list[str] = []
     for reason in reasons:
         if "爆点不足" in reason:

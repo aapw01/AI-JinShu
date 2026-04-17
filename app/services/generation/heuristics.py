@@ -18,6 +18,7 @@ def aesthetic_score(text: str) -> float:
 
 
 def extract_timeline_markers(text: str) -> list[str]:
+    """提取timelinemarkers。"""
     patterns = [
         r"第[一二三四五六七八九十百\d]+天",
         r"次日",
@@ -35,6 +36,7 @@ def extract_timeline_markers(text: str) -> list[str]:
 
 
 def extract_item_mentions(text: str) -> list[str]:
+    """提取itemmentions。"""
     quoted = re.findall(r'["""]([^"""]{2,12})["""]', text)
     item_like = [x.strip() for x in quoted if any(k in x for k in ["剑", "刀", "符", "印", "戒", "卷", "令", "丹", "石"])]
     dedup: list[str] = []
@@ -76,6 +78,7 @@ def chapter_progress_signal(
 
 
 def safe_issue(item: Any, severity: str = "should_fix") -> dict[str, Any]:
+    """执行 safe issue 相关辅助逻辑。"""
     if not isinstance(item, dict):
         return {"category": "general", "severity": severity, "claim": str(item or ""), "evidence": "", "confidence": 0.55}
     return {
@@ -88,6 +91,7 @@ def safe_issue(item: Any, severity: str = "should_fix") -> dict[str, Any]:
 
 
 def evidence_valid(issue: dict[str, Any], draft: str) -> bool:
+    """执行 evidence valid 相关辅助逻辑。"""
     evidence_text = str(issue.get("evidence") or "").strip()
     if not evidence_text:
         return False
@@ -97,6 +101,7 @@ def evidence_valid(issue: dict[str, Any], draft: str) -> bool:
 
 
 def build_consistency_scorecard(report: Any) -> dict[str, Any]:
+    """构建consistencyscorecard。"""
     issues = list(getattr(report, "issues", []) or [])
     blockers = list(getattr(report, "blockers", []) or [])
     warnings = list(getattr(report, "warnings", []) or [])
@@ -128,6 +133,7 @@ def build_consistency_scorecard(report: Any) -> dict[str, Any]:
 
 
 def normalize_reviewer_payload(result: Any, default_feedback: str = "") -> dict[str, Any]:
+    """把 reviewer payload 规范化为统一格式。"""
     if isinstance(result, dict):
         score = float(result.get("score", 0.75) or 0.75)
         return {
@@ -183,6 +189,7 @@ def normalize_reviewer_payload(result: Any, default_feedback: str = "") -> dict[
 
 
 def normalize_progression_payload(result: Any, default_feedback: str = "") -> dict[str, Any]:
+    """把 progression payload 规范化为统一格式。"""
     payload = normalize_reviewer_payload(result, default_feedback)
     raw = payload.get("raw")
     if not isinstance(raw, dict):
@@ -200,6 +207,7 @@ def normalize_progression_payload(result: Any, default_feedback: str = "") -> di
 
 
 def extract_ai_flavor(reviewer_output: dict[str, Any]) -> dict[str, Any]:
+    """提取aiflavor。"""
     raw = reviewer_output.get("ai_flavor") or {}
     if not isinstance(raw, dict):
         raw = {}
@@ -213,6 +221,7 @@ def extract_ai_flavor(reviewer_output: dict[str, Any]) -> dict[str, Any]:
 
 
 def extract_webnovel_principles(reviewer_output: dict[str, Any]) -> dict[str, Any]:
+    """提取webnovelprinciples。"""
     raw = reviewer_output.get("webnovel_principles") or {}
     if not isinstance(raw, dict):
         raw = {}
@@ -226,6 +235,7 @@ def extract_webnovel_principles(reviewer_output: dict[str, Any]) -> dict[str, An
 
 
 def build_review_gate(draft: str, *payloads: dict[str, Any]) -> dict[str, Any]:
+    """构建审校gate。"""
     payload_list = [p for p in payloads if isinstance(p, dict)]
     all_must_fix: list[dict[str, Any]] = []
     confidences: list[float] = []

@@ -18,6 +18,7 @@ from app.services.memory.summary_manager import SummaryManager
 
 
 class GenerationState(TypedDict, total=False):
+    """生成状态。"""
     novel_id: int
     novel_version_id: int
     book_start_chapter: int

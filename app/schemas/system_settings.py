@@ -12,6 +12,7 @@ ProtocolOverride = Literal["openai_compatible", "anthropic", "gemini"]
 
 
 class AdminPrimaryChatSettingsIn(BaseModel):
+    """Admin主配置Chat设置In。"""
     provider: ModelProvider
     model: str = Field(min_length=1, max_length=255)
     base_url: str | None = None
@@ -20,6 +21,7 @@ class AdminPrimaryChatSettingsIn(BaseModel):
 
 
 class AdminEmbeddingSettingsIn(BaseModel):
+    """AdminEmbedding 配置设置In。"""
     enabled: bool = False
     model: str | None = Field(default=None, max_length=255)
     reuse_primary_connection: bool = True
@@ -29,15 +31,18 @@ class AdminEmbeddingSettingsIn(BaseModel):
 
 
 class AdminModelSettingsUpdateRequest(BaseModel):
+    """Admin模型设置Update请求体模型。"""
     primary_chat: AdminPrimaryChatSettingsIn
     embedding: AdminEmbeddingSettingsIn
 
 
 class AdminRuntimeSettingsUpdateRequest(BaseModel):
+    """Admin运行时设置Update请求体模型。"""
     updates: dict[str, Any] = Field(default_factory=dict)
 
 
 class AdminPrimaryChatSettingsOut(BaseModel):
+    """Admin主配置Chat设置Out。"""
     provider: ModelProvider
     model: str
     base_url: str | None = None
@@ -51,6 +56,7 @@ class AdminPrimaryChatSettingsOut(BaseModel):
 
 
 class AdminEmbeddingSettingsOut(BaseModel):
+    """AdminEmbedding 配置设置Out。"""
     enabled: bool = False
     model: str | None = None
     reuse_primary_connection: bool = True
@@ -65,16 +71,19 @@ class AdminEmbeddingSettingsOut(BaseModel):
 
 
 class AdminModelSettingsResponse(BaseModel):
+    """Admin模型设置响应体模型。"""
     primary_chat: AdminPrimaryChatSettingsOut
     embedding: AdminEmbeddingSettingsOut
     security_mode: str = "plaintext"
 
 
 class RuntimeSettingItem(BaseModel):
+    """运行时设置Item。"""
     key: str
     value: Any = None
     source: str = "env"
 
 
 class AdminRuntimeSettingsResponse(BaseModel):
+    """Admin运行时设置响应体模型。"""
     items: list[RuntimeSettingItem] = Field(default_factory=list)

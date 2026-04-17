@@ -24,6 +24,7 @@ from app.services.generation.evaluation_metrics import (
 
 @dataclass
 class NovelMetric:
+    """单本小说的离线质量评估结果。"""
     novel_id: int
     title: str
     oscillation_rate: float
@@ -35,6 +36,7 @@ class NovelMetric:
 
 
 def _default_version(db, novel: Novel) -> NovelVersion | None:
+    """返回小说的默认版本，离线评估只基于默认版本统计。"""
     return db.execute(
         select(NovelVersion).where(
             NovelVersion.novel_id == novel.id,
@@ -44,6 +46,7 @@ def _default_version(db, novel: Novel) -> NovelVersion | None:
 
 
 def _is_evaluable_novel(db, novel: Novel) -> bool:
+    """判断一本小说是否具备最小评估条件。"""
     version = _default_version(db, novel)
     if version is None:
         return False
@@ -92,6 +95,7 @@ def _is_evaluable_novel(db, novel: Novel) -> bool:
 
 
 def _evaluate_one(db, novel: Novel) -> NovelMetric:
+    """评估单本小说的收束、突兀结尾和一致性等核心指标。"""
     version = _default_version(db, novel)
     closure_rows = (
         db.execute(
@@ -174,6 +178,7 @@ def _evaluate_one(db, novel: Novel) -> NovelMetric:
 
 
 def _build_report(metrics: list[NovelMetric]) -> dict:
+    """把逐本指标汇总成整体报告和高风险小说列表。"""
     oscillation_rates = [m.oscillation_rate for m in metrics]
     abrupt_flags = [1 if m.abrupt_risk else 0 for m in metrics]
     abrupt_scores = [m.abrupt_score for m in metrics]
@@ -211,6 +216,7 @@ def _build_report(metrics: list[NovelMetric]) -> dict:
 
 
 def _enforce_thresholds(report: dict) -> list[str]:
+    """按预设阈值检查整体验证报告是否需要阻断。"""
     summary = report.get("summary") or {}
     violations: list[str] = []
     if float(summary.get("abrupt_ending_rate") or 0.0) > 0.08:
@@ -225,6 +231,7 @@ def _enforce_thresholds(report: dict) -> list[str]:
 
 
 def main() -> None:
+    """生成离线质量评估报告，并可选按阈值返回非零退出码。"""
     parser = argparse.ArgumentParser(description="Offline generation quality metrics")
     parser.add_argument("--enforce-thresholds", action="store_true", help="Exit non-zero when quality thresholds are violated")
     args = parser.parse_args()

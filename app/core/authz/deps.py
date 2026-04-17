@@ -20,11 +20,13 @@ ResourceLoader = Callable[[Request, Session], ResourceContext | None]
 
 
 def require_permission(permission: Permission, resource_loader: ResourceLoader | None = None):
+    """执行 require permission 相关辅助逻辑。"""
     def _dep(
         request: Request,
         principal: Principal = Depends(require_auth()),
         db: Session = Depends(get_db),
     ) -> Principal:
+        """在路由依赖阶段完成权限判定，并在拒绝时留下审计日志。"""
         resource = resource_loader(request, db) if resource_loader else None
         result = authorize(principal, permission, resource)
         if not result.allowed:

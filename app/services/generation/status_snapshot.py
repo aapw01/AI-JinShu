@@ -1,4 +1,13 @@
-"""Unified generation task snapshot building and cache publishing."""
+"""生成任务状态快照与缓存发布。
+
+模块职责：
+- 把 `CreationTask` + runtime_state 转成前端可消费的统一快照。
+- 负责 Redis 读写、任务维度/小说维度镜像、worker stale key 清理。
+
+面试可讲点：
+- 为什么前端状态不直接读 Celery，而是读业务快照。
+- 为什么需要 task / novel 两个 cache key 视角。
+"""
 from __future__ import annotations
 
 import json
@@ -56,6 +65,7 @@ GENERATION_NON_LIVE_STATUSES = GENERATION_TERMINAL_STATUSES | {"paused"}
 
 _redis_pool: redis.ConnectionPool | None = None
 def get_generation_redis() -> redis.Redis:
+    """惰性初始化生成任务专用的 Redis 客户端。"""
     global _redis_pool
     if _redis_pool is None:
         _redis_pool = redis.ConnectionPool.from_url(get_settings().redis_url)
@@ -63,14 +73,17 @@ def get_generation_redis() -> redis.Redis:
 
 
 def generation_task_key(task_id: str) -> str:
+    """返回任务维度的 generation cache key。"""
     return f"generation:{task_id}"
 
 
 def generation_novel_key(novel_id: int | str) -> str:
+    """返回小说维度的 generation cache key。"""
     return f"generation:novel:{novel_id}"
 
 
 def read_generation_cache(key: str) -> dict[str, Any] | None:
+    """优先从 Redis 读取生成快照，失败时回退到数据库重建。"""
     try:
         raw = get_generation_redis().get(key)
     except redis.RedisError:
@@ -82,6 +95,7 @@ def read_generation_cache(key: str) -> dict[str, Any] | None:
 
 
 def read_generation_cache_from_db(key: str) -> dict[str, Any] | None:
+    """当 Redis miss 时，从数据库推导当前最可信的生成状态。"""
     db = SessionLocal()
     try:
         if key.startswith("generation:novel:"):
@@ -121,6 +135,7 @@ def read_generation_cache_from_db(key: str) -> dict[str, Any] | None:
 
 
 def decode_generation_cache(raw: bytes | str | None) -> dict[str, Any] | None:
+    """把 Redis 原始值安全解码为字典快照。"""
     if not raw:
         return None
     if isinstance(raw, bytes):
@@ -142,6 +157,10 @@ def write_generation_cache(
     clear_worker_ids: list[str] | None = None,
     mirror_novel: bool = True,
 ) -> dict[str, Any]:
+    """把生成快照写入 Redis，并按需要镜像到小说/worker 维度。
+
+    终态和暂停态使用更长 TTL，方便前端刷新页面后仍能看到最近结果。
+    """
     snapshot = with_subtask(payload)
     status = str(snapshot.get("status") or "")
     ttl = 172800 if status in GENERATION_NON_LIVE_STATUSES else 86400
@@ -162,6 +181,7 @@ def write_generation_cache(
 
 
 def delete_generation_worker_cache(worker_task_id: str | None) -> None:
+    """删除某个 worker 维度的缓存快照。"""
     if not worker_task_id:
         return
     try:
@@ -171,6 +191,7 @@ def delete_generation_worker_cache(worker_task_id: str | None) -> None:
 
 
 def delete_generation_novel_cache(novel_id: int | str | None) -> None:
+    """删除小说维度的生成缓存快照。"""
     if novel_id is None:
         return
     try:
@@ -180,6 +201,7 @@ def delete_generation_novel_cache(novel_id: int | str | None) -> None:
 
 
 def with_subtask(payload: dict[str, Any]) -> dict[str, Any]:
+    """把 step/current_phase 归一化成前端统一展示的子任务结构。"""
     merged = dict(payload)
     step = str(merged.get("subtask_key") or merged.get("step") or merged.get("current_phase") or "").strip()
     if not step:
@@ -201,21 +223,25 @@ def with_subtask(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def creation_task_payload(row: CreationTask) -> dict[str, Any]:
+    """读取统一任务表中的业务 payload。"""
     payload = row.payload_json if isinstance(row.payload_json, dict) else {}
     return dict(payload)
 
 
 def creation_task_runtime_state(row: CreationTask) -> dict[str, Any]:
+    """读取 `resume_cursor_json.runtime_state`。"""
     cursor = row.resume_cursor_json if isinstance(row.resume_cursor_json, dict) else {}
     runtime_state = cursor.get("runtime_state")
     return dict(runtime_state) if isinstance(runtime_state, dict) else {}
 
 
 def payload_book_start(payload_data: dict[str, Any]) -> int:
+    """从 payload 推导整本小说的起始章节。"""
     return int(payload_data.get("book_start_chapter") or payload_data.get("start_chapter") or 1)
 
 
 def payload_book_total(payload_data: dict[str, Any]) -> int:
+    """从 payload 推导整本小说的目标总章节数。"""
     return int(
         payload_data.get("book_target_total_chapters")
         or payload_data.get("original_total_chapters")
@@ -225,29 +251,34 @@ def payload_book_total(payload_data: dict[str, Any]) -> int:
 
 
 def payload_book_end(payload_data: dict[str, Any]) -> int:
+    """根据起始章节和目标总章数推导整本小说结束章。"""
     book_start = payload_book_start(payload_data)
     book_total = max(0, payload_book_total(payload_data))
     return int(book_start + max(book_total - 1, 0))
 
 
 def creation_task_waiting_outline_confirmation(row: CreationTask) -> bool:
+    """判断任务是否处于“等待大纲确认”的特殊前端态。"""
     payload = creation_task_payload(row)
     return bool(payload.get("awaiting_outline_confirmation")) and not bool(payload.get("outline_confirmed"))
 
 
 def creation_task_effective_status(row: CreationTask) -> str:
+    """返回前端应该展示的有效状态，而不是原始数据库状态。"""
     if row.status in {"queued", "dispatching", "running"} and creation_task_waiting_outline_confirmation(row):
         return "awaiting_outline_confirmation"
     return str(row.status or "unknown")
 
 
 def creation_task_effective_phase(row: CreationTask) -> str:
+    """返回任务对前端展示时应使用的有效阶段。"""
     if row.status in {"queued", "dispatching", "running"} and creation_task_waiting_outline_confirmation(row):
         return "outline_ready"
     return str(row.phase or row.status or "unknown")
 
 
 def creation_task_display_totals(row: CreationTask) -> tuple[int, int]:
+    """计算前端展示任务进度时应使用的当前章节与总章节数。"""
     payload_data = creation_task_payload(row)
     cursor = row.resume_cursor_json if isinstance(row.resume_cursor_json, dict) else {}
     runtime_state = creation_task_runtime_state(row)
@@ -273,6 +304,7 @@ def resolve_live_chapter_display(
     db_current_chapter: int,
     db_total_chapters: int,
 ) -> tuple[int, int]:
+    """综合 Redis 实时快照和数据库状态，解析前端应展示的章节进度。"""
     current = int(db_current_chapter or 0)
     total = int(db_total_chapters or 0)
     if not isinstance(redis_payload, dict):
@@ -297,6 +329,7 @@ def build_generation_snapshot(
     *,
     live_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """构建生成snapshot。"""
     payload_data = creation_task_payload(row)
     result_data = row.result_json if isinstance(row.result_json, dict) else {}
     runtime_state = creation_task_runtime_state(row)
@@ -385,11 +418,13 @@ def build_generation_snapshot(
 
 
 def read_generation_snapshot_for_task(row: CreationTask) -> dict[str, Any]:
+    """读取单个生成任务的最新快照。"""
     live_payload = read_generation_cache(generation_task_key(row.public_id))
     return build_generation_snapshot(row, live_payload=live_payload)
 
 
 def latest_active_generation_task(db: Session, *, novel_id: int) -> CreationTask | None:
+    """返回指定小说最近一条仍处于活动态的生成任务。"""
     return db.execute(
         select(CreationTask)
         .where(
@@ -404,6 +439,7 @@ def latest_active_generation_task(db: Session, *, novel_id: int) -> CreationTask
 
 
 def sync_generation_novel_snapshot(db: Session, *, novel_id: int) -> None:
+    """同步生成小说snapshot。"""
     active = latest_active_generation_task(db, novel_id=novel_id)
     if not active:
         delete_generation_novel_cache(novel_id)

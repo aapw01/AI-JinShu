@@ -10,10 +10,12 @@ from app.core.database import Base
 
 
 def _uuid_default() -> str:
+    """执行 uuid default 相关辅助逻辑。"""
     return str(uuid.uuid4())
 
 
 def _utc_now() -> datetime:
+    """返回当前 UTC 时间，统一任务与数据库时间基准。"""
     return datetime.now(timezone.utc)
 
 

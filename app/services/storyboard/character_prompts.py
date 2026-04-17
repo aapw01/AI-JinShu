@@ -28,11 +28,13 @@ logger = logging.getLogger(__name__)
 
 
 def _key_from_name(name: str) -> str:
+    """执行 key from name 相关辅助逻辑。"""
     raw = (name or "").strip().lower()
     return re.sub(r"[^a-z0-9\u4e00-\u9fa5]+", "-", raw).strip("-")[:120]
 
 
 class CharacterPromptSchema(BaseModel):
+    """角色提示词结构化模型。"""
     model_config = ConfigDict(extra="forbid")
     master_prompt_text: str = Field(min_length=1)
     identity_lock: list[str] = Field(default_factory=list)
@@ -40,6 +42,7 @@ class CharacterPromptSchema(BaseModel):
     camera_safe_notes: list[str] = Field(default_factory=list)
 
 def _compact_shot_context(shots: list[StoryboardShot], character_name: str) -> str:
+    """执行 compact shot context 相关辅助逻辑。"""
     rows: list[str] = []
     for s in shots:
         in_cast = character_name in (s.characters_json or [])
@@ -56,6 +59,7 @@ def _compact_shot_context(shots: list[StoryboardShot], character_name: str) -> s
 
 
 def _identity_missing(profile: StoryCharacterProfile) -> list[str]:
+    """执行 identity missing 相关辅助逻辑。"""
     miss: list[str] = []
     if str(profile.skin_tone or "").strip() not in SKIN_TONES:
         miss.append("skin_tone")
@@ -65,10 +69,12 @@ def _identity_missing(profile: StoryCharacterProfile) -> list[str]:
 
 
 def _default_ethnicity_from_name(name: str) -> str:
+    """执行 default ethnicity from name 相关辅助逻辑。"""
     return "east_asian" if re.search(r"[\u4e00-\u9fff]", str(name or "")) else "other_specified"
 
 
 def _ensure_identity_fields(profile: StoryCharacterProfile) -> list[str]:
+    """确保identity字段存在并可用。"""
     skin = normalize_skin_tone(profile.skin_tone) or "medium"
     ethnicity = normalize_ethnicity(profile.ethnicity) or _default_ethnicity_from_name(profile.display_name)
 
@@ -102,6 +108,7 @@ def _compose_master_prompt(
     shot_context: str,
     strategy: str | None,
 ) -> dict[str, Any]:
+    """组装master提示词。"""
     provider, model = get_model_for_stage(strategy or "web-novel", "architect")
     llm = get_llm_with_fallback(provider, model)
     template = "storyboard_character_master_prompt"
@@ -137,6 +144,7 @@ def _compose_master_prompt(
     ).strip()
 
     def _fallback_payload(reason: str) -> dict[str, Any]:
+        """当结构化角色提示词生成失败时，退化为一份可直接使用的保守提示词。"""
         fallback_master = (
             f"{profile.display_name}，{lane}镜头语言，{genre}题材，{style_profile}风格；"
             f"肤色={profile.skin_tone}，族裔={profile.ethnicity}，"
@@ -216,6 +224,7 @@ def compose_character_prompts_for_version(
     novel: Novel,
     force_regenerate: bool = False,
 ) -> dict[str, Any]:
+    """组装角色提示词for版本。"""
     profiles = db.execute(
         select(StoryCharacterProfile)
         .where(
@@ -325,6 +334,7 @@ def list_character_prompts(
     version_id: int,
     lane: str | None = None,
 ) -> list[StoryboardCharacterPrompt]:
+    """列出角色提示词。"""
     stmt = (
         select(StoryboardCharacterPrompt)
         .where(
@@ -339,6 +349,7 @@ def list_character_prompts(
 
 
 def export_character_prompts_csv(rows: list[StoryboardCharacterPrompt]) -> str:
+    """执行 export character prompts csv 相关辅助逻辑。"""
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(

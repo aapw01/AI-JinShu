@@ -24,6 +24,7 @@ _runtime_cache: dict[str, Any] = {"ts": 0.0, "value": None}
 
 
 def invalidate_caches() -> None:
+    """清空系统设置运行时缓存。"""
     _model_cache["ts"] = 0.0
     _model_cache["value"] = None
     _runtime_cache["ts"] = 0.0
@@ -31,10 +32,12 @@ def invalidate_caches() -> None:
 
 
 def _is_cache_fresh(cache_ts: float) -> bool:
+    """判断本地缓存是否仍在有效期内。"""
     return (time.monotonic() - float(cache_ts or 0.0)) < _CACHE_TTL_SECONDS
 
 
 def _to_bool(value: Any) -> bool:
+    """执行 to bool 相关辅助逻辑。"""
     if isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
@@ -45,11 +48,13 @@ def _to_bool(value: Any) -> bool:
 
 
 def _clean_text(value: Any) -> str | None:
+    """执行 clean text 相关辅助逻辑。"""
     text = str(value or "").strip()
     return text or None
 
 
 def _infer_primary_protocol(provider: str, base_url: str | None, protocol_override: str | None) -> str:
+    """推断主配置protocol。"""
     if protocol_override:
         return protocol_override
     if base_url:
@@ -62,6 +67,7 @@ def _infer_primary_protocol(provider: str, base_url: str | None, protocol_overri
 
 
 def _infer_embedding_protocol(base_url: str | None, protocol_override: str | None) -> str:
+    """推断Embedding 配置protocol。"""
     if protocol_override:
         return protocol_override
     if base_url:
@@ -70,6 +76,7 @@ def _infer_embedding_protocol(base_url: str | None, protocol_override: str | Non
 
 
 def _env_primary_chat() -> dict[str, Any]:
+    """从环境变量构造主聊天模型配置。"""
     settings = get_settings()
     provider = str(settings.llm_provider or "openai").strip().lower() or "openai"
     model = str(settings.llm_model or "gpt-4o-mini").strip() or "gpt-4o-mini"
@@ -93,6 +100,7 @@ def _env_primary_chat() -> dict[str, Any]:
 
 
 def _env_embedding() -> dict[str, Any]:
+    """从环境变量构造 embedding 配置。"""
     settings = get_settings()
     base_url = _clean_text(settings.embedding_base_url)
     api_key = str(settings.embedding_api_key or "").strip()
@@ -112,6 +120,7 @@ def _env_embedding() -> dict[str, Any]:
 
 
 def _hydrate_primary(raw: dict[str, Any], source: str) -> dict[str, Any]:
+    """把数据库中的主模型配置记录还原为运行时可用结构。"""
     provider = str(raw.get("provider") or "openai").strip().lower() or "openai"
     model = str(raw.get("model") or "gpt-4o-mini").strip() or "gpt-4o-mini"
     base_url = _clean_text(raw.get("base_url"))
@@ -132,6 +141,7 @@ def _hydrate_primary(raw: dict[str, Any], source: str) -> dict[str, Any]:
 
 
 def _hydrate_embedding(raw: dict[str, Any], source: str) -> dict[str, Any]:
+    """把数据库中的 embedding 配置记录还原为运行时可用结构。"""
     base_url = _clean_text(raw.get("base_url"))
     protocol_override = _clean_text(raw.get("protocol_override"))
     api_key = decrypt_api_key(raw.get("api_key_ciphertext"), _to_bool(raw.get("api_key_is_encrypted")))
@@ -151,6 +161,7 @@ def _hydrate_embedding(raw: dict[str, Any], source: str) -> dict[str, Any]:
 
 
 def _load_model_cache_value() -> dict[str, Any]:
+    """加载模型cache值。"""
     db = SessionLocal()
     try:
         db_values = load_model_settings_db(db)
@@ -175,6 +186,7 @@ def _load_model_cache_value() -> dict[str, Any]:
 
 
 def get_effective_model_config() -> dict[str, Any]:
+    """返回生效值模型config。"""
     if _is_cache_fresh(_model_cache["ts"]) and _model_cache.get("value") is not None:
         return copy.deepcopy(_model_cache["value"])
     value = _load_model_cache_value()
@@ -184,14 +196,17 @@ def get_effective_model_config() -> dict[str, Any]:
 
 
 def get_primary_chat_runtime() -> dict[str, Any]:
+    """返回主配置chat运行时。"""
     return get_effective_model_config().get("primary_chat", {})
 
 
 def get_embedding_runtime() -> dict[str, Any]:
+    """返回Embedding 配置运行时。"""
     return get_effective_model_config().get("embedding", {})
 
 
 def get_default_model_for_type(model_type: str) -> dict[str, Any] | None:
+    """返回default模型fortype。"""
     model_type = (model_type or "").strip().lower()
     config = get_effective_model_config()
     if model_type == "chat":
@@ -214,6 +229,7 @@ def get_default_model_for_type(model_type: str) -> dict[str, Any] | None:
 
 
 def _load_runtime_cache_value() -> dict[str, Any]:
+    """加载运行时cache值。"""
     db = SessionLocal()
     try:
         overrides = list_runtime_overrides(db)
@@ -223,6 +239,7 @@ def _load_runtime_cache_value() -> dict[str, Any]:
 
 
 def _cast_value(value: Any, cast: Callable[[Any], Any] | type | None) -> Any:
+    """按目标类型把运行时设置值转换为最终返回值。"""
     if cast is None:
         return value
     if cast is bool:
@@ -235,6 +252,7 @@ def get_effective_runtime_setting(
     cast: Callable[[Any], Any] | type | None = None,
     default: Any = None,
 ) -> Any:
+    """返回生效值运行时设置。"""
     if not _is_cache_fresh(_runtime_cache["ts"]) or _runtime_cache.get("value") is None:
         _runtime_cache["value"] = _load_runtime_cache_value()
         _runtime_cache["ts"] = time.monotonic()
@@ -255,6 +273,7 @@ def get_effective_runtime_setting(
 
 
 def get_runtime_settings_with_sources(keys: list[str]) -> dict[str, dict[str, Any]]:
+    """返回运行时设置withsources。"""
     if not _is_cache_fresh(_runtime_cache["ts"]) or _runtime_cache.get("value") is None:
         _runtime_cache["value"] = _load_runtime_cache_value()
         _runtime_cache["ts"] = time.monotonic()
@@ -271,6 +290,7 @@ def get_runtime_settings_with_sources(keys: list[str]) -> dict[str, dict[str, An
 
 
 def get_runtime_overrides() -> dict[str, Any]:
+    """返回运行时overrides。"""
     if not _is_cache_fresh(_runtime_cache["ts"]) or _runtime_cache.get("value") is None:
         _runtime_cache["value"] = _load_runtime_cache_value()
         _runtime_cache["ts"] = time.monotonic()
@@ -278,6 +298,7 @@ def get_runtime_overrides() -> dict[str, Any]:
 
 
 def get_model_settings_for_admin(*, include_secrets: bool = False) -> dict[str, Any]:
+    """返回模型设置foradmin。"""
     config = get_effective_model_config()
     primary = config.get("primary_chat") or {}
     embedding = config.get("embedding") or {}

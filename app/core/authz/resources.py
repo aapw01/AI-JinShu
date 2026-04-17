@@ -11,6 +11,7 @@ from app.models.storyboard import StoryboardProject
 
 
 def load_novel_resource(request: Request, db: Session) -> ResourceContext | None:
+    """加载小说resource。"""
     novel_id = str(request.path_params.get("novel_id") or "")
     if not novel_id:
         return None
@@ -26,6 +27,7 @@ def load_novel_resource(request: Request, db: Session) -> ResourceContext | None
 
 
 def load_storyboard_resource(request: Request, db: Session) -> ResourceContext | None:
+    """加载分镜resource。"""
     raw = request.path_params.get("project_id")
     if raw is None:
         return None
