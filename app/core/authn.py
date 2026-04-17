@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 def create_access_token(user_uuid: str, role: str, status: str = "active") -> str:
+    """创建accessToken。"""
     settings = get_settings()
     now = datetime.now(timezone.utc)
     payload = {
@@ -34,6 +35,7 @@ def create_access_token(user_uuid: str, role: str, status: str = "active") -> st
 
 
 def _extract_token(request: Request) -> str | None:
+    """提取Token。"""
     auth = request.headers.get("Authorization") or ""
     if auth.startswith("Bearer "):
         return auth[7:].strip()
@@ -44,6 +46,7 @@ def _extract_token(request: Request) -> str | None:
 
 
 def _decode_token(token: str) -> dict:
+    """执行 decode token 相关辅助逻辑。"""
     settings = get_settings()
     return jwt.decode(
         token,
@@ -54,6 +57,7 @@ def _decode_token(token: str) -> dict:
 
 
 def get_current_principal(request: Request, db: Session = Depends(get_db)) -> Principal:
+    """返回当前当前主体。"""
     token = _extract_token(request)
     if not token:
         log_event(logger, "auth.token.invalid", level=logging.WARNING, reason="missing_token")
@@ -83,7 +87,9 @@ def get_current_principal(request: Request, db: Session = Depends(get_db)) -> Pr
 
 
 def require_auth() -> callable:
+    """执行 require auth 相关辅助逻辑。"""
     def _dep(principal: Principal = Depends(get_current_principal)) -> Principal:
+        """确保当前请求对应的是一个可正常访问系统的激活用户。"""
         if not principal.is_authenticated:
             raise unauthorized("Unauthenticated")
         if principal.status == "disabled":

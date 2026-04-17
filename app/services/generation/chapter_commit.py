@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 def _chapter_finalized_story_bible_handler(event: GenerationEvent) -> None:
+    """执行 chapter finalized story bible handler 相关辅助逻辑。"""
     payload = event.payload
     state: GenerationState = payload["state"]
     bible = payload["bible"]
@@ -220,6 +221,7 @@ def _chapter_finalized_story_bible_handler(event: GenerationEvent) -> None:
 
 
 def _chapter_finalized_progression_handler(event: GenerationEvent) -> None:
+    """执行 chapter finalized progression handler 相关辅助逻辑。"""
     payload = event.payload
     state: GenerationState = payload["state"]
     progression = payload["progression"]
@@ -282,6 +284,7 @@ def _chapter_finalized_progression_handler(event: GenerationEvent) -> None:
 
 
 def _chapter_finalized_quality_report_handler(event: GenerationEvent) -> None:
+    """执行 chapter finalized quality report handler 相关辅助逻辑。"""
     payload = event.payload
     state: GenerationState = payload["state"]
     quality = payload["quality"]
@@ -334,6 +337,7 @@ def _chapter_finalized_quality_report_handler(event: GenerationEvent) -> None:
 
 
 def _chapter_finalized_checkpoint_handler(event: GenerationEvent) -> None:
+    """执行 chapter finalized checkpoint handler 相关辅助逻辑。"""
     payload = event.payload
     state: GenerationState = payload["state"]
     checkpoint = payload["checkpoint"]
@@ -366,10 +370,12 @@ def _chapter_finalized_checkpoint_handler(event: GenerationEvent) -> None:
 
 
 def _chapter_finalized_telemetry_handler(event: GenerationEvent) -> None:
+    """执行 chapter finalized telemetry handler 相关辅助逻辑。"""
     _ = event  # telemetry placeholder for future extension
 
 
 def _build_chapter_finalized_event_bus() -> EventBus:
+    """构建章节finalized事件bus。"""
     bus = EventBus()
     bus.register("chapter.finalized", _chapter_finalized_story_bible_handler, required=True)
     bus.register("chapter.finalized", _chapter_finalized_progression_handler, required=True)

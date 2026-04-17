@@ -117,6 +117,7 @@ _redis_pool = None
 
 
 def _get_redis() -> redis.Redis:
+    """返回当前任务模块复用的 Redis 客户端。"""
     global _redis_pool
     if _redis_pool is None:
         _redis_pool = redis.ConnectionPool.from_url(get_settings().redis_url)
@@ -124,10 +125,12 @@ def _get_redis() -> redis.Redis:
 
 
 def _redis_key(task_id: str) -> str:
+    """构造当前业务使用的 Redis 键。"""
     return f"storyboard:task:{task_id}"
 
 
 def _update_storyboard_redis(task_id: str, status: str, message: str, row: "StoryboardTask | None" = None) -> None:
+    """更新分镜Redis。"""
     try:
         import json as _json
         data: dict = {"status": status, "run_state": status, "message": message}
@@ -140,6 +143,7 @@ def _update_storyboard_redis(task_id: str, status: str, message: str, row: "Stor
 
 
 def _to_project_response(p: StoryboardProject, novel_public_id: str, novel_title: str | None = None) -> StoryboardProjectResponse:
+    """执行 to project response 相关辅助逻辑。"""
     lanes = p.output_lanes if isinstance(p.output_lanes, list) else ["vertical_feed", "horizontal_cinematic"]
     cfg = project_config(p)
     return StoryboardProjectResponse(
@@ -166,6 +170,7 @@ def _to_project_response(p: StoryboardProject, novel_public_id: str, novel_title
 
 
 def _to_version_response(v: StoryboardVersion) -> StoryboardVersionResponse:
+    """执行 to version response 相关辅助逻辑。"""
     return StoryboardVersionResponse(
         id=v.id,
         storyboard_project_id=v.storyboard_project_id,
@@ -183,6 +188,7 @@ def _to_version_response(v: StoryboardVersion) -> StoryboardVersionResponse:
 
 
 def _to_shot_response(s: StoryboardShot) -> StoryboardShotResponse:
+    """执行 to shot response 相关辅助逻辑。"""
     return StoryboardShotResponse(
         id=s.id,
         storyboard_version_id=s.storyboard_version_id,
@@ -212,6 +218,7 @@ def _to_shot_response(s: StoryboardShot) -> StoryboardShotResponse:
 
 
 def _to_character_prompt_response(s: StoryboardCharacterPrompt) -> StoryboardCharacterPromptResponse:
+    """执行 to character prompt response 相关辅助逻辑。"""
     return StoryboardCharacterPromptResponse(
         id=s.id,
         storyboard_project_id=s.storyboard_project_id,
@@ -232,6 +239,7 @@ def _to_character_prompt_response(s: StoryboardCharacterPrompt) -> StoryboardCha
 
 
 def _to_character_card_response(s: StoryboardCharacterCard) -> StoryboardCharacterCardResponse:
+    """执行 to character card response 相关辅助逻辑。"""
     return StoryboardCharacterCardResponse(
         id=s.id,
         storyboard_project_id=s.storyboard_project_id,
@@ -253,6 +261,7 @@ def _to_character_card_response(s: StoryboardCharacterCard) -> StoryboardCharact
 
 
 def _to_run_lane_response(row: StoryboardRunLane) -> StoryboardRunLaneResponse:
+    """执行 to run lane response 相关辅助逻辑。"""
     return StoryboardRunLaneResponse(
         id=row.id,
         lane=row.lane,
@@ -272,6 +281,7 @@ def _to_run_lane_response(row: StoryboardRunLane) -> StoryboardRunLaneResponse:
 
 
 def _to_run_response(run: StoryboardRun, lanes: list[StoryboardRunLane]) -> StoryboardRunResponse:
+    """执行 to run response 相关辅助逻辑。"""
     return StoryboardRunResponse(
         id=run.id,
         public_id=run.public_id,
@@ -292,6 +302,7 @@ def _to_run_response(run: StoryboardRun, lanes: list[StoryboardRunLane]) -> Stor
 
 
 def _run_to_legacy_task_payload(run: StoryboardRun, lanes: list[StoryboardRunLane]) -> dict:
+    """执行tolegacy任务载荷。"""
     lane = next(
         (
             row
@@ -328,6 +339,7 @@ def _run_to_legacy_task_payload(run: StoryboardRun, lanes: list[StoryboardRunLan
 
 
 def _resolve_version_or_404(db: Session, *, project_id: int, version_id: int) -> StoryboardVersion:
+    """根据项目和版本 ID 找到目标分镜版本；不存在时返回 404。"""
     version = db.execute(
         select(StoryboardVersion).where(
             StoryboardVersion.id == version_id,
@@ -340,6 +352,7 @@ def _resolve_version_or_404(db: Session, *, project_id: int, version_id: int) ->
 
 
 def _to_export_status_response(row: StoryboardExport, *, include_download: bool = True) -> StoryboardExportStatusResponse:
+    """执行 to export status response 相关辅助逻辑。"""
     download_url: str | None = None
     if include_download and row.status == "completed" and row.storage_path:
         download_url = build_export_download_url(
@@ -364,10 +377,12 @@ def _to_export_status_response(row: StoryboardExport, *, include_download: bool 
 
 
 def _sse_event(event_type: str, payload: dict) -> str:
+    """执行 sse event 相关辅助逻辑。"""
     return f"data: {json.dumps({'type': event_type, 'payload': payload}, ensure_ascii=False)}\n\n"
 
 
 def _active_task_or_404(db: Session, project_id: int, task_id: str | None) -> StoryboardTask:
+    """执行 active task or 404 相关辅助逻辑。"""
     if task_id:
         row = db.execute(
             select(StoryboardTask)
@@ -387,6 +402,7 @@ def _active_task_or_404(db: Session, project_id: int, task_id: str | None) -> St
 def get_storyboard_style_presets(
     _: Principal = Depends(require_permission(Permission.STORYBOARD_CREATE)),
 ):
+    """返回分镜stylepresets。"""
     return StoryboardStylePresetsResponse(**list_style_presets())
 
 
@@ -396,6 +412,7 @@ def get_storyboard_style_recommendations(
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.STORYBOARD_CREATE)),
 ):
+    """返回分镜stylerecommendations。"""
     novel = resolve_novel(db, req.novel_id)
     if not novel:
         raise http_error(404, "novel_not_found", "Novel not found")
@@ -417,6 +434,7 @@ def get_storyboard_projects(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission(Permission.STORYBOARD_READ)),
 ):
+    """返回分镜projects。"""
     rows = list_projects(db, principal.role, principal.user_uuid)
     novel_ids = {int(r.novel_id) for r in rows}
     novel_map: dict[int, tuple[str, str]] = {}
@@ -439,6 +457,7 @@ def create_storyboard_project(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission(Permission.STORYBOARD_CREATE)),
 ):
+    """创建分镜project。"""
     novel = resolve_novel(db, req.novel_id)
     if not novel:
         raise http_error(404, "novel_not_found", "Novel not found")
@@ -498,6 +517,7 @@ def storyboard_preflight(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission(Permission.STORYBOARD_GENERATE, resource_loader=load_storyboard_resource)),
 ):
+    """执行 storyboard preflight 相关辅助逻辑。"""
     project = get_project_or_404_v2(db, project_id)
     if not project:
         raise http_error(404, "storyboard_project_not_found", "Storyboard project not found")
@@ -529,6 +549,7 @@ def start_storyboard_run(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission(Permission.STORYBOARD_GENERATE, resource_loader=load_storyboard_resource)),
 ):
+    """执行 start storyboard run 相关辅助逻辑。"""
     project = get_project_or_404_v2(db, project_id)
     if not project:
         raise http_error(404, "storyboard_project_not_found", "Storyboard project not found")
@@ -559,6 +580,7 @@ def get_storyboard_run_status(
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.STORYBOARD_READ, resource_loader=load_storyboard_resource)),
 ):
+    """返回分镜run状态。"""
     run = get_run_by_public_id(db, project_id=project_id, run_public_id=run_id)
     if not run:
         raise http_error(404, "storyboard_run_not_found", "Storyboard run not found")
@@ -575,11 +597,13 @@ def stream_storyboard_run_events(
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.STORYBOARD_READ, resource_loader=load_storyboard_resource)),
 ):
+    """流式返回 storyboard run events。"""
     run = get_run_by_public_id(db, project_id=project_id, run_public_id=run_id)
     if not run:
         raise http_error(404, "storyboard_run_not_found", "Storyboard run not found")
 
     async def event_stream():
+        """持续推送分镜 run 状态变化，直到运行结束或记录消失。"""
         last = None
         while True:
             db.expire_all()
@@ -611,6 +635,7 @@ def list_storyboard_runs(
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.STORYBOARD_READ, resource_loader=load_storyboard_resource)),
 ):
+    """列出分镜runs。"""
     rows = db.execute(
         select(StoryboardRun)
         .where(StoryboardRun.storyboard_project_id == project_id)
@@ -634,6 +659,7 @@ def action_storyboard_run(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission(Permission.STORYBOARD_GENERATE, resource_loader=load_storyboard_resource)),
 ):
+    """执行 action storyboard run 相关辅助逻辑。"""
     run = get_run_by_public_id(db, project_id=project_id, run_public_id=run_id)
     if not run:
         raise http_error(404, "storyboard_run_not_found", "Storyboard run not found")
@@ -684,6 +710,7 @@ def list_storyboard_version_shots(
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.STORYBOARD_READ, resource_loader=load_storyboard_resource)),
 ):
+    """列出分镜版本shots。"""
     _resolve_version_or_404(db, project_id=project_id, version_id=version_id)
     stmt = select(StoryboardShot).where(StoryboardShot.storyboard_version_id == version_id)
     if episode_no is not None:
@@ -702,6 +729,7 @@ def generate_storyboard(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission(Permission.STORYBOARD_GENERATE, resource_loader=load_storyboard_resource)),
 ):
+    """执行 generate storyboard 相关辅助逻辑。"""
     project = get_project_or_404(db, project_id)
     if not project:
         raise http_error(404, "storyboard_project_not_found", "Storyboard project not found")
@@ -778,6 +806,7 @@ def get_storyboard_status(
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.STORYBOARD_READ, resource_loader=load_storyboard_resource)),
 ):
+    """返回分镜状态。"""
     row = None
     try:
         row = _active_task_or_404(db, project_id, task_id)
@@ -828,6 +857,7 @@ def pause_storyboard_task(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission(Permission.STORYBOARD_GENERATE, resource_loader=load_storyboard_resource)),
 ):
+    """暂停分镜任务。"""
     row = _active_task_or_404(db, project_id, task_id)
     if row.run_state not in {"running", "retrying", "submitted"}:
         raise http_error(409, "storyboard_task_state_not_pausable", f"当前状态 {row.run_state} 不支持暂停")
@@ -855,6 +885,7 @@ def resume_storyboard_task(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission(Permission.STORYBOARD_GENERATE, resource_loader=load_storyboard_resource)),
 ):
+    """恢复分镜任务。"""
     row = _active_task_or_404(db, project_id, task_id)
     if row.run_state != "paused":
         raise http_error(409, "storyboard_task_state_not_resumable", f"当前状态 {row.run_state} 不支持恢复")
@@ -882,6 +913,7 @@ def cancel_storyboard_task(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission(Permission.STORYBOARD_GENERATE, resource_loader=load_storyboard_resource)),
 ):
+    """执行 cancel storyboard task 相关辅助逻辑。"""
     row = _active_task_or_404(db, project_id, task_id)
     if row.run_state in {"completed", "failed", "cancelled"}:
         raise http_error(409, "storyboard_task_state_not_cancellable", f"当前状态 {row.run_state} 不支持取消")
@@ -911,6 +943,7 @@ def retry_storyboard_task(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission(Permission.STORYBOARD_GENERATE, resource_loader=load_storyboard_resource)),
 ):
+    """重试分镜任务。"""
     from app.models.creation_task import CreationTask
 
     project = get_project_or_404(db, project_id)
@@ -998,6 +1031,7 @@ def list_storyboard_versions(
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.STORYBOARD_READ, resource_loader=load_storyboard_resource)),
 ):
+    """列出分镜版本。"""
     rows = db.execute(
         select(StoryboardVersion)
         .where(StoryboardVersion.storyboard_project_id == project_id)
@@ -1013,6 +1047,7 @@ def activate_storyboard_version(
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.STORYBOARD_UPDATE, resource_loader=load_storyboard_resource)),
 ):
+    """执行 activate storyboard version 相关辅助逻辑。"""
     version = db.execute(
         select(StoryboardVersion).where(
             StoryboardVersion.id == version_id,
@@ -1040,6 +1075,7 @@ def finalize_storyboard_version(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission(Permission.STORYBOARD_FINALIZE, resource_loader=load_storyboard_resource)),
 ):
+    """完成分镜版本的收尾处理。"""
     version = db.execute(
         select(StoryboardVersion).where(
             StoryboardVersion.id == version_id,
@@ -1109,6 +1145,7 @@ def list_storyboard_shots(
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.STORYBOARD_READ, resource_loader=load_storyboard_resource)),
 ):
+    """列出分镜shots。"""
     if version_id is None:
         version = db.execute(
             select(StoryboardVersion)
@@ -1142,6 +1179,7 @@ def list_storyboard_character_prompts(
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.STORYBOARD_READ, resource_loader=load_storyboard_resource)),
 ):
+    """列出分镜角色提示词。"""
     project = get_project_or_404(db, project_id)
     if not project:
         raise http_error(404, "storyboard_project_not_found", "Storyboard project not found")
@@ -1167,6 +1205,7 @@ def list_storyboard_character_cards(
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.STORYBOARD_READ, resource_loader=load_storyboard_resource)),
 ):
+    """列出分镜角色cards。"""
     version = _resolve_version_or_404(db, project_id=project_id, version_id=version_id)
     stmt = select(StoryboardCharacterCard).where(
         StoryboardCharacterCard.storyboard_project_id == project_id,
@@ -1225,6 +1264,7 @@ def update_storyboard_character_card(
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.STORYBOARD_UPDATE, resource_loader=load_storyboard_resource)),
 ):
+    """更新分镜角色card。"""
     version = _resolve_version_or_404(db, project_id=project_id, version_id=version_id)
     if bool(version.is_final):
         raise http_error(409, "storyboard_final_version_readonly", "定稿版本不可编辑")
@@ -1267,6 +1307,7 @@ def regenerate_storyboard_character_prompts(
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.STORYBOARD_UPDATE, resource_loader=load_storyboard_resource)),
 ):
+    """执行 regenerate storyboard character prompts 相关辅助逻辑。"""
     project = get_project_or_404(db, project_id)
     if not project:
         raise http_error(404, "storyboard_project_not_found", "Storyboard project not found")
@@ -1358,6 +1399,7 @@ def update_storyboard_shot(
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.STORYBOARD_UPDATE, resource_loader=load_storyboard_resource)),
 ):
+    """更新分镜shot。"""
     shot = db.execute(
         select(StoryboardShot)
         .join(StoryboardVersion, StoryboardVersion.id == StoryboardShot.storyboard_version_id)
@@ -1386,6 +1428,7 @@ def update_storyboard_shot_by_version(
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.STORYBOARD_UPDATE, resource_loader=load_storyboard_resource)),
 ):
+    """更新分镜shotby版本。"""
     _resolve_version_or_404(db, project_id=project_id, version_id=version_id)
     shot = db.execute(
         select(StoryboardShot).where(
@@ -1412,6 +1455,7 @@ def optimize_storyboard_version(
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.STORYBOARD_UPDATE, resource_loader=load_storyboard_resource)),
 ):
+    """执行 optimize storyboard version 相关辅助逻辑。"""
     version = db.execute(
         select(StoryboardVersion).where(
             StoryboardVersion.id == version_id,
@@ -1458,6 +1502,7 @@ def storyboard_diff(
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.STORYBOARD_READ, resource_loader=load_storyboard_resource)),
 ):
+    """执行 storyboard diff 相关辅助逻辑。"""
     for vid in (version_id, compare_to):
         owner = db.execute(
             select(StoryboardVersion.storyboard_project_id).where(StoryboardVersion.id == vid)
@@ -1525,6 +1570,7 @@ def create_storyboard_export(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission(Permission.STORYBOARD_EXPORT, resource_loader=load_storyboard_resource)),
 ):
+    """创建分镜导出。"""
     version = _resolve_version_or_404(db, project_id=project_id, version_id=version_id)
     if not bool(version.is_final):
         raise http_error(409, "storyboard_export_requires_final", "仅定稿版本允许导出")
@@ -1584,6 +1630,7 @@ def get_storyboard_export_status(
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.STORYBOARD_EXPORT, resource_loader=load_storyboard_resource)),
 ):
+    """返回分镜导出状态。"""
     row = get_export_by_public_id(db, project_id=project_id, export_public_id=export_id)
     if not row:
         raise http_error(404, "storyboard_export_not_found", "Export not found")
@@ -1599,6 +1646,7 @@ def download_storyboard_export(
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.STORYBOARD_EXPORT, resource_loader=load_storyboard_resource)),
 ):
+    """执行 download storyboard export 相关辅助逻辑。"""
     if not verify_download_signature(export_id, int(expires), sig):
         raise http_error(403, "storyboard_export_signature_invalid", "导出链接已失效或签名不合法")
     row = get_export_by_public_id(db, project_id=project_id, export_public_id=export_id)
@@ -1622,6 +1670,7 @@ def export_storyboard_csv(
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.STORYBOARD_EXPORT, resource_loader=load_storyboard_resource)),
 ):
+    """执行 export storyboard csv 相关辅助逻辑。"""
     version = db.execute(
         select(StoryboardVersion).where(
             StoryboardVersion.id == version_id,
@@ -1667,6 +1716,7 @@ def export_storyboard_characters(
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.STORYBOARD_EXPORT, resource_loader=load_storyboard_resource)),
 ):
+    """执行 export storyboard characters 相关辅助逻辑。"""
     version = db.execute(
         select(StoryboardVersion).where(
             StoryboardVersion.id == version_id,

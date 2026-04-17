@@ -19,6 +19,7 @@ from app.services.memory.progression_control import rollback_progression_range
 
 
 def node_review(state: GenerationState) -> GenerationState:
+    """执行 node review 相关辅助逻辑。"""
     from app.core.strategy import get_pipeline_options
     _opts = get_pipeline_options(state.get("strategy"))
     _combined_mode = _opts.get("combined_reviewer", False)
@@ -245,6 +246,7 @@ def node_review(state: GenerationState) -> GenerationState:
 
 
 def node_revise(state: GenerationState) -> GenerationState:
+    """执行 node revise 相关辅助逻辑。"""
     review_attempt = state.get("review_attempt", 0) + 1
     ctx = dict(state["context"])
     suggestions = state.get("review_suggestions") or {}
@@ -272,6 +274,7 @@ def node_revise(state: GenerationState) -> GenerationState:
 
 
 def node_rollback_rerun(state: GenerationState) -> GenerationState:
+    """执行 node rollback rerun 相关辅助逻辑。"""
     chapter_num = state["current_chapter"]
     snap = state.get("chapter_token_snapshot", {})
     ctx = dict(state["context"])

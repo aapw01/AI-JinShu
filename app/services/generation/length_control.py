@@ -9,10 +9,12 @@ from app.core.constants import ChapterLengthPolicy, DEFAULT_CHAPTER_LENGTH_POLIC
 
 
 def count_content_words(content: str) -> int:
+    """统计contentwords。"""
     return len("".join(str(content or "").split()))
 
 
 def resolve_chapter_length_policy(word_count: int | None = None) -> ChapterLengthPolicy:
+    """根据目标字数返回本次章节写作应遵循的长度策略。"""
     if word_count is None:
         return DEFAULT_CHAPTER_LENGTH_POLICY
     target_words = int(word_count or DEFAULT_CHAPTER_LENGTH_POLICY.target_words)
@@ -24,6 +26,7 @@ def resolve_chapter_length_policy(word_count: int | None = None) -> ChapterLengt
 
 
 def build_chapter_length_prompt_kwargs(word_count: int | None = None) -> dict[str, int]:
+    """构建章节length提示词kwargs。"""
     policy = resolve_chapter_length_policy(word_count)
     ideal_min_word_count = max(policy.min_words, policy.target_words - 400)
     ideal_max_word_count = min(policy.soft_max_words, policy.target_words + 200)
@@ -39,6 +42,7 @@ def build_chapter_length_prompt_kwargs(word_count: int | None = None) -> dict[st
 
 
 def build_length_compaction_feedback(*, before_word_count: int, policy: ChapterLengthPolicy) -> str:
+    """构建lengthcompactionfeedback。"""
     severity_line = (
         "当前正文明显超长，请更强约束地压缩重复段落与冗余复述。"
         if before_word_count > policy.hard_ceiling_words
@@ -66,6 +70,7 @@ def maybe_compact_chapter_length(
     compact_fn: Callable[[str, str], str],
     normalize_fn: Callable[[str], str],
 ) -> tuple[str, dict[str, object]]:
+    """执行 maybe compact chapter length 相关辅助逻辑。"""
     policy = resolve_chapter_length_policy(word_count)
     before_word_count = count_content_words(content)
     diagnostics: dict[str, object] = {

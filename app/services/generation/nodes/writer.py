@@ -14,10 +14,12 @@ from app.services.generation.state import GenerationState
 
 
 def node_writer(state: GenerationState) -> GenerationState:
+    """执行章节写作节点，并在必要时做 A/B 变体重试。"""
     def _call_writer_run(
         *args: Any,
         **kwargs: Any,
     ) -> str:
+        """按 writer 真实签名裁剪参数，避免不同实现的调用签名不兼容。"""
         run_fn = state["writer"].run
         signature = inspect.signature(run_fn)
         accepts_var_kw = any(
@@ -33,6 +35,7 @@ def node_writer(state: GenerationState) -> GenerationState:
         return run_fn(*args, **kwargs)
 
     def _is_invalid_draft(text: str) -> bool:
+        """判断模型返回的文本是否只是失败占位或空草稿。"""
         t = str(text or "").strip().lower()
         if not t:
             return True
@@ -46,6 +49,7 @@ def node_writer(state: GenerationState) -> GenerationState:
         model_: str | None,
         inference_: dict[str, Any] | None,
     ) -> str:
+        """执行一次写作调用，并把明显无效的占位草稿直接视为失败。"""
         draft = _call_writer_run(
             state["novel_id"],
             chapter_num_,
@@ -82,6 +86,7 @@ def node_writer(state: GenerationState) -> GenerationState:
         ctx_a["ab_goal"] = "加速推进主线，减少铺垫，必须输出明确冲突升级与阶段兑现。"
 
     def _attempt_ab_write():
+        """先尝试 A 版稳健写法，失败后再尝试 B 版更激进写法。"""
         _draft_a = ""
         _err_a: Exception | None = None
         try:
@@ -153,6 +158,7 @@ def node_writer(state: GenerationState) -> GenerationState:
     _trim_limit = int(target_word_count * 1.5)
 
     def _maybe_trim(text: str) -> str:
+        """对明显超长草稿做保守裁剪，避免进入 review 前就超出预期。"""
         if len(text) > target_word_count * 1.5:
             return trim_generated_text(text, _trim_limit)
         return text

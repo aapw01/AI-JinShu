@@ -280,6 +280,7 @@ def _generate_next_volume_outlines_if_needed(
 
 
 def node_confirmation_gate(state: GenerationState) -> GenerationState:
+    """执行 node confirmation gate 相关辅助逻辑。"""
     if not state.get("task_id"):
         return {}
     db = SessionLocal()

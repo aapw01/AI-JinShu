@@ -26,6 +26,7 @@ router = APIRouter()
 
 
 class QuotaStatusResponse(BaseModel):
+    """配额状态响应体模型。"""
     plan_key: str
     max_concurrent_tasks: int
     monthly_chapter_limit: int
@@ -38,6 +39,7 @@ class QuotaStatusResponse(BaseModel):
 
 
 class UsageLedgerItem(BaseModel):
+    """用量LedgerItem。"""
     task_id: str
     source: str
     input_tokens: int
@@ -48,6 +50,7 @@ class UsageLedgerItem(BaseModel):
 
 
 class NotificationItem(BaseModel):
+    """NotificationItem。"""
     id: str
     type: str
     title: str
@@ -56,6 +59,7 @@ class NotificationItem(BaseModel):
 
 
 class HeaderStatsResponse(BaseModel):
+    """HeaderStats响应体模型。"""
     works: int
     week_chapters: int
     quality_score: float
@@ -63,6 +67,7 @@ class HeaderStatsResponse(BaseModel):
 
 
 def _month_range_utc(now: datetime) -> tuple[datetime, datetime]:
+    """执行 month range utc 相关辅助逻辑。"""
     start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
     if now.month == 12:
         end = datetime(now.year + 1, 1, 1, tzinfo=timezone.utc)
@@ -72,6 +77,7 @@ def _month_range_utc(now: datetime) -> tuple[datetime, datetime]:
 
 
 def _normalize_quality_score(raw: float | int | None) -> float:
+    """把 quality score 规范化为统一格式。"""
     if raw is None:
         return 0.0
     try:
@@ -86,6 +92,7 @@ def _normalize_quality_score(raw: float | int | None) -> float:
 
 
 def _scoped_novel_filters(principal: Principal) -> list[object]:
+    """执行 scoped novel filters 相关辅助逻辑。"""
     if principal.role == "admin":
         return []
     return [Novel.user_id == principal.user_uuid]
@@ -96,6 +103,7 @@ def get_quota(
     principal: Principal = Depends(require_auth()),
     db: Session = Depends(get_db),
 ):
+    """返回配额。"""
     user = db.execute(select(User).where(User.uuid == principal.user_uuid)).scalar_one_or_none()
     if not user:
         raise HTTPException(404, "User not found")
@@ -136,6 +144,7 @@ def list_ledger(
     principal: Principal = Depends(require_auth()),
     db: Session = Depends(get_db),
 ):
+    """列出ledger。"""
     user = db.execute(select(User).where(User.uuid == principal.user_uuid)).scalar_one_or_none()
     if not user:
         raise HTTPException(404, "User not found")
@@ -164,6 +173,7 @@ def list_notifications(
     principal: Principal = Depends(require_auth()),
     db: Session = Depends(get_db),
 ):
+    """列出notifications。"""
     user = db.execute(select(User).where(User.uuid == principal.user_uuid)).scalar_one_or_none()
     if not user:
         raise HTTPException(404, "User not found")
@@ -230,6 +240,7 @@ def get_header_stats(
     principal: Principal = Depends(require_auth()),
     db: Session = Depends(get_db),
 ):
+    """返回headerstats。"""
     scope_filters = _scoped_novel_filters(principal)
     now = datetime.now(timezone.utc)
     week_ago = now - timedelta(days=7)

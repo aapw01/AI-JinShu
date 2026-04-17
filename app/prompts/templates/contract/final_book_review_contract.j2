@@ -1,3 +1,7 @@
+{# final_book_review_contract.j2
+   目标：约束整书终审输出为固定 JSON，便于后续 gate 和前端消费。
+   防护：限制 must_fix / should_improve 数量，避免 reviewer 输出失控成大段散文。
+#}
 <final_book_review_contract>
 输出 JSON：
 {

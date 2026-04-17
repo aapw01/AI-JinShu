@@ -10,6 +10,7 @@ LANES = ("vertical_feed", "horizontal_cinematic")
 
 
 class StoryboardCreateRequest(BaseModel):
+    """分镜Create请求体模型。"""
     novel_id: str
     source_novel_version_id: int | None = Field(default=None, ge=1)
     target_episodes: int = Field(default=40, ge=1, le=200)
@@ -26,6 +27,7 @@ class StoryboardCreateRequest(BaseModel):
 
 
 class StoryboardProjectResponse(BaseModel):
+    """分镜Project响应体模型。"""
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -50,30 +52,36 @@ class StoryboardProjectResponse(BaseModel):
 
 
 class StoryboardGenerateResponse(BaseModel):
+    """分镜Generate响应体模型。"""
     task_id: str
     storyboard_project_id: int
     created_version_ids: list[int]
 
 
 class StoryboardGenerateRequest(BaseModel):
+    """分镜Generate请求体模型。"""
     novel_version_id: int = Field(ge=1)
 
 
 class StoryboardStyleRecommendationRequest(BaseModel):
+    """分镜StyleRecommendation请求体模型。"""
     novel_id: str
 
 
 class StoryboardStyleRecommendationResponse(BaseModel):
+    """分镜StyleRecommendation响应体模型。"""
     novel_id: str
     recommendations: list[dict]
 
 
 class StoryboardStylePresetsResponse(BaseModel):
+    """分镜StylePresets响应体模型。"""
     genre_styles: list[dict]
     director_styles: list[dict]
 
 
 class StoryboardTaskStatusResponse(TaskStatusBase):
+    """分镜任务状态响应体模型。"""
     storyboard_project_id: int
     task_id: str | None = None
     current_lane: str | None = None
@@ -88,6 +96,7 @@ class StoryboardTaskStatusResponse(TaskStatusBase):
 
 
 class StoryboardVersionResponse(BaseModel):
+    """分镜版本响应体模型。"""
     id: int
     storyboard_project_id: int
     source_novel_version_id: int | None = None
@@ -103,6 +112,7 @@ class StoryboardVersionResponse(BaseModel):
 
 
 class StoryboardShotResponse(BaseModel):
+    """分镜Shot响应体模型。"""
     id: int
     storyboard_version_id: int
     episode_no: int
@@ -130,6 +140,7 @@ class StoryboardShotResponse(BaseModel):
 
 
 class StoryboardShotUpdateRequest(BaseModel):
+    """分镜ShotUpdate请求体模型。"""
     location: str | None = None
     time_of_day: str | None = None
     shot_size: str | None = None
@@ -150,6 +161,7 @@ class StoryboardShotUpdateRequest(BaseModel):
 
 
 class StoryboardActionResponse(BaseModel):
+    """分镜Action响应体模型。"""
     ok: bool
     storyboard_project_id: int
     task_id: str | None = None
@@ -157,6 +169,7 @@ class StoryboardActionResponse(BaseModel):
 
 
 class StoryboardOptimizeResponse(BaseModel):
+    """分镜Optimize响应体模型。"""
     ok: bool
     storyboard_project_id: int
     version_id: int
@@ -165,6 +178,7 @@ class StoryboardOptimizeResponse(BaseModel):
 
 
 class StoryboardDiffResponse(BaseModel):
+    """分镜Diff响应体模型。"""
     storyboard_project_id: int
     version_id: int
     compare_to: int
@@ -173,6 +187,7 @@ class StoryboardDiffResponse(BaseModel):
 
 
 class StoryboardCharacterPromptResponse(BaseModel):
+    """分镜角色提示词响应体模型。"""
     id: int
     storyboard_project_id: int
     storyboard_version_id: int
@@ -191,6 +206,7 @@ class StoryboardCharacterPromptResponse(BaseModel):
 
 
 class StoryboardCharacterGenerateResponse(BaseModel):
+    """分镜角色Generate响应体模型。"""
     ok: bool
     storyboard_project_id: int
     storyboard_version_id: int
@@ -202,10 +218,12 @@ class StoryboardCharacterGenerateResponse(BaseModel):
 
 
 class StoryboardPreflightRequest(BaseModel):
+    """分镜Preflight请求体模型。"""
     force_refresh_snapshot: bool = False
 
 
 class StoryboardPreflightResponse(BaseModel):
+    """分镜Preflight响应体模型。"""
     ok: bool
     storyboard_project_id: int
     gate_status: str
@@ -218,6 +236,7 @@ class StoryboardPreflightResponse(BaseModel):
 
 
 class StoryboardRunLaneResponse(BaseModel):
+    """分镜RunLane响应体模型。"""
     id: int
     lane: str
     storyboard_version_id: int
@@ -235,6 +254,7 @@ class StoryboardRunLaneResponse(BaseModel):
 
 
 class StoryboardRunResponse(BaseModel):
+    """分镜Run响应体模型。"""
     id: int
     public_id: str
     storyboard_project_id: int
@@ -253,10 +273,12 @@ class StoryboardRunResponse(BaseModel):
 
 
 class StoryboardRunActionRequest(BaseModel):
+    """分镜RunAction请求体模型。"""
     action: str = Field(pattern="^(pause|resume|cancel|retry)$")
 
 
 class StoryboardRunActionResponse(BaseModel):
+    """分镜RunAction响应体模型。"""
     ok: bool
     storyboard_project_id: int
     run_id: str
@@ -266,6 +288,7 @@ class StoryboardRunActionResponse(BaseModel):
 
 
 class StoryboardCharacterCardResponse(BaseModel):
+    """分镜角色Card响应体模型。"""
     id: int
     storyboard_project_id: int
     storyboard_version_id: int
@@ -285,6 +308,7 @@ class StoryboardCharacterCardResponse(BaseModel):
 
 
 class StoryboardCharacterCardUpdateRequest(BaseModel):
+    """分镜角色CardUpdate请求体模型。"""
     skin_tone: str | None = None
     ethnicity: str | None = None
     master_prompt_text: str | None = None
@@ -294,10 +318,12 @@ class StoryboardCharacterCardUpdateRequest(BaseModel):
 
 
 class StoryboardExportCreateRequest(BaseModel):
+    """分镜导出Create请求体模型。"""
     format: str = Field(pattern="^(csv|json|pdf)$")
 
 
 class StoryboardExportCreateResponse(BaseModel):
+    """分镜导出Create响应体模型。"""
     ok: bool
     storyboard_project_id: int
     version_id: int
@@ -306,6 +332,7 @@ class StoryboardExportCreateResponse(BaseModel):
 
 
 class StoryboardExportStatusResponse(BaseModel):
+    """分镜导出状态响应体模型。"""
     id: str
     storyboard_project_id: int
     storyboard_version_id: int

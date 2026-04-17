@@ -1,4 +1,13 @@
-"""Worker lease and heartbeat helpers for in-flight creation tasks."""
+"""统一任务的租约与心跳辅助。
+
+模块职责：
+- 为运行中的长任务刷新 `last_heartbeat_at` 和 `worker_lease_expires_at`。
+- 为同步阻塞较久的 LLM 调用提供后台心跳线程。
+
+面试可讲点：
+- 心跳和租约不是一回事：心跳是“我还活着”，租约是“这条任务何时可被别人接管”。
+- 为什么长时间 LLM 调用期间仍需要后台 heartbeat。
+"""
 from __future__ import annotations
 
 import contextlib
@@ -15,10 +24,12 @@ logger = logging.getLogger(__name__)
 
 
 def _utc_now() -> datetime:
+    """返回当前 UTC 时间，统一任务与数据库时间基准。"""
     return datetime.now(timezone.utc)
 
 
 def acquire_or_refresh_lease(db: Session, *, creation_task_id: int, ttl_seconds: int) -> CreationTask | None:
+    """获取或刷新任务租约，并顺带更新时间戳形式的心跳。"""
     row = db.execute(
         select(CreationTask).where(CreationTask.id == creation_task_id).with_for_update()
     ).scalar_one_or_none()
@@ -33,6 +44,7 @@ def acquire_or_refresh_lease(db: Session, *, creation_task_id: int, ttl_seconds:
 
 
 def release_lease(db: Session, *, creation_task_id: int) -> CreationTask | None:
+    """主动释放租约，表示当前 worker 已不再占有这条任务。"""
     row = db.execute(
         select(CreationTask).where(CreationTask.id == creation_task_id).with_for_update()
     ).scalar_one_or_none()
@@ -46,11 +58,10 @@ def release_lease(db: Session, *, creation_task_id: int) -> CreationTask | None:
 
 @contextlib.contextmanager
 def background_heartbeat(creation_task_id: int | None, *, heartbeat_fn, interval_seconds: int = 30):
-    """Send periodic lease heartbeats in a daemon thread so long-running LLM
-    calls don't cause the recovery tick to reclaim the task.
+    """在后台线程里定时续租，防止长时间 LLM 调用被误回收。
 
-    ``heartbeat_fn`` should accept a single ``creation_task_id`` int and perform
-    the DB heartbeat (open+close its own session).
+    生成章节时，一次模型调用可能阻塞几十秒。如果只在主流程节点结束时心跳，
+    recovery tick 会误以为 worker 已失联，因此这里用守护线程做兜底。
     """
     if creation_task_id is None:
         yield
@@ -59,6 +70,7 @@ def background_heartbeat(creation_task_id: int | None, *, heartbeat_fn, interval
     stop = threading.Event()
 
     def _loop():
+        """按固定间隔刷新心跳，直到外层 context manager 结束。"""
         while not stop.wait(timeout=interval_seconds):
             try:
                 heartbeat_fn(creation_task_id)
@@ -72,4 +84,3 @@ def background_heartbeat(creation_task_id: int | None, *, heartbeat_fn, interval
     finally:
         stop.set()
         t.join(timeout=5)
-

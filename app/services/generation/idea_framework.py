@@ -24,6 +24,7 @@ _PRESETS_DIR = Path(__file__).resolve().parents[3] / "presets"
 
 @lru_cache(maxsize=1)
 def _load_genre_options() -> list[dict[str, str]]:
+    """加载genreoptions。"""
     p = _PRESETS_DIR / "genres.yaml"
     if not p.exists():
         return []
@@ -33,6 +34,7 @@ def _load_genre_options() -> list[dict[str, str]]:
 
 @lru_cache(maxsize=1)
 def _load_style_options() -> list[dict[str, str]]:
+    """加载styleoptions。"""
     p = _PRESETS_DIR / "styles.yaml"
     if not p.exists():
         return []
@@ -41,6 +43,7 @@ def _load_style_options() -> list[dict[str, str]]:
 
 
 class IdeaFrameworkSchema(BaseModel):
+    """创意框架结构化模型。"""
     one_liner: str
     premise: str
     conflict: str
@@ -51,6 +54,7 @@ class IdeaFrameworkSchema(BaseModel):
 
 
 def detect_title_language(title: str) -> str:
+    """执行 detect title language 相关辅助逻辑。"""
     text = (title or "").strip()
     if not text:
         return "zh"
@@ -68,6 +72,7 @@ def detect_title_language(title: str) -> str:
 
 
 def _extract_json(text: str) -> dict[str, Any] | str:
+    """提取JSON。"""
     raw = (text or "").strip()
     if raw.startswith("```"):
         lines = raw.splitlines()
@@ -86,6 +91,7 @@ def _extract_json(text: str) -> dict[str, Any] | str:
 
 
 def _coerce_framework_payload(raw: Any) -> dict[str, Any]:
+    """执行 coerce framework payload 相关辅助逻辑。"""
     if isinstance(raw, IdeaFrameworkSchema):
         return raw.model_dump()
 
@@ -162,6 +168,7 @@ def _litellm_completion(model: str, prompt: str) -> str:
 
 
 def _fallback_framework(title: str) -> dict[str, str]:
+    """执行 fallback framework 相关辅助逻辑。"""
     t = title.strip() or "未命名故事"
     one_liner = f"{t}：主角在巨变中被迫踏上逆转命运的道路，并在代价与选择中完成蜕变。"
     return {
@@ -180,6 +187,7 @@ def generate_idea_framework(
     style: str | None = None,
     strategy: str | None = None,
 ) -> dict[str, str]:
+    """执行 generate idea framework 相关辅助逻辑。"""
     clean_title = (title or "").strip()
     if not clean_title:
         raise ValueError("title is required")

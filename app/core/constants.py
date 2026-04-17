@@ -25,6 +25,7 @@ LLM_OUTPUT_MIN_CHARS = 120
 
 @dataclass(frozen=True, slots=True)
 class ChapterLengthPolicy:
+    """定义章节长度控制所需的阈值和默认区间。"""
     min_words: int = 2000
     target_words: int = 2600
     soft_max_words: int = 3000

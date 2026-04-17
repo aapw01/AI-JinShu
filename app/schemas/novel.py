@@ -5,6 +5,7 @@ from app.schemas.task import TaskErrorDTO, TaskStatusBase
 
 
 class NovelCreate(BaseModel):
+    """小说Create。"""
     title: str
     user_id: str | None = None
     target_language: str = "zh"
@@ -22,6 +23,7 @@ class NovelCreate(BaseModel):
 
 
 class NovelUpdate(BaseModel):
+    """小说Update。"""
     title: str | None = None
     target_language: str | None = None
     native_style_profile: str | None = None
@@ -38,6 +40,7 @@ class NovelUpdate(BaseModel):
 
 
 class NovelResponse(BaseModel):
+    """小说响应体模型。"""
     model_config = ConfigDict(from_attributes=True)
 
     id: str
@@ -51,6 +54,7 @@ class NovelResponse(BaseModel):
 
 
 class IdeaFrameworkRequest(BaseModel):
+    """创意框架请求体模型。"""
     title: str = Field(min_length=1, max_length=120)
     target_language: str | None = None
     genre: str | None = None
@@ -59,6 +63,7 @@ class IdeaFrameworkRequest(BaseModel):
 
 
 class IdeaFrameworkResponse(BaseModel):
+    """创意框架响应体模型。"""
     title: str
     one_liner: str
     premise: str
@@ -71,6 +76,7 @@ class IdeaFrameworkResponse(BaseModel):
 
 
 class ChapterResponse(BaseModel):
+    """章节响应体模型。"""
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -89,6 +95,7 @@ class ChapterResponse(BaseModel):
 
 
 class ChapterProgressResponse(BaseModel):
+    """章节Progress响应体模型。"""
     chapter_num: int
     title: str | None = None
     status: str  # pending | generating | completed | blocked
@@ -97,6 +104,7 @@ class ChapterProgressResponse(BaseModel):
 
 
 class GenerateRequest(BaseModel):
+    """Generate请求体模型。"""
     num_chapters: int = 1
     start_chapter: int = 1
     require_outline_confirmation: bool = False
@@ -104,16 +112,19 @@ class GenerateRequest(BaseModel):
 
 
 class GenerateResponse(BaseModel):
+    """Generate响应体模型。"""
     task_id: str
     novel_id: str
     status: str = "submitted"
 
 
 class RetryGenerationRequest(BaseModel):
+    """Retry生成请求体模型。"""
     task_id: str | None = None
 
 
 class GenerationStatusResponse(TaskStatusBase):
+    """生成状态响应体模型。"""
     task_id: str | None = None
     trace_id: str | None = None
     step: str | None = None
@@ -136,6 +147,7 @@ class GenerationStatusResponse(TaskStatusBase):
 
 
 class NovelVersionResponse(BaseModel):
+    """小说版本响应体模型。"""
     id: int
     novel_id: str
     version_no: int
@@ -147,6 +159,7 @@ class NovelVersionResponse(BaseModel):
 
 
 class RewriteAnnotationInput(BaseModel):
+    """重写Annotation输入。"""
     chapter_num: int
     start_offset: int | None = None
     end_offset: int | None = None
@@ -158,11 +171,13 @@ class RewriteAnnotationInput(BaseModel):
 
 
 class RewriteRequestCreate(BaseModel):
+    """重写RequestCreate。"""
     base_version_id: int
     annotations: list[RewriteAnnotationInput]
 
 
 class RewriteRequestResponse(TaskStatusBase):
+    """重写Request响应体模型。"""
     id: int
     novel_id: str
     base_version_id: int
@@ -176,10 +191,12 @@ class RewriteRequestResponse(TaskStatusBase):
 
 
 class RewriteRetryRequest(BaseModel):
+    """重写Retry请求体模型。"""
     request_id: int
 
 
 class CharacterProfileResponse(BaseModel):
+    """角色画像响应体模型。"""
     id: int
     novel_id: str
     character_key: str

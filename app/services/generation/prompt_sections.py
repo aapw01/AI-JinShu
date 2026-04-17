@@ -11,6 +11,7 @@ def build_memory_governance_sections(
     include_constraint_usage: bool = True,
     include_when_to_ignore: bool = False,
 ) -> str:
+    """构建记忆governancesections。"""
     section_names = [
         "policy/memory_policy_fact_boundary",
         "policy/memory_policy_plan_vs_fact",
@@ -24,6 +25,7 @@ def build_memory_governance_sections(
 
 
 def build_reviewer_role_section(reviewer_scope: str) -> str:
+    """构建reviewerrolesection。"""
     return render_prompt_sections(
         ["role/role_constitution_reviewer"],
         reviewer_scope=reviewer_scope,
@@ -31,18 +33,22 @@ def build_reviewer_role_section(reviewer_scope: str) -> str:
 
 
 def build_finalizer_role_section() -> str:
+    """构建finalizerrolesection。"""
     return render_prompt_sections(["role/role_constitution_finalizer"])
 
 
 def build_progression_role_section() -> str:
+    """构建progressionrolesection。"""
     return render_prompt_sections(["role/role_constitution_progression_extractor"])
 
 
 def build_fact_extractor_role_section() -> str:
+    """构建factextractorrolesection。"""
     return render_prompt_sections(["role/role_constitution_fact_extractor"])
 
 
 def build_writer_role_section() -> str:
+    """构建writerrolesection。"""
     return render_prompt_sections(["role/role_constitution_writer"])
 
 
@@ -54,6 +60,7 @@ def build_style_overlay_sections(
     pacing_mode: str | None = None,
     closure_state: dict[str, Any] | None = None,
 ) -> str:
+    """构建styleoverlaysections。"""
     section_names: list[str] = []
     strategy = str(strategy_key or "").strip().lower()
     if strategy in {"", "web-novel", "web_novel"}:

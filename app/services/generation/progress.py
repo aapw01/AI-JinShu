@@ -1,4 +1,8 @@
-"""Progress reporting and resume-state persistence helpers."""
+"""生成进度与恢复运行时状态辅助。
+
+这层把 LangGraph 节点里的局部进度，转换成前端和任务系统都能理解的
+全局进度语义，同时把恢复所需的运行时上下文落到数据库。
+"""
 from __future__ import annotations
 
 from typing import Any
@@ -11,6 +15,7 @@ from app.services.task_runtime.checkpoint_repo import update_resume_runtime_stat
 
 
 def volume_no_for_chapter(state: GenerationState, chapter: int) -> int:
+    """根据章节号推导所属卷号，缺省时按固定 volume_size 计算。"""
     explicit = int(state.get("volume_no") or 0)
     if explicit > 0:
         return explicit
@@ -21,6 +26,10 @@ def volume_no_for_chapter(state: GenerationState, chapter: int) -> int:
 
 
 def progress(state: GenerationState, step: str, chapter: int, pct: float, msg: str, meta: dict | None = None) -> None:
+    """向外部 progress callback 汇报一次标准化进度事件。
+
+    这里顺带把 token 用量、估算成本、卷号等信息打平，避免各节点重复拼装。
+    """
     cb = state.get("progress_callback")
     payload = dict(meta or {})
     payload.setdefault("task_id", state.get("task_id"))
@@ -73,6 +82,7 @@ def persist_resume_runtime_state(
     retry_resume_chapter: int | None = None,
     segment_plan: dict[str, Any] | None = None,
 ) -> None:
+    """把当前生成恢复所需的 runtime_state 持久化到统一任务里。"""
     creation_task_id = state.get("creation_task_id")
     if not creation_task_id:
         return
@@ -126,6 +136,7 @@ def persist_resume_runtime_state(
 
 
 def chapter_progress(state: GenerationState, phase_ratio: float) -> float:
+    """把“当前章节内部进度”映射为“整本书的全局进度百分比”。"""
     total = max(
         int(state.get("book_effective_end_chapter") or 0) - int(state.get("book_start_chapter") or 1) + 1,
         1,
@@ -139,11 +150,13 @@ def chapter_progress(state: GenerationState, phase_ratio: float) -> float:
 
 
 def is_volume_start(state: GenerationState, chapter: int) -> bool:
+    """判断当前章节是否为本 segment / 分卷的起点。"""
     segment_start = int(state.get("segment_start_chapter") or state.get("start_chapter") or 1)
     return int(chapter) == segment_start
 
 
 def closure_phase_mode(remaining_ratio: float) -> str:
+    """按剩余章节比例给出当前收束阶段：expand / converge / closing / finale。"""
     if remaining_ratio > 0.35:
         return "expand"
     if remaining_ratio > 0.15:

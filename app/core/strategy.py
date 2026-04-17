@@ -64,6 +64,7 @@ DEFAULT_ASSET_PROFILES: dict[str, dict[str, Any]] = {
 
 
 def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """执行 deep merge dicts 相关辅助逻辑。"""
     merged = deepcopy(base)
     for key, value in (override or {}).items():
         if isinstance(value, dict) and isinstance(merged.get(key), dict):
@@ -129,6 +130,7 @@ def get_inference_for_stage(strategy_key: str | None, stage: str) -> dict[str, A
 
 
 def get_asset_profile_config(strategy_key: str | None, asset_key: str) -> dict[str, Any]:
+    """返回asset画像config。"""
     config = get_strategy_config(strategy_key)
     asset_profiles = config.get("asset_profiles") or {}
     raw = asset_profiles.get(asset_key)
@@ -136,6 +138,7 @@ def get_asset_profile_config(strategy_key: str | None, asset_key: str) -> dict[s
 
 
 def _filter_inference_for_provider(inference: dict[str, Any], provider: str | None) -> dict[str, Any]:
+    """执行 filter inference for provider 相关辅助逻辑。"""
     resolved = deepcopy(inference or {})
     provider_key = str(provider or "").strip().lower()
     if provider_key != "gemini":
@@ -150,6 +153,7 @@ def resolve_ai_profile(
     novel_config: dict[str, Any] | None = None,
     runtime_override: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """综合默认策略、资产画像、小说级覆盖和运行时覆盖，返回最终 AI 配置。"""
     asset_profile = get_asset_profile_config(strategy_key, asset_key)
     stage = str(asset_profile.get("stage") or asset_key)
     provider, model = get_model_for_stage(strategy_key, stage)
@@ -200,6 +204,7 @@ def resolve_ai_profile(
 
 
 def get_review_weights(strategy_key: str | None) -> dict[str, float]:
+    """返回审校weights。"""
     config = get_strategy_config(strategy_key)
     weights = config.get("review_weights") or {}
     return {

@@ -1,4 +1,19 @@
-"""FastAPI application entry point."""
+"""FastAPI 应用入口。
+
+模块职责：
+- 创建 API 应用对象，注册所有路由与中间件。
+- 在进程启动时完成日志初始化、生产环境配置校验、LLM 运行时配置透出。
+- 把 trace_id 贯穿到一次 HTTP 请求的整个日志链路里。
+
+系统位置：
+- 上游是 Uvicorn / FastAPI 启动流程。
+- 下游是 `app/api/routes/*` 中的所有业务路由，以及统一日志/追踪设施。
+
+面试可讲点：
+- 为什么把生产环境校验放在 import 阶段尽早失败。
+- 为什么要把 `X-Trace-Id` 从入口一路透传到响应头和日志里。
+- 为什么 CORS、日志、路由注册要在入口层集中管理。
+"""
 import logging
 import time
 
@@ -18,9 +33,14 @@ validate_settings_for_production()
 
 
 def _log_llm_config():
-    """Log the effective LLM configuration at startup for troubleshooting.
+    """在启动时打印最终生效的 LLM 连接配置。
 
-    Only reads env-level settings (no DB) so this never fails at startup.
+    这里刻意只读取环境级配置，不依赖数据库。原因是启动阶段最怕
+    “服务其实起不来，但日志里又看不到模型连接到底指向哪里”。
+    这段日志能让你快速回答：
+    1. 当前主模型走的是哪个 provider / adapter。
+    2. base_url 是显式配置还是自动推断。
+    3. embedding 是否会因为复用主连接而在运行时失败。
     """
     s = get_settings()
     provider = (s.llm_provider or "openai").strip().lower()
@@ -98,6 +118,12 @@ app.include_router(storyboards.router, prefix="/api/storyboards", tags=["storybo
 
 @app.middleware("http")
 async def trace_id_middleware(request: Request, call_next):
+    """为每个 HTTP 请求绑定 trace_id，并统一记录请求起止日志。
+
+    设计目的不是“多打一条日志”，而是给一次请求建立稳定的观察主键。
+    这样后端路由、服务层、Celery worker 只要沿用同一个 trace_id，
+    排查一次失败生成任务时就能把 API 入口和异步执行阶段串起来。
+    """
     trace_id = request.headers.get("X-Trace-Id") or new_trace_id()
     started = time.perf_counter()
     set_trace_id(trace_id)
@@ -156,5 +182,5 @@ async def trace_id_middleware(request: Request, call_next):
 
 @app.get("/health")
 def health():
-    """Health check endpoint."""
+    """返回最小健康检查结果，供负载均衡与部署探针使用。"""
     return {"status": "ok"}

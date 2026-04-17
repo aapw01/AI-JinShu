@@ -39,10 +39,12 @@ _BASE_FIELDS = [
 
 
 def get_log_redaction_level() -> str:
+    """返回日志redactionlevel。"""
     return str(os.getenv("LOG_REDACTION_LEVEL", "minimal")).strip().lower()
 
 
 def _mask_email(value: str) -> str:
+    """对 email 做脱敏处理。"""
     if "@" not in value:
         return value
     local, _, domain = value.partition("@")
@@ -52,6 +54,7 @@ def _mask_email(value: str) -> str:
 
 
 def _redact_value(key: str, value: Any, level: str) -> Any:
+    """执行 redact value 相关辅助逻辑。"""
     kl = key.lower()
     if kl in _SENSITIVE_KEYS or any(k in kl for k in _SENSITIVE_KEYS):
         return "***"
@@ -70,11 +73,13 @@ def _redact_value(key: str, value: Any, level: str) -> Any:
 
 
 def redact_fields(fields: dict[str, Any], level: str | None = None) -> dict[str, Any]:
+    """执行 redact fields 相关辅助逻辑。"""
     mode = level or get_log_redaction_level()
     return {k: _redact_value(k, v, mode) for k, v in fields.items()}
 
 
 def set_log_context(**kwargs: Any) -> None:
+    """设置日志上下文。"""
     current = dict(_context_var.get() or {})
     for k, v in kwargs.items():
         if v is None:
@@ -85,11 +90,13 @@ def set_log_context(**kwargs: Any) -> None:
 
 
 def get_log_context() -> dict[str, Any]:
+    """返回日志上下文。"""
     return dict(_context_var.get() or {})
 
 
 @contextmanager
 def bind_log_context(**kwargs: Any) -> Iterator[None]:
+    """在上下文作用域内临时绑定一组日志字段。"""
     current = dict(_context_var.get() or {})
     merged = dict(current)
     for k, v in kwargs.items():
@@ -105,7 +112,9 @@ def bind_log_context(**kwargs: Any) -> Iterator[None]:
 
 
 class ContextFilter(logging.Filter):
+    """在日志记录中注入 trace_id 等上下文字段。"""
     def filter(self, record: logging.LogRecord) -> bool:  # pragma: no cover - trivial
+        """为每条日志记录补充上下文字段。"""
         ctx = get_log_context()
         trace_id = ctx.get("trace_id") or get_trace_id()
         setattr(record, "trace_id", trace_id)
@@ -118,7 +127,9 @@ class ContextFilter(logging.Filter):
 
 
 class JsonFormatter(logging.Formatter):
+    """把日志事件格式化为便于检索和分析的 JSON 结构。"""
     def format(self, record: logging.LogRecord) -> str:
+        """把日志记录序列化为最终输出文本。"""
         event_data = getattr(record, "event_data", {}) or {}
         if not isinstance(event_data, dict):
             event_data = {"detail": str(event_data)}
@@ -139,7 +150,9 @@ class JsonFormatter(logging.Formatter):
 
 
 class TextFormatter(logging.Formatter):
+    """把日志事件格式化为便于本地调试的文本结构。"""
     def format(self, record: logging.LogRecord) -> str:  # pragma: no cover - fallback only
+        """把日志记录序列化为最终输出文本。"""
         event_data = getattr(record, "event_data", {}) or {}
         if not isinstance(event_data, dict):
             event_data = {"detail": str(event_data)}
@@ -150,6 +163,7 @@ class TextFormatter(logging.Formatter):
 
 
 def setup_logging() -> None:
+    """初始化全局日志处理器、格式器和输出目标。"""
     level_name = str(os.getenv("LOG_LEVEL", "INFO")).upper()
     fmt = str(os.getenv("LOG_FORMAT", "json")).strip().lower()
     level = getattr(logging, level_name, logging.INFO)
@@ -198,8 +212,10 @@ def log_event(
     message: str | None = None,
     **fields: Any,
 ) -> None:
+    """按统一结构写出一条带事件名和字段的日志。"""
     logger.log(level, message or event, extra={"event": event, "event_data": fields})
 
 
 def now_ms() -> int:
+    """返回当前 Unix 毫秒时间戳。"""
     return int(time.time() * 1000)

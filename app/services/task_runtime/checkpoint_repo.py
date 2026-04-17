@@ -1,4 +1,19 @@
-"""Checkpoint persistence helpers shared by async task handlers."""
+"""统一任务运行时的 checkpoint / resume cursor 持久化辅助。
+
+模块职责：
+- 记录章节等执行单元的完成边界。
+- 维护 `resume_cursor_json`，告诉恢复逻辑“下次从哪继续”。
+- 持久化恢复所需的轻量 runtime_state。
+
+系统位置：
+- 上游是 generation / rewrite / storyboard 等长任务执行器。
+- 下游是恢复逻辑 `resume_from_last_completed()` 与任务重派流程。
+
+面试可讲点：
+- 为什么 checkpoint 只存“完成边界”，而不是把 worker 内存直接持久化。
+- 为什么 `runtime_state` 和 `last_completed/next` 要分开存。
+- 为什么要在并发场景下保证 `mark_unit_completed()` 幂等。
+"""
 from __future__ import annotations
 
 from collections.abc import Iterable
@@ -13,15 +28,22 @@ from app.models.creation_task import CreationTask, CreationTaskCheckpoint
 
 
 def _utc_now() -> datetime:
+    """返回当前 UTC 时间，统一任务与数据库时间基准。"""
     return datetime.now(timezone.utc)
 
 
 def _resume_cursor_dict(row: CreationTask) -> dict[str, Any]:
+    """安全读取任务上的恢复游标字典，缺失时返回空 dict。"""
     data = row.resume_cursor_json
     return dict(data) if isinstance(data, dict) else {}
 
 
 def _merge_mapping(base: dict[str, Any], updates: dict[str, Any]) -> dict[str, Any]:
+    """递归合并运行时状态片段。
+
+    恢复状态会由多个节点逐步补齐，直接整块覆盖容易丢字段，
+    因此这里采用“仅覆盖显式更新字段”的 merge 语义。
+    """
     merged = dict(base)
     for key, value in updates.items():
         if value is None:
@@ -44,6 +66,7 @@ def mark_unit_completed(
     partition: str | None = None,
     payload: dict[str, Any] | None = None,
 ) -> CreationTaskCheckpoint:
+    """把指定执行单元标记为已完成，并在并发场景下保持幂等。"""
     stmt = select(CreationTaskCheckpoint).where(
         CreationTaskCheckpoint.creation_task_id == creation_task_id,
         CreationTaskCheckpoint.unit_type == unit_type,
@@ -90,6 +113,7 @@ def get_last_completed_unit(
     unit_from: int | None = None,
     unit_to: int | None = None,
 ) -> int | None:
+    """返回指定范围内最后一个已完成的执行单元编号。"""
     stmt = select(func.max(CreationTaskCheckpoint.unit_no)).where(
         CreationTaskCheckpoint.creation_task_id == creation_task_id,
         CreationTaskCheckpoint.unit_type == unit_type,
@@ -116,6 +140,7 @@ def get_completed_units(
     unit_type: str = "chapter",
     partition: str | None = None,
 ) -> set[int]:
+    """返回指定任务已完成的所有执行单元编号。"""
     stmt = select(CreationTaskCheckpoint.unit_no).where(
         CreationTaskCheckpoint.creation_task_id == creation_task_id,
         CreationTaskCheckpoint.unit_type == unit_type,
@@ -137,6 +162,11 @@ def update_resume_cursor(
     unit_type: str = "chapter",
     partition: str | None = None,
 ) -> None:
+    """更新任务恢复游标，记录 `last_completed` 与 `next`。
+
+    这是最轻量、最关键的恢复锚点。面试里可以直接说：
+    “系统不恢复 worker 内存现场，只恢复到最近稳定完成的章节边界。”
+    """
     row = db.execute(select(CreationTask).where(CreationTask.id == creation_task_id)).scalar_one_or_none()
     if not row:
         return
@@ -156,6 +186,7 @@ def get_resume_runtime_state(
     *,
     creation_task_id: int,
 ) -> dict[str, Any]:
+    """读取任务恢复所需的运行时状态片段。"""
     row = db.execute(select(CreationTask).where(CreationTask.id == creation_task_id)).scalar_one_or_none()
     if not row:
         return {}
@@ -170,6 +201,12 @@ def update_resume_runtime_state(
     creation_task_id: int,
     runtime_state: dict[str, Any] | None,
 ) -> None:
+    """合并写入恢复所需的运行时状态片段。
+
+    这里存的是当前分卷、segment 边界、特殊模式等“业务上下文”，
+    不等同于 checkpoint。checkpoint 负责“做到哪”，runtime_state 负责
+    “以什么模式继续”。
+    """
     row = db.execute(select(CreationTask).where(CreationTask.id == creation_task_id)).scalar_one_or_none()
     if not row:
         return
@@ -190,6 +227,7 @@ def infer_next_unit(
     unit_to: int,
     completed_units: Iterable[int],
 ) -> int:
+    """根据已完成集合推断下一个尚未执行的单元编号。"""
     done = {int(x) for x in completed_units}
     start = int(unit_from)
     end = int(unit_to)

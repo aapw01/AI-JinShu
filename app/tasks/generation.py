@@ -1,6 +1,18 @@
-"""Generation Celery tasks.
+"""生成任务的 Celery 执行入口。
 
-Book-level orchestration dispatches volume-level tasks for long-form runs.
+模块职责：
+- 承接 `CreationTask` 调度后的真正执行逻辑。
+- 负责长篇生成的章节级 checkpoint、恢复方案计算、进度同步、最终收敛。
+- 在 book orchestrator / volume segment / final review 之间做桥接。
+
+系统位置：
+- 上游是 `scheduler_service` 发布的 Celery 任务。
+- 下游是 LangGraph 生成流程、Redis 进度缓存、数据库任务表。
+
+面试可讲点：
+- 为什么业务恢复不是恢复 Celery 进程内存，而是重建执行上下文。
+- 为什么章节完成后要立刻落 checkpoint，再推进 `resume_cursor`。
+- 为什么恢复前要回滚 progression，避免半章状态污染后续续写。
 """
 from __future__ import annotations
 
@@ -50,6 +62,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class GenerationResumePlan:
+    """描述生成任务恢复时需要的章节边界、分卷信息与恢复模式。"""
     next_chapter: int
     book_start_chapter: int
     book_target_total_chapters: int
@@ -65,10 +78,12 @@ _KEEP_RUNTIME_VALUE = object()
 
 
 def _task_book_start(payload_data: dict[str, Any], *, fallback_start: int) -> int:
+    """从任务载荷中解析整本小说的起始章节。"""
     return int(payload_data.get("book_start_chapter") or payload_data.get("start_chapter") or fallback_start or 1)
 
 
 def _task_book_total(payload_data: dict[str, Any], *, fallback_total: int) -> int:
+    """从任务载荷中解析整本小说的目标总章节数。"""
     return int(
         payload_data.get("book_target_total_chapters")
         or payload_data.get("original_total_chapters")
@@ -79,12 +94,14 @@ def _task_book_total(payload_data: dict[str, Any], *, fallback_total: int) -> in
 
 
 def _task_book_end(payload_data: dict[str, Any], *, fallback_start: int, fallback_total: int) -> int:
+    """根据起始章节和目标总章数推导整本小说的结束章节。"""
     book_start = _task_book_start(payload_data, fallback_start=fallback_start)
     book_total = max(0, _task_book_total(payload_data, fallback_total=fallback_total))
     return book_start + max(book_total - 1, 0)
 
 
 def _volume_no_for_next_chapter(*, next_chapter: int, book_start_chapter: int, volume_size: int) -> int:
+    """根据下一章编号推导它所在的分卷序号。"""
     size = max(1, int(volume_size or 1))
     start = max(1, int(book_start_chapter or 1))
     chapter = max(start, int(next_chapter or start))
@@ -99,6 +116,7 @@ def _resolve_segment_window(
     book_effective_end_chapter: int,
     volume_size: int,
 ) -> tuple[int, int]:
+    """计算当前恢复点对应的章节分段边界。"""
     next_ch = int(next_chapter)
     book_end = int(book_effective_end_chapter)
     if (
@@ -113,6 +131,7 @@ def _resolve_segment_window(
 
 
 def _error_meta_from_exc(exc: Exception) -> tuple[str, str, bool]:
+    """把异常归一化为前端可见的错误码、类别和重试语义。"""
     if isinstance(exc, OutputContractError):
         if exc.code == "MODEL_OUTPUT_POLICY_VIOLATION":
             return exc.code, "policy", bool(exc.retryable)
@@ -123,6 +142,7 @@ def _error_meta_from_exc(exc: Exception) -> tuple[str, str, bool]:
 
 
 def _with_subtask(payload: dict[str, Any]) -> dict[str, Any]:
+    """把阶段进度补齐为统一的子任务展示结构。"""
     step = str(payload.get("step") or payload.get("current_phase") or "").strip()
     if not step:
         return payload
@@ -166,6 +186,11 @@ def _set_status(
     worker_task_id: str | None = None,
     clear_worker_ids: list[str] | None = None,
 ) -> None:
+    """把统一的运行状态快照写到 Redis，并镜像到小说维度缓存。
+
+    前端关注的是“这本书/这个任务现在走到哪一步”，而不是 Celery 的原始状态。
+    因此这里把运行阶段、子任务标签、进度、错误码统一整理后再写缓存。
+    """
     write_generation_cache(
         task_public_id=task_public_id,
         novel_id=novel_id,
@@ -182,6 +207,7 @@ def _persist_generation_task(
     task_id: str,
     data: dict[str, Any],
 ) -> None:
+    """把生成状态快照同步回数据库中的任务记录。"""
     from app.models.novel import GenerationTask
 
     gt_stmt = select(GenerationTask).where(GenerationTask.task_id == task_id)
@@ -232,6 +258,7 @@ def _get_task_state(task_id: str) -> tuple[str | None, str | None]:
 
 
 def _get_creation_task_state(task_db_id: int) -> str | None:
+    """读取统一任务表中的当前任务状态。"""
     db = SessionLocal()
     try:
         row = get_creation_task_by_id(db, task_id=task_db_id)
@@ -246,6 +273,7 @@ def _rollback_progression_before_resume(
     novel_version_id: int,
     from_chapter: int,
 ) -> None:
+    """在恢复生成前回滚恢复点之后的推进记忆，避免脏状态污染续写。"""
     rollback_progression_range(
         novel_id=novel_id,
         novel_version_id=novel_version_id,
@@ -254,6 +282,7 @@ def _rollback_progression_before_resume(
 
 
 def _activate_creation_task(task_db_id: int, *, current_celery_id: str) -> None:
+    """把统一任务切到 running，并绑定当前 Celery worker。"""
     db = SessionLocal()
     try:
         row = get_creation_task_by_id(db, task_id=task_db_id)
@@ -298,6 +327,7 @@ def _load_prior_tokens(creation_task_id: int | None) -> tuple[int, int]:
 
 
 def _update_creation_progress(task_db_id: int, *, progress: float, phase: str, message: str) -> None:
+    """把当前章节进度和 Token 用量同步到统一任务表。"""
     db = SessionLocal()
     try:
         usage = snapshot_usage()
@@ -323,6 +353,7 @@ def _resolve_completed_usage_totals(
     fallback_current: int,
     fallback_total: int,
 ) -> tuple[int, int, int]:
+    """基于恢复游标修正完成章节数与累计用量统计。"""
     current = max(0, int(fallback_current or 0))
     total = max(0, int(fallback_total or 0))
     completed = max(0, current - int(start_chapter or 1) + 1) if current >= int(start_chapter or 1) else 0
@@ -357,6 +388,7 @@ def _persist_task_runtime_state(
     retry_resume_chapter: int | None = None,
     segment_plan: dict[str, Any] | None | object = _KEEP_RUNTIME_VALUE,
 ) -> None:
+    """把恢复所需的运行时状态写回 resume_cursor。"""
     db = SessionLocal()
     try:
         runtime_state = {
@@ -392,6 +424,7 @@ def _persist_task_runtime_state(
 
 
 def _heartbeat_creation(task_db_id: int) -> None:
+    """刷新统一任务的心跳和租约过期时间。"""
     db = SessionLocal()
     try:
         heartbeat_creation_task(db, task_id=task_db_id)
@@ -401,6 +434,7 @@ def _heartbeat_creation(task_db_id: int) -> None:
 
 
 def _mark_creation_chapter_completed(task_db_id: int, *, chapter_num: int) -> None:
+    """在章节稳定落盘后写入章节级 checkpoint，并推进恢复游标。"""
     db = SessionLocal()
     try:
         mark_unit_completed(
@@ -431,6 +465,14 @@ def _resolve_generation_resume(
     num_chapters: int,
     volume_size: int,
 ) -> GenerationResumePlan:
+    """根据 checkpoint、cursor 和运行时状态计算恢复方案。
+
+    恢复逻辑会优先信任业务侧已经落库的状态，而不是假设上一次 worker
+    的内存还能拿回来。换句话说，恢复依赖的是：
+    - 最后稳定完成到哪一章。
+    - 下一章应该从哪开始。
+    - 当前属于哪个 segment / volume，以及是否在特殊模式中。
+    """
     db = SessionLocal()
     try:
         row = db.execute(select(CreationTask).where(CreationTask.id == task_db_id)).scalar_one_or_none()
@@ -594,6 +636,7 @@ def _finalize_creation(
     error_detail: str | None = None,
     result_json: dict[str, Any] | None = None,
 ) -> None:
+    """把统一任务收敛到最终状态，并在需要时触发后续调度。"""
     db = SessionLocal()
     user_uuid: str | None = None
     try:
@@ -632,7 +675,13 @@ def _run_volume_generation(
     creation_public_id: str | None = None,
     resume_mode: str = "segment_running",
 ) -> dict[str, Any]:
-    """Run one volume chunk under book orchestrator (shared implementation)."""
+    """执行一个可恢复的章节分段。
+
+    这里的 `progress_cb` 是生成主链路和统一任务系统的连接点：
+    - 写 Redis 快照给前端看。
+    - 刷新 heartbeat，防止 recovery tick 误回收。
+    - 每完成一章就落 checkpoint，形成稳定恢复边界。
+    """
     from app.core.config import get_settings
 
     settings = get_settings()
@@ -658,6 +707,7 @@ def _run_volume_generation(
         pass
 
     def progress_cb(step: str, chapter: int, pct: float, msg: str = "", meta: dict | None = None):
+        """接收生成主链路进度事件，并同步更新缓存、心跳、checkpoint 和任务表。"""
         task_status, run_state = _get_task_state(parent_task_id)
         if creation_task_id is not None:
             try:

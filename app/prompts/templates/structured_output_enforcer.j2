@@ -1,3 +1,7 @@
+{# structured_output_enforcer.j2
+   目标：作为通用附加约束，提醒模型只返回 JSON，不要混入 Markdown 或解释文本。
+   注意：这是软提示，真正的强约束在 llm_contract.py 的 schema 校验与重试。
+#}
 {{ base_prompt }}
 
 {{ format_instructions }}

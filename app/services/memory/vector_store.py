@@ -109,6 +109,7 @@ class VectorStoreWrapper:
 
 
 def _tokenize(text: str) -> set[str]:
+    """把文本切成用于词法匹配的 token 集合。"""
     lowered = text.lower()
     words = set(re.findall(r"[a-z0-9_]{2,}", lowered))
     cjk = {ch for ch in lowered if "\u4e00" <= ch <= "\u9fff"}
@@ -116,11 +117,13 @@ def _tokenize(text: str) -> set[str]:
 
 
 def _lexical_rank(rows: list[KnowledgeChunk], query_text: str, limit: int) -> list[KnowledgeChunk]:
+    """在缺少向量时用词法重叠对知识块做兜底排序。"""
     q_tokens = _tokenize(query_text)
     if not q_tokens:
         return rows[:limit]
 
     def score(item: KnowledgeChunk) -> tuple[int, int]:
+        """用 token 重叠数和内容长度做一个轻量的词法排序分值。"""
         text_tokens = _tokenize(item.content or "")
         overlap = len(q_tokens & text_tokens)
         return overlap, len(item.content or "")

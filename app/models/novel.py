@@ -13,10 +13,12 @@ EMBEDDING_COLUMN_TYPE = Vector(1536) if "postgres" in _db_url.lower() else Text
 
 
 def _uuid_default():
+    """执行 uuid default 相关辅助逻辑。"""
     return str(uuid.uuid4())
 
 
 def _utc_now():
+    """返回当前 UTC 时间，统一任务与数据库时间基准。"""
     return datetime.now(timezone.utc)
 
 
@@ -594,6 +596,7 @@ class RewriteAnnotation(Base):
 
 
 class StoryRelation(Base):
+    """Story关系。"""
     __tablename__ = "story_relations"
 
     id = Column(Integer, primary_key=True, autoincrement=True)

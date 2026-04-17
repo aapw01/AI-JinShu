@@ -28,6 +28,7 @@ class OutputContractError(RuntimeError):
     retryable: bool = True
 
     def __post_init__(self) -> None:
+        """执行 post init   相关辅助逻辑。"""
         parts = [f"code={self.code}", f"stage={self.stage}"]
         if self.chapter_num is not None:
             parts.append(f"chapter={self.chapter_num}")

@@ -34,6 +34,7 @@ class StoryBibleStore:
         novel_version_id: int | None = None,
         db: Optional[Session] = None,
     ) -> StoryEntity:
+        """插入或更新entity。"""
         should_close = db is None
         db = db or SessionLocal()
         try:
@@ -95,6 +96,7 @@ class StoryBibleStore:
         novel_version_id: int | None = None,
         db: Optional[Session] = None,
     ) -> StoryFact:
+        """执行 add fact 相关辅助逻辑。"""
         should_close = db is None
         db = db or SessionLocal()
         try:
@@ -137,6 +139,7 @@ class StoryBibleStore:
         novel_version_id: int | None = None,
         db: Optional[Session] = None,
     ) -> StoryEvent:
+        """执行 add event 相关辅助逻辑。"""
         should_close = db is None
         db = db or SessionLocal()
         try:
@@ -179,6 +182,7 @@ class StoryBibleStore:
         novel_version_id: int | None = None,
         db: Optional[Session] = None,
     ) -> StoryForeshadow:
+        """插入或更新foreshadow。"""
         should_close = db is None
         db = db or SessionLocal()
         try:
@@ -280,6 +284,7 @@ class StoryBibleStore:
         novel_version_id: int | None = None,
         db: Optional[Session] = None,
     ) -> StorySnapshot:
+        """保存snapshot。"""
         should_close = db is None
         db = db or SessionLocal()
         try:
@@ -460,6 +465,7 @@ class StoryBibleStore:
         novel_version_id: int | None = None,
         db: Optional[Session] = None,
     ) -> StoryRelation:
+        """插入或更新关系。"""
         should_close = db is None
         db = db or SessionLocal()
         try:
@@ -524,6 +530,7 @@ class StoryBibleStore:
         novel_version_id: int | None = None,
         db: Optional[Session] = None,
     ) -> list[StoryRelation]:
+        """列出关系。"""
         should_close = db is None
         db = db or SessionLocal()
         try:
@@ -549,6 +556,7 @@ class StoryBibleStore:
         chapter_num: int,
         db: Optional[Session] = None,
     ) -> list[str]:
+        """执行 suggest foreshadows 相关辅助逻辑。"""
         import re
         import logging as _logging
         _log = _logging.getLogger("app.services.memory")
@@ -645,6 +653,7 @@ class CheckpointStore:
         state_json: dict,
         db: Optional[Session] = None,
     ) -> GenerationCheckpoint:
+        """保存检查点。"""
         should_close = db is None
         db = db or SessionLocal()
         try:
@@ -685,6 +694,7 @@ class QualityReportStore:
         novel_version_id: int | None = None,
         db: Optional[Session] = None,
     ) -> QualityReport:
+        """执行 add report 相关辅助逻辑。"""
         should_close = db is None
         db = db or SessionLocal()
         try:

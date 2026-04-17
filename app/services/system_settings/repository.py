@@ -33,10 +33,12 @@ class SettingsValidationError(ValueError):
 
 
 def _normalize_key(value: str) -> str:
+    """把设置键规范化为统一的小写形式。"""
     return (value or "").strip().lower()
 
 
 def _to_bool(value: Any) -> bool:
+    """执行 to bool 相关辅助逻辑。"""
     if isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
@@ -47,11 +49,13 @@ def _to_bool(value: Any) -> bool:
 
 
 def _clean_optional_text(value: Any) -> str | None:
+    """把可选文本字段清洗为字符串或 None。"""
     text = str(value or "").strip()
     return text or None
 
 
 def _validate_protocol_override(value: Any, *, allow_none: bool = True) -> str | None:
+    """校验protocoloverride。"""
     if value in (None, ""):
         return None if allow_none else "openai_compatible"
     normalized = _normalize_key(str(value))
@@ -61,6 +65,7 @@ def _validate_protocol_override(value: Any, *, allow_none: bool = True) -> str |
 
 
 def _coerce_runtime_value(key: str, value: Any) -> Any:
+    """按设置规则把运行时值转换并校验为合法类型。"""
     rule = RUNTIME_SETTING_RULES.get(key)
     if not rule:
         raise SettingsValidationError(f"unsupported runtime setting key: {key}")
@@ -99,6 +104,7 @@ def _coerce_runtime_value(key: str, value: Any) -> Any:
 
 
 def _load_setting_rows(db: Session, keys: list[str]) -> dict[str, SystemRuntimeSetting]:
+    """加载设置rows。"""
     rows = (
         db.execute(select(SystemRuntimeSetting).where(SystemRuntimeSetting.setting_key.in_(keys)))
         .scalars()
@@ -108,6 +114,7 @@ def _load_setting_rows(db: Session, keys: list[str]) -> dict[str, SystemRuntimeS
 
 
 def load_model_settings_db(db: Session) -> dict[str, dict[str, Any]]:
+    """加载模型设置数据库。"""
     rows = _load_setting_rows(db, [MODEL_SETTINGS_PRIMARY_KEY, MODEL_SETTINGS_EMBEDDING_KEY])
     primary = rows.get(MODEL_SETTINGS_PRIMARY_KEY)
     embedding = rows.get(MODEL_SETTINGS_EMBEDDING_KEY)
@@ -118,6 +125,7 @@ def load_model_settings_db(db: Session) -> dict[str, dict[str, Any]]:
 
 
 def _normalize_primary_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """校验并规范化主模型配置载荷。"""
     provider = _normalize_key(str(payload.get("provider") or ""))
     if provider not in MODEL_PROVIDERS:
         raise SettingsValidationError("primary_chat.provider must be one of: openai, anthropic, gemini")
@@ -135,6 +143,7 @@ def _normalize_primary_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _normalize_embedding_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """校验并规范化 embedding 配置载荷。"""
     enabled = _to_bool(payload.get("enabled", False))
     reuse_primary_connection = _to_bool(payload.get("reuse_primary_connection", True))
     model = _clean_optional_text(payload.get("model"))
@@ -158,6 +167,7 @@ def _normalize_embedding_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _merge_secret(existing: dict[str, Any], api_key_input: Any) -> tuple[str | None, bool]:
+    """合并已有密钥密文和新的明文输入。"""
     previous_ciphertext = _clean_optional_text(existing.get("api_key_ciphertext"))
     previous_is_encrypted = _to_bool(existing.get("api_key_is_encrypted"))
     if isinstance(api_key_input, str):
@@ -173,6 +183,7 @@ def replace_model_settings(
     primary_chat: dict[str, Any],
     embedding: dict[str, Any],
 ) -> None:
+    """整体替换后台维护的模型连接配置。"""
     existing = load_model_settings_db(db)
 
     normalized_primary = _normalize_primary_payload(dict(primary_chat or {}))
@@ -205,11 +216,13 @@ def replace_model_settings(
 
 
 def list_runtime_overrides(db: Session) -> dict[str, Any]:
+    """列出运行时overrides。"""
     rows = db.execute(select(SystemRuntimeSetting)).scalars().all()
     return {row.setting_key: row.setting_value_json for row in rows}
 
 
 def set_runtime_overrides(db: Session, overrides: dict[str, Any]) -> None:
+    """设置运行时overrides。"""
     updates = dict(overrides or {})
     unknown = [k for k in updates.keys() if k not in RUNTIME_SETTING_KEYS]
     if unknown:

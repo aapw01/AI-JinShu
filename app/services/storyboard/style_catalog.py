@@ -10,6 +10,7 @@ from app.prompts import render_prompt
 
 @dataclass(slots=True)
 class GenreStyle:
+    """GenreStyle。"""
     key: str
     label: str
     description: str
@@ -18,6 +19,7 @@ class GenreStyle:
 
 @dataclass(slots=True)
 class DirectorStyle:
+    """DirectorStyle。"""
     key: str
     label: str
     description: str
@@ -44,6 +46,7 @@ DIRECTOR_STYLES: list[DirectorStyle] = [
 
 
 def list_style_presets() -> dict[str, list[dict[str, Any]]]:
+    """列出stylepresets。"""
     return {
         "genre_styles": [
             {"key": g.key, "label": g.label, "description": g.description, "tags": g.tags} for g in GENRE_STYLES
@@ -61,6 +64,7 @@ def list_style_presets() -> dict[str, list[dict[str, Any]]]:
 
 
 def _match_score(text: str, tags: list[str]) -> float:
+    """执行 match score 相关辅助逻辑。"""
     if not text:
         return 0.0
     score = 0.0
@@ -71,6 +75,7 @@ def _match_score(text: str, tags: list[str]) -> float:
 
 
 def recommend_styles(novel: Novel, chapter_text: str = "") -> list[dict[str, Any]]:
+    """执行 recommend styles 相关辅助逻辑。"""
     corpus = " ".join(
         [
             str(novel.title or ""),
@@ -127,12 +132,14 @@ def recommend_styles(novel: Novel, chapter_text: str = "") -> list[dict[str, Any
 
 
 def find_genre_style(key: str | None) -> GenreStyle | None:
+    """执行 find genre style 相关辅助逻辑。"""
     if not key:
         return None
     return next((g for g in GENRE_STYLES if g.key == key), None)
 
 
 def find_director_style(key: str | None) -> DirectorStyle | None:
+    """执行 find director style 相关辅助逻辑。"""
     if not key:
         return None
     return next((d for d in DIRECTOR_STYLES if d.key == key), None)

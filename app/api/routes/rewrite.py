@@ -48,11 +48,13 @@ logger = logging.getLogger(__name__)
 
 
 class ActivateVersionResponse(BaseModel):
+    """Activate版本响应体模型。"""
     ok: bool
     active_version_id: int
 
 
 def _to_version_response(v: NovelVersion, novel_public_id: str) -> NovelVersionResponse:
+    """执行 to version response 相关辅助逻辑。"""
     return NovelVersionResponse(
         id=v.id,
         novel_id=novel_public_id,
@@ -73,6 +75,7 @@ def _to_rewrite_response(
     error_category: str | None = None,
     retryable: bool | None = None,
 ) -> RewriteRequestResponse:
+    """执行 to rewrite response 相关辅助逻辑。"""
     eta_seconds: int | None = None
     eta_label: str | None = None
     if r.status in {"running", "submitted"}:
@@ -113,6 +116,7 @@ def _to_rewrite_response(
 
 
 def _format_eta(seconds: int) -> str:
+    """把剩余秒数转换成重写任务页面展示用的 ETA 文案。"""
     sec = max(0, int(seconds))
     if sec < 60:
         return f"约{sec}秒"
@@ -134,6 +138,7 @@ def get_version_diff(
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.NOVEL_READ, resource_loader=load_novel_resource)),
 ):
+    """返回版本diff。"""
     novel = resolve_novel(db, novel_id)
     if not novel:
         raise http_error(404, "novel_not_found", "Novel not found")
@@ -199,6 +204,7 @@ def get_versions(
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.NOVEL_READ, resource_loader=load_novel_resource)),
 ):
+    """返回版本。"""
     novel = resolve_novel(db, novel_id)
     if not novel:
         raise http_error(404, "novel_not_found", "Novel not found")
@@ -214,6 +220,7 @@ def activate_novel_version(
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.NOVEL_REWRITE, resource_loader=load_novel_resource)),
 ):
+    """执行 activate novel version 相关辅助逻辑。"""
     novel = resolve_novel(db, novel_id)
     if not novel:
         raise http_error(404, "novel_not_found", "Novel not found")
@@ -232,6 +239,7 @@ def create_rewrite_request(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission(Permission.NOVEL_REWRITE, resource_loader=load_novel_resource)),
 ):
+    """创建重写request。"""
     novel = resolve_novel(db, novel_id)
     if not novel:
         raise http_error(404, "novel_not_found", "Novel not found")
@@ -333,6 +341,7 @@ def get_rewrite_status(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission(Permission.NOVEL_READ, resource_loader=load_novel_resource)),
 ):
+    """返回重写状态。"""
     novel = resolve_novel(db, novel_id)
     if not novel:
         raise http_error(404, "novel_not_found", "Novel not found")
@@ -370,6 +379,7 @@ def pause_rewrite_request(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission(Permission.NOVEL_REWRITE, resource_loader=load_novel_resource)),
 ):
+    """暂停重写request。"""
     novel = resolve_novel(db, novel_id)
     if not novel:
         raise http_error(404, "novel_not_found", "Novel not found")
@@ -400,6 +410,7 @@ def cancel_rewrite_request(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission(Permission.NOVEL_REWRITE, resource_loader=load_novel_resource)),
 ):
+    """执行 cancel rewrite request 相关辅助逻辑。"""
     novel = resolve_novel(db, novel_id)
     if not novel:
         raise http_error(404, "novel_not_found", "Novel not found")
@@ -428,6 +439,7 @@ def retry_rewrite_request(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission(Permission.NOVEL_REWRITE, resource_loader=load_novel_resource)),
 ):
+    """重试重写request。"""
     novel = resolve_novel(db, novel_id)
     if not novel:
         raise http_error(404, "novel_not_found", "Novel not found")

@@ -63,6 +63,7 @@ def _get_redis():
 
 
 def _redis_get_json(key: str) -> dict | None:
+    """执行 redis get json 相关辅助逻辑。"""
     payload = read_generation_cache(key)
     if payload is not None:
         return payload
@@ -74,6 +75,7 @@ def _redis_get_json(key: str) -> dict | None:
 
 
 def _redis_set_json(key: str, payload: dict, ttl_seconds: int = 86400) -> None:
+    """执行 redis set json 相关辅助逻辑。"""
     try:
         _get_redis().setex(key, ttl_seconds, json.dumps(payload, ensure_ascii=False))
     except redis.RedisError as exc:
@@ -81,10 +83,12 @@ def _redis_set_json(key: str, payload: dict, ttl_seconds: int = 86400) -> None:
 
 
 def _redis_key(task_id: str) -> str:
+    """构造当前业务使用的 Redis 键。"""
     return snapshot_task_key(task_id)
 
 
 def _novel_key(novel_id: str) -> str:
+    """执行 novel key 相关辅助逻辑。"""
     return snapshot_novel_key(novel_id)
 
 
@@ -94,6 +98,7 @@ def _sse_status_event(payload: dict) -> str:
 
 
 def _decode_redis_payload(raw: bytes | str | None) -> dict | None:
+    """执行 decode redis payload 相关辅助逻辑。"""
     if not raw:
         return None
     if isinstance(raw, bytes):
@@ -108,6 +113,7 @@ def _decode_redis_payload(raw: bytes | str | None) -> dict | None:
 
 
 def _to_status_response(payload: dict) -> GenerationStatusResponse:
+    """执行 to status response 相关辅助逻辑。"""
     step = payload.get("step")
     current_phase = payload.get("current_phase")
     subtask_key = payload.get("subtask_key") or step or current_phase
@@ -151,18 +157,22 @@ def _to_status_response(payload: dict) -> GenerationStatusResponse:
 
 
 def _creation_task_runtime_state(row: CreationTask) -> dict:
+    """执行 creation task runtime state 相关辅助逻辑。"""
     return snapshot_creation_task_runtime_state(row)
 
 
 def _creation_task_payload(row: CreationTask) -> dict:
+    """执行 creation task payload 相关辅助逻辑。"""
     return snapshot_creation_task_payload(row)
 
 
 def _payload_book_start(payload_data: dict) -> int:
+    """执行 payload book start 相关辅助逻辑。"""
     return int(payload_data.get("book_start_chapter") or payload_data.get("start_chapter") or 1)
 
 
 def _payload_book_total(payload_data: dict) -> int:
+    """执行 payload book total 相关辅助逻辑。"""
     return int(
         payload_data.get("book_target_total_chapters")
         or payload_data.get("original_total_chapters")
@@ -172,20 +182,24 @@ def _payload_book_total(payload_data: dict) -> int:
 
 
 def _payload_book_end(payload_data: dict) -> int:
+    """执行 payload book end 相关辅助逻辑。"""
     book_start = _payload_book_start(payload_data)
     book_total = max(0, _payload_book_total(payload_data))
     return int(book_start + max(book_total - 1, 0))
 
 
 def _creation_task_waiting_outline_confirmation(row: CreationTask) -> bool:
+    """执行 creation task waiting outline confirmation 相关辅助逻辑。"""
     return snapshot_creation_task_waiting_outline_confirmation(row)
 
 
 def _creation_task_effective_status(row: CreationTask) -> str:
+    """执行 creation task effective status 相关辅助逻辑。"""
     return snapshot_creation_task_effective_status(row)
 
 
 def _creation_task_effective_phase(row: CreationTask) -> str:
+    """执行 creation task effective phase 相关辅助逻辑。"""
     return snapshot_creation_task_effective_phase(row)
 
 
@@ -196,6 +210,7 @@ def _find_generation_creation_task(
     user_uuid: str,
     novel_db_id: int,
 ) -> CreationTask | None:
+    """执行 find generation creation task 相关辅助逻辑。"""
     row = get_task_by_public_id(db, public_id=task_id, user_uuid=user_uuid)
     if row and row.task_type == "generation" and row.resource_type == "novel" and int(row.resource_id) == int(novel_db_id):
         return row
@@ -214,6 +229,7 @@ def _find_generation_creation_task(
 
 
 def _creation_task_display_totals(row: CreationTask) -> tuple[int, int]:
+    """执行 creation task display totals 相关辅助逻辑。"""
     return snapshot_creation_task_display_totals(row)
 
 
@@ -223,6 +239,7 @@ def _resolve_live_chapter_display(
     db_current_chapter: int,
     db_total_chapters: int,
 ) -> tuple[int, int]:
+    """综合 Redis 和数据库状态，返回前端应展示的实时章节进度。"""
     current = int(db_current_chapter or 0)
     total = int(db_total_chapters or 0)
     if not isinstance(redis_payload, dict):
@@ -249,6 +266,7 @@ def _publish_generation_snapshot(
     live_payload: dict | None = None,
     stale_worker_ids: list[str] | None = None,
 ) -> dict[str, Any]:
+    """发布生成snapshot。"""
     snapshot = build_generation_snapshot(row, live_payload=live_payload)
     write_generation_cache(
         task_public_id=row.public_id,
@@ -265,6 +283,7 @@ def _publish_generation_snapshot(
 
 
 def _format_eta(seconds: int) -> str:
+    """把剩余秒数转换成生成任务页面展示用的 ETA 文案。"""
     sec = max(0, int(seconds))
     if sec < 60:
         return f"约{sec}秒"
@@ -279,6 +298,7 @@ def _format_eta(seconds: int) -> str:
 
 
 def _smoothed_chapter_seconds(samples: list[float]) -> float:
+    """执行 smoothed chapter seconds 相关辅助逻辑。"""
     if not samples:
         return 0.0
     take = samples[-5:]
@@ -299,6 +319,7 @@ def _estimate_eta_payload(
     task_id: str | None,
     payload: dict,
 ) -> dict:
+    """执行 estimate eta payload 相关辅助逻辑。"""
     if not novel_db_id:
         return payload
     status = str(payload.get("status") or "")
@@ -710,6 +731,7 @@ def pause_generation(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission(Permission.NOVEL_GENERATE, resource_loader=load_novel_resource)),
 ):
+    """暂停生成。"""
     from app.core.database import resolve_novel
 
     novel = resolve_novel(db, novel_id)
@@ -759,6 +781,7 @@ def resume_generation(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission(Permission.NOVEL_GENERATE, resource_loader=load_novel_resource)),
 ):
+    """恢复生成。"""
     from app.core.database import resolve_novel
 
     novel = resolve_novel(db, novel_id)
@@ -806,6 +829,7 @@ def cancel_generation_by_novel(
     db: Session = Depends(get_db),
     principal: Principal = Depends(require_permission(Permission.NOVEL_GENERATE, resource_loader=load_novel_resource)),
 ):
+    """执行 cancel generation by novel 相关辅助逻辑。"""
     from app.core.database import resolve_novel
 
     novel = resolve_novel(db, novel_id)
@@ -854,6 +878,7 @@ def list_generation_tasks(
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.NOVEL_READ, resource_loader=load_novel_resource)),
 ):
+    """列出 generation tasks。"""
     from app.core.database import resolve_novel
 
     novel = resolve_novel(db, novel_id)
@@ -1072,6 +1097,7 @@ def stream_generation_progress(
     _TERMINAL = {"completed", "failed", "cancelled", "paused"}
 
     async def event_stream():
+        """持续轮询生成快照，并按 SSE 协议把状态增量推给前端。"""
         last = None
         no_data_count = 0
         while True:

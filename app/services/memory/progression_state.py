@@ -1,4 +1,12 @@
-"""Structured progression memory and outline contract helpers."""
+"""剧情推进记忆与大纲契约归一化。
+
+模块职责：
+- 把章节推进、转场、卷级状态、整书状态存成结构化记忆。
+- 统一整理章节大纲 contract，供写作和审校阶段消费。
+
+面试可讲点：
+- 记忆不只是“存摘要”，而是要存能被下一章继续约束的结构化状态。
+"""
 from __future__ import annotations
 
 import logging
@@ -18,10 +26,12 @@ logger = logging.getLogger(__name__)
 
 
 def _clean_text(value: Any) -> str:
+    """把任意输入清洗成去首尾空白的文本。"""
     return str(value or "").strip()
 
 
 def _string_list(value: Any) -> list[str]:
+    """把单值或列表统一归一化成去重后的字符串列表。"""
     if value is None:
         return []
     if isinstance(value, list):
@@ -37,6 +47,7 @@ def _string_list(value: Any) -> list[str]:
 
 
 def _best_similarity(left: str, candidates: list[str]) -> float:
+    """计算一个文本与候选集合之间的最佳相似度。"""
     src = _clean_text(left)
     if not src:
         return 0.0
@@ -52,6 +63,7 @@ def _best_similarity(left: str, candidates: list[str]) -> float:
 
 
 def _chapter_num_from_key(key: Any) -> int:
+    """从 memory key 等字段里尽力解析出章节号。"""
     try:
         return int(str(key or "0").strip())
     except Exception:
@@ -59,6 +71,7 @@ def _chapter_num_from_key(key: Any) -> int:
 
 
 def _classify_payoff_kind(text: str) -> str:
+    """按关键词把 payoff 归到较稳定的类型标签。"""
     raw = _clean_text(text)
     if not raw:
         return ""
@@ -78,6 +91,7 @@ def _classify_payoff_kind(text: str) -> str:
 
 
 def _classify_reveal_kind(text: str) -> str:
+    """按关键词把 reveal 归到较稳定的类型标签。"""
     raw = _clean_text(text)
     if not raw:
         return ""
@@ -95,6 +109,7 @@ def _classify_reveal_kind(text: str) -> str:
 
 
 def normalize_outline_contract(outline: dict[str, Any] | None, chapter_num: int) -> dict[str, Any]:
+    """把大纲整理成后续所有节点都能稳定依赖的 contract 结构。"""
     data = dict(outline or {})
     purpose = _clean_text(data.get("chapter_objective") or data.get("purpose") or data.get("outline"))
     payoff = _clean_text(data.get("payoff"))
@@ -157,6 +172,7 @@ class ProgressionMemoryManager:
         promotion_score: float | None = None,
         db: Session,
     ) -> None:
+        """为一次记忆 upsert 记录审计 revision。"""
         db.add(
             NovelMemoryRevision(
                 novel_id=novel_id,
@@ -180,6 +196,7 @@ class ProgressionMemoryManager:
         novel_version_id: int | None = None,
         db: Optional[Session] = None,
     ) -> dict[str, Any] | None:
+        """读取一条结构化记忆内容。"""
         should_close = db is None
         db = db or SessionLocal()
         try:
@@ -209,6 +226,7 @@ class ProgressionMemoryManager:
         promotion_score: float | None = None,
         db: Optional[Session] = None,
     ) -> None:
+        """插入或更新记忆。"""
         should_close = db is None
         db = db or SessionLocal()
         try:
@@ -290,6 +308,7 @@ class ProgressionMemoryManager:
         promotion_score: float | None = None,
         db: Optional[Session] = None,
     ) -> bool:
+        """删除记忆。"""
         should_close = db is None
         db = db or SessionLocal()
         try:
@@ -343,6 +362,7 @@ class ProgressionMemoryManager:
         promotion_score: float | None = None,
         db: Optional[Session] = None,
     ) -> int:
+        """删除memories来源章节。"""
         should_close = db is None
         db = db or SessionLocal()
         try:
@@ -396,6 +416,7 @@ class ProgressionMemoryManager:
         promotion_score: float | None = None,
         db: Optional[Session] = None,
     ) -> int:
+        """删除memoriesbytype。"""
         should_close = db is None
         db = db or SessionLocal()
         try:
@@ -445,6 +466,7 @@ class ProgressionMemoryManager:
         novel_version_id: int | None = None,
         db: Optional[Session] = None,
     ) -> list[dict[str, Any]]:
+        """列出recentadvancements。"""
         should_close = db is None
         db = db or SessionLocal()
         try:
@@ -482,6 +504,7 @@ class ProgressionMemoryManager:
         novel_version_id: int | None = None,
         db: Optional[Session] = None,
     ) -> dict[str, Any] | None:
+        """返回前一个transition。"""
         if chapter_num <= 1:
             return None
         return self._get_memory(
@@ -505,6 +528,7 @@ class ProgressionMemoryManager:
         promotion_score: float | None = None,
         db: Optional[Session] = None,
     ) -> None:
+        """保存章节推进记录。"""
         payload = {"chapter_num": chapter_num, **dict(content or {})}
         if volume_no is not None:
             payload["volume_no"] = int(volume_no)
@@ -533,6 +557,7 @@ class ProgressionMemoryManager:
         promotion_score: float | None = None,
         db: Optional[Session] = None,
     ) -> None:
+        """保存章节transition。"""
         payload = {"chapter_num": chapter_num, **dict(content or {})}
         if volume_no is not None:
             payload["volume_no"] = int(volume_no)
@@ -556,6 +581,7 @@ class ProgressionMemoryManager:
         novel_version_id: int | None = None,
         db: Optional[Session] = None,
     ) -> dict[str, Any] | None:
+        """返回分卷arc状态。"""
         return self._get_memory(
             novel_id,
             "volume_arc_state",
@@ -576,6 +602,7 @@ class ProgressionMemoryManager:
         promotion_score: float | None = None,
         db: Optional[Session] = None,
     ) -> None:
+        """保存分卷arc状态。"""
         self._upsert_memory(
             novel_id,
             "volume_arc_state",
@@ -595,6 +622,7 @@ class ProgressionMemoryManager:
         novel_version_id: int | None = None,
         db: Optional[Session] = None,
     ) -> dict[str, Any] | None:
+        """返回全书progression状态。"""
         return self._get_memory(
             novel_id,
             "book_progression",
@@ -614,6 +642,7 @@ class ProgressionMemoryManager:
         promotion_score: float | None = None,
         db: Optional[Session] = None,
     ) -> None:
+        """保存全书progression状态。"""
         self._upsert_memory(
             novel_id,
             "book_progression",
@@ -634,6 +663,7 @@ class ProgressionMemoryManager:
         up_to_chapter: int | None = None,
         db: Optional[Session] = None,
     ) -> list[dict[str, Any]]:
+        """列出章节advancements。"""
         should_close = db is None
         db = db or SessionLocal()
         try:
@@ -673,6 +703,7 @@ class ProgressionMemoryManager:
         promotion_score: float | None = None,
         db: Optional[Session] = None,
     ) -> dict[str, Any]:
+        """执行 merge volume arc state 相关辅助逻辑。"""
         current = self.get_volume_arc_state(novel_id, volume_no, novel_version_id=novel_version_id, db=db) or {}
         completed_objectives = _string_list(current.get("completed_objectives")) + _string_list(advancement.get("chapter_objective"))
         revealed_information = _string_list(current.get("revealed_information")) + _string_list(advancement.get("new_information"))
@@ -720,6 +751,7 @@ class ProgressionMemoryManager:
         promotion_score: float | None = None,
         db: Optional[Session] = None,
     ) -> dict[str, Any]:
+        """执行 merge book progression state 相关辅助逻辑。"""
         current = self.get_book_progression_state(novel_id, novel_version_id=novel_version_id, db=db) or {}
         major_beats = _string_list(current.get("major_beats")) + _string_list(advancement.get("major_beats"))
         revealed_information = _string_list(current.get("revealed_information")) + _string_list(advancement.get("new_information"))
@@ -757,6 +789,7 @@ def build_anti_repeat_constraints(
     book_progression_state: dict[str, Any] | None,
     outline_contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """构建antirepeatconstraints。"""
     recent_objectives = [
         _clean_text(item.get("chapter_objective"))
         for item in recent_advancements
@@ -791,6 +824,7 @@ def build_anti_repeat_constraints(
 
 
 def build_transition_constraints(previous_transition_state: dict[str, Any] | None) -> dict[str, Any]:
+    """构建transitionconstraints。"""
     prev = previous_transition_state or {}
     ending_scene = _clean_text(prev.get("ending_scene"))
     last_action = _clean_text(prev.get("last_action"))
@@ -814,6 +848,7 @@ def build_transition_constraints(previous_transition_state: dict[str, Any] | Non
 
 
 def similarity_against_constraints(value: str, candidates: list[str], threshold: float = 0.82) -> tuple[bool, str]:
+    """执行 similarity against constraints 相关辅助逻辑。"""
     best_match = ""
     best_score = 0.0
     for candidate in candidates:

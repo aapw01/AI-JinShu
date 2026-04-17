@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 @dataclass(slots=True)
 class GenerationEvent:
+    """生成事件。"""
     name: str
     payload: dict[str, Any] = field(default_factory=dict)
 
@@ -16,13 +17,17 @@ class EventHandlerError(RuntimeError):
 
 
 class EventBus:
+    """事件Bus。"""
     def __init__(self) -> None:
+        """初始化对象所需的运行时依赖。"""
         self._handlers: dict[str, list[tuple[Callable[[GenerationEvent], None], bool]]] = {}
 
     def register(self, event_name: str, handler: Callable[[GenerationEvent], None], *, required: bool) -> None:
+        """执行 register 相关辅助逻辑。"""
         self._handlers.setdefault(event_name, []).append((handler, required))
 
     def dispatch(self, event: GenerationEvent) -> dict[str, Any]:
+        """分发dispatch。"""
         failures: list[dict[str, Any]] = []
         handlers = self._handlers.get(event.name, [])
         for handler, required in handlers:
