@@ -1,4 +1,13 @@
-"""LangGraph pipeline agents - modular classes with language and model selection."""
+"""生成链路里的各类 Agent / 调用器实现。
+
+模块职责：
+- 封装 writer、reviewer、fact extractor、outline 生成等具体模型调用。
+- 负责 prompt 渲染、结构化输出解析、有限次重试和结果清洗。
+
+面试可讲点：
+- LangGraph 负责编排，真正和模型交互的细活大多落在这里。
+- 不同 Agent 的职责是分开的，不靠一个巨型 prompt 包打一切。
+"""
 import json
 import logging
 import re
@@ -48,6 +57,7 @@ _HARMONIZABLE_OUTLINE_FIELDS = {
 
 
 def _coerce_novel_pk(novel_id: str | int | None) -> int | None:
+    """把外部传入的小说标识安全转成整型主键。"""
     try:
         if novel_id is None:
             return None
@@ -57,6 +67,7 @@ def _coerce_novel_pk(novel_id: str | int | None) -> int | None:
 
 
 def _truncate_text(value: Any, max_chars: int) -> str:
+    """把任意值转成受长度上限约束的短文本。"""
     return str(value or "")[:max_chars]
 
 
@@ -68,6 +79,7 @@ def _compact_jsonable(
     depth: int = 0,
     max_depth: int = 4,
 ) -> Any:
+    """把复杂对象压缩成适合写日志和 prompt 上下文的 JSON 友好结构。"""
     if depth >= max_depth:
         return _truncate_text(value, max_chars)
     if isinstance(value, dict):
@@ -103,6 +115,7 @@ def _compact_jsonable(
 
 
 def _build_reviewer_context_json(context: dict[str, Any], *, reviewer_kind: str) -> str:
+    """构建reviewer上下文JSON。"""
     if reviewer_kind == "progression":
         keys = [
             "outline_contract",
@@ -145,6 +158,7 @@ def _build_reviewer_context_json(context: dict[str, Any], *, reviewer_kind: str)
 
 
 def _timed_invoke(llm: Any, prompt: str, op: str, meta: dict[str, Any] | None = None):
+    """执行一次带日志和退避重试的模型调用。"""
     last_exc: Exception | None = None
     for attempt in range(_AGENT_MAX_RETRIES):
         started = time.perf_counter()
@@ -371,6 +385,7 @@ def _invoke_json_with_schema(
 
 
 class OutlineItemSchema(BaseModel):
+    """大纲Item结构化模型。"""
     title: str | None = None
     outline: str | None = None
     role: str | None = None
@@ -397,6 +412,7 @@ class OutlineItemSchema(BaseModel):
 
 
 class FullOutlinesSchema(BaseModel):
+    """Full大纲结构化模型。"""
     outlines: list[OutlineItemSchema]
 
 
@@ -405,6 +421,7 @@ VolumeOutlineBatchSchema = FullOutlinesSchema
 
 
 class VolumeOutlineHarmonizationItemSchema(BaseModel):
+    """分卷大纲HarmonizationItem结构化模型。"""
     chapter_num: int
     payoff: str | None = None
     reveal_kind: str | None = None
@@ -416,15 +433,18 @@ class VolumeOutlineHarmonizationItemSchema(BaseModel):
 
 
 class VolumeOutlineHarmonizationSchema(BaseModel):
+    """分卷大纲Harmonization结构化模型。"""
     outlines: list[VolumeOutlineHarmonizationItemSchema]
 
 
 class ReviewSchema(BaseModel):
+    """审校结构化模型。"""
     score: float = 0.8
     feedback: str = ""
 
 
 class ReviewIssueSchema(BaseModel):
+    """审校Issue结构化模型。"""
     category: str = ""
     severity: str = "should_fix"
     claim: str = ""
@@ -433,6 +453,7 @@ class ReviewIssueSchema(BaseModel):
 
 
 class ReviewScorecardSchema(BaseModel):
+    """审校Scorecard结构化模型。"""
     score: float = 0.8
     confidence: float = 0.75
     feedback: str = ""
@@ -443,12 +464,14 @@ class ReviewScorecardSchema(BaseModel):
 
 
 class FactualReviewSchema(BaseModel):
+    """Factual审校结构化模型。"""
     score: float = 0.8
     feedback: str = ""
     contradictions: list[str] = []
 
 
 class CrossChapterContradictionSchema(BaseModel):
+    """Cross章节Contradiction结构化模型。"""
     category: str = "character"
     severity: str = "should_fix"
     claim: str = ""
@@ -457,10 +480,12 @@ class CrossChapterContradictionSchema(BaseModel):
 
 
 class CrossChapterCheckSchema(BaseModel):
+    """Cross章节Check结构化模型。"""
     contradictions: list[CrossChapterContradictionSchema] = []
 
 
 class UnknownCharacterVerdictSchema(BaseModel):
+    """Unknown角色Verdict结构化模型。"""
     name: str = ""
     result: str = "minor"  # unreasonable | new_reasonable | minor
     reason: str = ""
@@ -469,16 +494,19 @@ class UnknownCharacterVerdictSchema(BaseModel):
 
 
 class UnknownCharacterCheckSchema(BaseModel):
+    """Unknown角色Check结构化模型。"""
     verdicts: list[UnknownCharacterVerdictSchema] = []
 
 
 class AestheticReviewSchema(BaseModel):
+    """Aesthetic审校结构化模型。"""
     score: float = 0.8
     feedback: str = ""
     highlights: list[str] = []
 
 
 class FinalBookReviewSchema(BaseModel):
+    """Final全书审校结构化模型。"""
     score: float = 0.8
     feedback: str = "ok"
     confidence: float = 0.75
@@ -488,18 +516,21 @@ class FinalBookReviewSchema(BaseModel):
 
 
 class FactExtractionSchema(BaseModel):
+    """FactExtraction结构化模型。"""
     events: list[dict[str, Any]] = []
     entities: list[dict[str, Any]] = []
     facts: list[dict[str, Any]] = []
 
 
 class CharacterSpecSchema(BaseModel):
+    """角色Spec结构化模型。"""
     name: str = ""
     goal: str = ""
     conflict: str = ""
 
 
 class PlotlineSpecSchema(BaseModel):
+    """PlotlineSpec结构化模型。"""
     id: str = ""
     name: str = ""
     start: int = 1
@@ -507,6 +538,7 @@ class PlotlineSpecSchema(BaseModel):
 
 
 class ForeshadowingSpecSchema(BaseModel):
+    """ForeshadowingSpec结构化模型。"""
     id: str = ""
     plant_chapter: int = 1
     resolve_chapter: int = 1
@@ -514,18 +546,21 @@ class ForeshadowingSpecSchema(BaseModel):
 
 
 class VolumeMapSpecSchema(BaseModel):
+    """分卷MapSpec结构化模型。"""
     volume: int = 1
     chapter_range: str = ""
     main_goal: str = ""
 
 
 class ClimaxPlanSpecSchema(BaseModel):
+    """Climax计划Spec结构化模型。"""
     chapter_range: str = ""
     level: str = "small"
     objective: str = ""
 
 
 class ConstitutionSchema(BaseModel):
+    """Constitution结构化模型。"""
     core_values: list[str] = Field(default_factory=list)
     quality_standards: list[str] = Field(default_factory=list)
     style_rules: list[str] = Field(default_factory=list)
@@ -533,6 +568,7 @@ class ConstitutionSchema(BaseModel):
 
 
 class StorySpecificationSchema(BaseModel):
+    """StorySpecification结构化模型。"""
     logline: str = ""
     theme: str = ""
     target_reader: str = ""
@@ -548,24 +584,28 @@ class StorySpecificationSchema(BaseModel):
 
 
 class CreativePlanVolumeSchema(BaseModel):
+    """Creative计划分卷结构化模型。"""
     volume: int = 1
     chapter_range: str = ""
     goal: str = ""
 
 
 class EmotionCurveSchema(BaseModel):
+    """EmotionCurve结构化模型。"""
     chapter: int = 1
     type: str = ""
     intensity: str = ""
 
 
 class SerialRulesSchema(BaseModel):
+    """SerialRules结构化模型。"""
     small_climax_every: str = "3-5 chapters"
     medium_climax_every: str = "10-15 chapters"
     volume_climax_every: str = "30-50 chapters"
 
 
 class CreativePlanSchema(BaseModel):
+    """Creative计划结构化模型。"""
     writing_method: str = ""
     volume_plan: list[CreativePlanVolumeSchema] = Field(default_factory=list)
     emotion_curve: list[EmotionCurveSchema] = Field(default_factory=list)
@@ -576,6 +616,7 @@ class CreativePlanSchema(BaseModel):
 
 
 class TaskItemSchema(BaseModel):
+    """任务Item结构化模型。"""
     task_id: str = ""
     chapter_num: int = 1
     must_contain: list[str] = Field(default_factory=list)
@@ -587,10 +628,12 @@ class TaskItemSchema(BaseModel):
 
 
 class TasksBreakdownSchema(BaseModel):
+    """任务Breakdown结构化模型。"""
     tasks: list[TaskItemSchema] = Field(default_factory=list)
 
 
 class CharacterStateUpdateSchema(BaseModel):
+    """角色状态Update结构化模型。"""
     name: str = ""
     status: str = "unknown"
     location: str = ""
@@ -607,10 +650,12 @@ class CharacterStateUpdateSchema(BaseModel):
 
 
 class CharacterStateUpdatesSchema(BaseModel):
+    """角色状态Updates结构化模型。"""
     updates: list[CharacterStateUpdateSchema] = Field(default_factory=list)
 
 
 class CharacterRelationSchema(BaseModel):
+    """角色关系结构化模型。"""
     source: str
     target: str
     relation_type: str = ""
@@ -619,10 +664,12 @@ class CharacterRelationSchema(BaseModel):
 
 
 class CharacterRelationsSchema(BaseModel):
+    """角色关系结构化模型。"""
     relations: list[CharacterRelationSchema] = []
 
 
 class ChapterAdvancementMemorySchema(BaseModel):
+    """章节推进记录记忆结构化模型。"""
     chapter_objective: str = ""
     actual_progress: str = ""
     new_information: list[str] = Field(default_factory=list)
@@ -639,6 +686,7 @@ class ChapterAdvancementMemorySchema(BaseModel):
 
 
 class ChapterTransitionMemorySchema(BaseModel):
+    """章节Transition记忆结构化模型。"""
     ending_scene: str = ""
     character_positions: list[str] = Field(default_factory=list)
     physical_state: str = ""
@@ -649,6 +697,7 @@ class ChapterTransitionMemorySchema(BaseModel):
 
 
 class ChapterMemoryExtractionSchema(BaseModel):
+    """章节记忆Extraction结构化模型。"""
     advancement: ChapterAdvancementMemorySchema = Field(default_factory=ChapterAdvancementMemorySchema)
     transition: ChapterTransitionMemorySchema = Field(default_factory=ChapterTransitionMemorySchema)
     advancement_confidence: float = 0.0
@@ -657,6 +706,7 @@ class ChapterMemoryExtractionSchema(BaseModel):
 
 
 class ProgressionReviewSchema(BaseModel):
+    """Progression审校结构化模型。"""
     score: float = 0.8
     confidence: float = 0.75
     feedback: str = ""
@@ -677,11 +727,13 @@ class FactualSubReviewSchema(ReviewScorecardSchema):
 
 
 class AiFlavorSchema(BaseModel):
+    """AiFlavor结构化模型。"""
     score: int = 5
     issues: list[str] = Field(default_factory=list)
 
 
 class WebnovelPrinciplesSchema(BaseModel):
+    """WebnovelPrinciples结构化模型。"""
     score: int = 5
     violations: list[str] = Field(default_factory=list)
 
@@ -697,6 +749,7 @@ class ReviewCombinedSchema(BaseModel):
 
 
 def _normalize_outline_item(item: dict[str, Any], chapter_no: int) -> dict[str, Any]:
+    """把单章大纲整理为统一的 outline contract 结构。"""
     return normalize_outline_contract(
         {
             "chapter_num": chapter_no,
@@ -729,6 +782,7 @@ def _normalize_outline_item(item: dict[str, Any], chapter_no: int) -> dict[str, 
 
 
 def _trim_fact_lists(data: dict[str, Any]) -> dict[str, Any]:
+    """裁剪事实提取结果中的长列表字段，便于日志和调试。"""
     trimmed = dict(data)
     trimmed["events"] = list((data.get("events") or []))[:12]
     trimmed["entities"] = list((data.get("entities") or []))[:12]
@@ -737,6 +791,7 @@ def _trim_fact_lists(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def _trim_text_list(value: Any, *, max_items: int, max_chars: int = 180) -> list[str]:
+    """把任意列表裁剪成有限长度的去重文本列表。"""
     items = value if isinstance(value, list) else []
     out: list[str] = []
     for item in items:
@@ -752,6 +807,7 @@ def _trim_text_list(value: Any, *, max_items: int, max_chars: int = 180) -> list
 
 
 def _trim_progression_memory_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """裁剪推进记忆提取结果，避免载荷过大。"""
     trimmed = dict(data)
     advancement = dict(data.get("advancement") or {}) if isinstance(data.get("advancement"), dict) else {}
     transition = dict(data.get("transition") or {}) if isinstance(data.get("transition"), dict) else {}
@@ -773,6 +829,7 @@ def _compact_final_review_chapters(
     direct_limit: int = 18,
     window_size: int = 8,
 ) -> list[dict[str, Any]]:
+    """压缩终审时输入的章节摘要列表，避免上下文过长。"""
     compacted = [
         {
             "chapter_num": item.get("chapter_num"),
@@ -806,6 +863,7 @@ def _compact_final_review_chapters(
 
 
 def _final_book_review_fallback(reason: str) -> dict[str, Any]:
+    """构造全书终审失败时的保守降级结果。"""
     fallback_reason = str(reason or "unknown_error")[:240]
     return {
         "score": 0.45,
@@ -818,6 +876,7 @@ def _final_book_review_fallback(reason: str) -> dict[str, Any]:
 
 
 def _default_prewrite_component(key: str, novel: dict[str, Any], num_chapters: int) -> dict[str, Any]:
+    """返回预写作组件的保守默认值。"""
     if key == "constitution":
         return ConstitutionSchema(
             core_values=["核心爽点清晰", "主线推进稳定"],
@@ -868,6 +927,7 @@ def _normalize_prewrite_component(
     novel: dict[str, Any],
     num_chapters: int,
 ) -> dict[str, Any]:
+    """把预写作组件校验并规范化为统一结构。"""
     if not isinstance(data, dict):
         return _default_prewrite_component(key, novel, num_chapters)
     if key == "constitution":
@@ -901,6 +961,7 @@ class ArchitectAgent:
         provider: str | None = None,
         model: str | None = None,
     ) -> dict:
+        """执行run。"""
         llm = get_llm_with_fallback(provider, model)
         prompt = render_prompt("plot_architecture", novel_id=novel_id, chapter_num=chapter_num)
         try:
@@ -931,6 +992,7 @@ class PrewritePlannerAgent:
         strategy_key: str | None = None,
         novel_config: dict[str, Any] | None = None,
     ) -> dict:
+        """执行run。"""
         result: dict[str, Any] = {}
         templates = [
             ("constitution", "constitution"),
@@ -1013,6 +1075,7 @@ class OutlinerAgent:
         provider: str | None = None,
         model: str | None = None,
     ) -> dict:
+        """执行run。"""
         llm = get_llm_with_fallback(provider, model)
         prompt = render_prompt("chapter_blueprint", novel_id=novel_id, chapter_num=chapter_num, plan=plan)
         try:
@@ -1173,6 +1236,7 @@ class OutlinerAgent:
         strategy_key: str | None = None,
         novel_config: dict[str, Any] | None = None,
     ) -> list[dict]:
+        """批量生成一段章节的大纲。"""
         resolved = resolve_ai_profile(
             strategy_key,
             "outline.batch",
@@ -1294,6 +1358,7 @@ class OutlinerAgent:
         strategy_key: str | None = None,
         novel_config: dict[str, Any] | None = None,
     ) -> list[dict]:
+        """对同一卷内的章节大纲做整体协调。"""
         if len(outlines) <= 1:
             return outlines
         resolved = resolve_ai_profile(
@@ -1454,6 +1519,7 @@ class ContextLoaderAgent:
         outline: dict | None = None,
         db=None,
     ) -> dict:
+        """执行run。"""
         from app.services.memory.context import get_context_for_chapter
 
         # get_context_for_chapter uses build_chapter_context internally for layered context
@@ -1486,6 +1552,7 @@ class WriterAgent:
         pacing_mode: str | None = None,
         closure_state: dict[str, Any] | None = None,
     ) -> str:
+        """执行run。"""
         template = "first_chapter" if chapter_num == 1 else "next_chapter"
         prompt = render_prompt(
             template,
@@ -1556,6 +1623,7 @@ class ReviewerAgent:
         model: str | None = None,
         inference: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """执行structured。"""
         template = "reviewer_structured"
         llm = get_llm_with_fallback(provider, model, inference=inference)
         prompt = render_prompt(
@@ -1596,6 +1664,7 @@ class ReviewerAgent:
         model: str | None = None,
         inference: dict[str, Any] | None = None,
     ) -> tuple[float, str]:
+        """执行run。"""
         result = self.run_structured(
             draft=draft,
             chapter_num=chapter_num,
@@ -1620,6 +1689,7 @@ class ReviewerAgent:
         model: str | None = None,
         inference: dict[str, Any] | None = None,
     ) -> tuple[float, str, list[str]]:
+        """执行factual。"""
         result = self.run_factual_structured(draft, chapter_num, context, language, provider, model, inference=inference)
         return (
             float(result.get("score", 0.75)),
@@ -1637,6 +1707,7 @@ class ReviewerAgent:
         model: str | None = None,
         inference: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """执行factualstructured。"""
         template = "reviewer_factual_structured"
         llm = get_llm_with_fallback(provider, model, inference=inference)
         prompt = render_prompt(
@@ -1678,6 +1749,7 @@ class ReviewerAgent:
         model: str | None = None,
         inference: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """执行progressionstructured。"""
         template = "reviewer_progression_structured"
         llm = get_llm_with_fallback(provider, model, inference=inference)
         prompt = render_prompt(
@@ -1725,6 +1797,7 @@ class ReviewerAgent:
         model: str | None = None,
         inference: dict[str, Any] | None = None,
     ) -> tuple[float, str, list[str]]:
+        """执行aesthetic。"""
         result = self.run_aesthetic_structured(draft, chapter_num, language, provider, model, inference=inference)
         return (
             float(result.get("score", 0.75)),
@@ -1741,6 +1814,7 @@ class ReviewerAgent:
         model: str | None = None,
         inference: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """执行aestheticstructured。"""
         template = "reviewer_aesthetic_structured"
         llm = get_llm_with_fallback(provider, model, inference=inference)
         prompt = render_prompt(
@@ -1788,6 +1862,7 @@ class ReviewerAgent:
         Never raises — always returns 6 dicts (empty defaults on any failure).
         """
         def _empty_defaults():
+            """返回 6 路审校的空安全默认值，避免单次失败拖垮整个 review 流程。"""
             return (
                 ReviewScorecardSchema().model_dump(),
                 FactualSubReviewSchema().model_dump(),
@@ -1837,6 +1912,7 @@ class ReviewerAgent:
             return _empty_defaults()
 
         def _clamp_score(d: dict) -> dict:
+            """把 reviewer 返回的分数/置信度统一裁剪到 0 到 1 的区间。"""
             s = float(d.get("score", 0.8))
             if s > 1:
                 s = s / 100 if s <= 100 else 0.8
@@ -1962,6 +2038,7 @@ class FinalizerAgent:
         closure_state: dict[str, Any] | None = None,
     ) -> str:
         # If no significant feedback, return draft as-is
+        """执行run。"""
         if not feedback or feedback == "Auto-review: acceptable quality":
             return draft
 
@@ -2023,6 +2100,7 @@ class FinalReviewerAgent:
 
     def run(self, content: str, language: str = "zh") -> bool:
         # Basic validation - ensure content is not empty and has reasonable length
+        """执行run。"""
         if not content or len(content) < 100:
             logger.warning("FinalReviewerAgent: content too short")
             return False
@@ -2039,6 +2117,7 @@ class FinalReviewerAgent:
         model: str | None = None,
         inference: dict[str, Any] | None = None,
     ) -> dict:
+        """执行full全书。"""
         template = "final_book_review"
         llm = get_llm_with_fallback(provider, model, inference=inference)
         prompt = render_prompt(
@@ -2083,6 +2162,7 @@ class FactExtractorAgent:
         model: str | None = None,
         inference: dict[str, Any] | None = None,
     ) -> dict:
+        """执行run。"""
         template = "fact_extractor_structured"
         llm = get_llm_with_fallback(provider, model, inference=inference)
         prompt = render_prompt(
@@ -2119,6 +2199,7 @@ class FactExtractorAgent:
         model: str | None = None,
         inference: dict[str, Any] | None = None,
     ) -> dict:
+        """执行foreshadowextraction。"""
         from app.prompts import render_prompt as _render
         prompt = _render(
             "foreshadow_extraction",
@@ -2147,6 +2228,7 @@ class FactExtractorAgent:
         model: str | None = None,
         inference: dict[str, Any] | None = None,
     ) -> CharacterRelationsSchema:
+        """执行关系extraction。"""
         template = "character_relation_extraction"
         prompt = render_prompt(
             template,
@@ -2178,6 +2260,7 @@ class ProgressionMemoryAgent:
         model: str | None = None,
         inference: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """执行run。"""
         template = "chapter_memory_structured"
         llm = get_llm_with_fallback(provider, model, inference=inference)
         prompt = render_prompt(

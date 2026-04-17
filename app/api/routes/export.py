@@ -26,6 +26,7 @@ def _normalize_content(raw: str | None) -> str:
 
 
 def _build_txt(novel: Novel, chapters: list[ChapterVersion]) -> str:
+    """构建txt。"""
     lines = [f"# {novel.title}\n"]
     for c in chapters:
         lines.append(f"\n\n## 第{c.chapter_num}章 {c.title or ''}\n\n")
@@ -34,11 +35,13 @@ def _build_txt(novel: Novel, chapters: list[ChapterVersion]) -> str:
 
 
 def _chapter_file_name(chapter: ChapterVersion) -> str:
+    """执行 chapter file name 相关辅助逻辑。"""
     safe_title = (chapter.title or "").replace("/", "_").replace("\\", "_").strip()
     return f"{chapter.chapter_num:03d}_{safe_title or 'chapter'}.txt"
 
 
 def _list_outlines_for_version(db: Session, novel_id: int, version_id: int) -> list[ChapterOutline]:
+    """列出大纲for版本。"""
     stmt = (
         select(ChapterOutline)
         .where(

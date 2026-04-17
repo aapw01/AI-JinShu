@@ -1,4 +1,13 @@
-"""Promotion and rollback controls for progression memory."""
+"""推进记忆的提纯与回滚控制。
+
+模块职责：
+- 判断 extractor 产出的 advancement / transition 是否足够可信，可写入长期记忆。
+- 在恢复或重跑场景下回滚不再可信的推进状态。
+
+面试可讲点：
+- 不是模型提取到什么就直接写记忆，中间还有 promotion gate。
+- 回滚是为了保证恢复后不会被半成品记忆污染。
+"""
 from __future__ import annotations
 
 from typing import Any
@@ -17,10 +26,12 @@ TRANSITION_PROMOTION_THRESHOLD = 0.80
 
 
 def _clean_text(value: Any) -> str:
+    """把任意输入清洗成文本。"""
     return str(value or "").strip()
 
 
 def _string_list(value: Any) -> list[str]:
+    """把输入归一化成去重字符串列表。"""
     if value is None:
         return []
     if isinstance(value, list):
@@ -36,6 +47,7 @@ def _string_list(value: Any) -> list[str]:
 
 
 def _clamp_confidence(value: Any) -> float:
+    """把置信度裁剪到 0 到 1 之间。"""
     try:
         return max(0.0, min(1.0, float(value or 0.0)))
     except Exception:
@@ -43,6 +55,7 @@ def _clamp_confidence(value: Any) -> float:
 
 
 def _fallback_advancement_confidence(advancement: dict[str, Any]) -> float:
+    """在 extractor 未给出置信度时，根据推进信号做保守估计。"""
     signals = 0
     if _clean_text(advancement.get("actual_progress")):
         signals += 1
@@ -62,6 +75,7 @@ def _fallback_advancement_confidence(advancement: dict[str, Any]) -> float:
 
 
 def _fallback_transition_confidence(transition: dict[str, Any]) -> float:
+    """在 extractor 未给出置信度时，根据转场信号做保守估计。"""
     if not _clean_text(transition.get("ending_scene")):
         return 0.0
     signals = 0
@@ -80,6 +94,7 @@ def _fallback_transition_confidence(transition: dict[str, Any]) -> float:
 
 
 def _has_effective_advancement(advancement: dict[str, Any]) -> bool:
+    """判断一次 advancement 是否真的包含有效推进。"""
     return any(
         [
             _clean_text(advancement.get("actual_progress")),
@@ -91,6 +106,7 @@ def _has_effective_advancement(advancement: dict[str, Any]) -> bool:
 
 
 def _has_effective_transition(transition: dict[str, Any]) -> bool:
+    """判断一次 transition 是否真的包含有效转场信息。"""
     if not _clean_text(transition.get("ending_scene")):
         return False
     return any(
@@ -106,6 +122,7 @@ def _outline_alignment_failures(
     advancement: dict[str, Any],
     outline_contract: dict[str, Any],
 ) -> list[str]:
+    """检查提取出的推进信息是否与章节大纲 contract 明显错位。"""
     if not advancement:
         return []
     failures: list[str] = []
@@ -183,6 +200,7 @@ class ProgressionPromotionService:
         review_suggestions: dict[str, Any] | None,
         review_gate: dict[str, Any] | None,
     ) -> dict[str, Any]:
+        """决定一批推进记忆是否足够可信，可以提升为长期约束。"""
         raw_payload = dict(extraction or {})
         advancement = raw_payload.get("advancement") if isinstance(raw_payload.get("advancement"), dict) else {}
         transition = raw_payload.get("transition") if isinstance(raw_payload.get("transition"), dict) else {}
@@ -289,6 +307,7 @@ class ProgressionRollbackService:
     """Rollback chapter-level progression memory and rebuild derived states."""
 
     def __init__(self, manager: ProgressionMemoryManager | None = None) -> None:
+        """初始化对象所需的运行时依赖。"""
         self.manager = manager or ProgressionMemoryManager()
 
     def rollback_from_chapter(
@@ -299,6 +318,7 @@ class ProgressionRollbackService:
         from_chapter: int,
         db: Session,
     ) -> dict[str, Any]:
+        """执行 rollback from chapter 相关辅助逻辑。"""
         rollback_floor = int(from_chapter)
         deleted_advancement = self.manager.delete_memories_from_chapter(
             novel_id,
@@ -365,6 +385,7 @@ class ProgressionRollbackService:
         db: Session,
         clear_existing: bool = True,
     ) -> dict[str, Any]:
+        """执行 rebuild progression state 相关辅助逻辑。"""
         rebuilt_volume_keys: list[str] = []
         rebuilt_book = False
         if clear_existing:

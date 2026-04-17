@@ -26,10 +26,12 @@ def _merge_full_outlines(
     outlines: list[dict[str, Any]] | None,
     new_outline: dict[str, Any],
 ) -> list[dict[str, Any]]:
+    """执行 merge full outlines 相关辅助逻辑。"""
     return merge_outlines(outlines, [new_outline])
 
 
 def _build_bridge_outline_plan(state: GenerationState, chapter_num: int) -> dict[str, Any]:
+    """构建bridge大纲计划。"""
     outlines = [dict(item) for item in (state.get("full_outlines") or []) if isinstance(item, dict)]
     recent_outlines = [
         item for item in outlines
@@ -47,6 +49,7 @@ def _build_bridge_outline_plan(state: GenerationState, chapter_num: int) -> dict
 
 
 def _generate_bridge_outline(state: GenerationState, chapter_num: int) -> dict[str, Any]:
+    """执行 generate bridge outline 相关辅助逻辑。"""
     out_provider, out_model = get_model_for_stage(state["strategy"], "outliner")
     raw_outline = state["outliner"].run(
         str(state["novel_id"]),
@@ -64,6 +67,7 @@ def _generate_bridge_outline(state: GenerationState, chapter_num: int) -> dict[s
 
 
 def build_closure_state(state: GenerationState) -> dict[str, Any]:
+    """构建收束状态状态。"""
     chapter_num = int(state.get("current_chapter") or 1)
     start_chapter = int(state.get("book_start_chapter") or state.get("start_chapter") or 1)
     end_chapter = int(state.get("book_effective_end_chapter") or state.get("end_chapter") or chapter_num)
@@ -198,6 +202,7 @@ def build_closure_state(state: GenerationState) -> dict[str, Any]:
 
 
 def node_closure_gate(state: GenerationState) -> GenerationState:
+    """执行 node closure gate 相关辅助逻辑。"""
     closure_state_val = build_closure_state(state)
     chapter_num = int(state.get("current_chapter") or 1)
     action = str(closure_state_val.get("action") or "continue")
@@ -345,6 +350,7 @@ def node_closure_gate(state: GenerationState) -> GenerationState:
 
 
 def node_tail_rewrite(state: GenerationState) -> GenerationState:
+    """执行 node tail rewrite 相关辅助逻辑。"""
     start_chapter = int(state.get("segment_start_chapter") or state.get("start_chapter") or 1)
     current = int(state.get("current_chapter") or start_chapter)
     rewind_to = max(start_chapter, current - 2)
@@ -418,6 +424,7 @@ def node_tail_rewrite(state: GenerationState) -> GenerationState:
 
 
 def node_bridge_chapter(state: GenerationState) -> GenerationState:
+    """执行 node bridge chapter 相关辅助逻辑。"""
     chapter_num = int(state.get("current_chapter") or 1)
     progress(
         state,

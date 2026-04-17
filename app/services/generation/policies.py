@@ -11,6 +11,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class ClosurePolicyInput:
+    """收束状态策略输入。"""
     generated_chapters: int
     target_chapters: int
     min_total_chapters: int
@@ -27,6 +28,7 @@ class ClosurePolicyInput:
 
 @dataclass(frozen=True)
 class ClosurePolicyOutput:
+    """收束状态策略输出。"""
     action: str
     reason_codes: list[str]
     confidence: float
@@ -38,6 +40,10 @@ class ClosurePolicyEngine:
 
     @staticmethod
     def decide(inp: ClosurePolicyInput) -> ClosurePolicyOutput:
+        """根据收束覆盖率、未解决线索和章节预算给出卷末动作。
+
+        这是卷末“继续写 / 桥接章 / 尾章重写 / 直接收束”的统一决策器。
+        """
         bridge_budget_total = max(0, inp.max_total_chapters - inp.target_chapters)
         bridge_budget_left = max(0, bridge_budget_total - inp.bridge_attempts)
         reason_codes: list[str] = []
@@ -112,6 +118,7 @@ class ClosurePolicyEngine:
 
 @dataclass(frozen=True)
 class PacingInput:
+    """Pacing输入。"""
     phase_mode: str
     low_progress_streak: int
     progress_signal: float
@@ -119,6 +126,7 @@ class PacingInput:
 
 @dataclass(frozen=True)
 class PacingOutput:
+    """Pacing输出。"""
     mode: str
     low_progress_streak: int
     progress_signal: float
@@ -130,6 +138,7 @@ class PacingController:
 
     @staticmethod
     def decide(inp: PacingInput) -> PacingOutput:
+        """根据推进信号和低进展 streak 调整当前节奏模式。"""
         low_progress = inp.progress_signal < 0.45
         next_streak = inp.low_progress_streak + 1 if low_progress else 0
         mode = "normal"

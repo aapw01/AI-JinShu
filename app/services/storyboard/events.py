@@ -16,10 +16,12 @@ _redis_pool = None
 
 
 def _utc_now() -> datetime:
+    """返回当前 UTC 时间，统一任务与数据库时间基准。"""
     return datetime.now(timezone.utc)
 
 
 def _get_redis() -> redis.Redis:
+    """返回当前任务模块复用的 Redis 客户端。"""
     global _redis_pool
     if _redis_pool is None:
         _redis_pool = redis.ConnectionPool.from_url(get_settings().redis_url)
@@ -35,6 +37,7 @@ def append_event(
     event_key: str,
     payload: dict[str, Any] | None = None,
 ) -> StoryboardEventOutbox:
+    """执行 append event 相关辅助逻辑。"""
     row = StoryboardEventOutbox(
         storyboard_project_id=storyboard_project_id,
         storyboard_run_id=storyboard_run_id,
@@ -52,6 +55,7 @@ def append_event(
 
 
 def publish_event(row: StoryboardEventOutbox) -> None:
+    """发布事件。"""
     row.attempts = int(row.attempts or 0) + 1
     try:
         payload = {

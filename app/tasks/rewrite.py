@@ -48,6 +48,7 @@ logger = logging.getLogger(__name__)
 
 
 def _error_meta_from_exc(exc: Exception) -> tuple[str, str, bool]:
+    """把异常归一化为前端可见的错误码、类别和重试语义。"""
     if isinstance(exc, OutputContractError):
         if exc.code == "MODEL_OUTPUT_POLICY_VIOLATION":
             return exc.code, "policy", bool(exc.retryable)
@@ -58,6 +59,7 @@ def _error_meta_from_exc(exc: Exception) -> tuple[str, str, bool]:
 
 
 def _get_creation_task_state(task_db_id: int) -> str | None:
+    """读取统一任务表中的当前任务状态。"""
     db = SessionLocal()
     try:
         row = get_creation_task_by_id(db, task_id=task_db_id)
@@ -67,6 +69,7 @@ def _get_creation_task_state(task_db_id: int) -> str | None:
 
 
 def _check_worker_superseded(task_db_id: int, current_celery_id: str) -> None:
+    """检测当前 worker 是否已被新的调度实例取代。"""
     db = SessionLocal()
     try:
         row = get_creation_task_by_id(db, task_id=task_db_id)
@@ -82,6 +85,7 @@ def _check_worker_superseded(task_db_id: int, current_celery_id: str) -> None:
 
 
 def _activate_creation_task(task_db_id: int, *, current_celery_id: str) -> None:
+    """把统一任务切到 running，并绑定当前 Celery worker。"""
     db = SessionLocal()
     try:
         row = get_creation_task_by_id(db, task_id=task_db_id)
@@ -106,6 +110,7 @@ def _activate_creation_task(task_db_id: int, *, current_celery_id: str) -> None:
 
 
 def _update_creation_progress(task_db_id: int, *, progress: float, message: str, phase: str = "rewrite") -> None:
+    """把当前章节进度和 Token 用量同步到统一任务表。"""
     db = SessionLocal()
     try:
         usage = snapshot_usage()
@@ -125,6 +130,7 @@ def _update_creation_progress(task_db_id: int, *, progress: float, message: str,
 
 
 def _heartbeat_creation(task_db_id: int) -> None:
+    """刷新统一任务的心跳和租约过期时间。"""
     db = SessionLocal()
     try:
         heartbeat_creation_task(db, task_id=task_db_id)
@@ -134,6 +140,7 @@ def _heartbeat_creation(task_db_id: int) -> None:
 
 
 def _mark_rewrite_checkpoint(task_db_id: int, *, chapter_num: int) -> None:
+    """标记重写检查点。"""
     db = SessionLocal()
     try:
         mark_unit_completed(
@@ -157,6 +164,7 @@ def _mark_rewrite_checkpoint(task_db_id: int, *, chapter_num: int) -> None:
 
 
 def _resolve_rewrite_resume(task_db_id: int, *, rewrite_from: int, rewrite_to: int) -> int:
+    """根据章节级 checkpoint 计算重写任务应从哪一章继续。"""
     db = SessionLocal()
     try:
         last_completed = get_last_completed_unit(
@@ -196,6 +204,7 @@ def _finalize_creation(
     error_detail: str | None = None,
     result_json: dict | None = None,
 ) -> None:
+    """把统一任务收敛到最终状态，并在需要时触发后续调度。"""
     db = SessionLocal()
     user_uuid: str | None = None
     try:
@@ -228,6 +237,7 @@ def _rewrite_prompt(
     annotations: list[dict],
     target_language: str,
 ) -> tuple[str, str]:
+    """执行 rewrite prompt 相关辅助逻辑。"""
     template = "rewrite_chapter_from_annotations"
     ann_rows: list[dict[str, object]] = []
     ann_lines: list[str] = []
@@ -270,6 +280,7 @@ def _rewrite_prompt(
 
 
 def _collect_previous_context(db, target_version_id: int, chapter_num: int) -> str:
+    """执行 collect previous context 相关辅助逻辑。"""
     rows = db.execute(
         select(ChapterVersion)
         .where(
@@ -302,6 +313,7 @@ def submit_rewrite_task(
     creation_task_id: int | None = None,
 ):
     # Load prior token totals so resume continues from the correct baseline.
+    """提交 rewrite task。"""
     _prior_in, _prior_out = 0, 0
     if creation_task_id is not None:
         _db_tmp = SessionLocal()

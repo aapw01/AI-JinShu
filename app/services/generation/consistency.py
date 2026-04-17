@@ -77,6 +77,7 @@ def extract_unknown_characters(draft: str, prewrite: dict) -> set[str]:
 
 @dataclass
 class ConsistencyIssue:
+    """ConsistencyIssue。"""
     level: str  # "warning" or "blocker"
     category: str  # "character", "item", "timeline", "plot", "naming"
     message: str
@@ -85,18 +86,22 @@ class ConsistencyIssue:
 
 @dataclass
 class ConsistencyReport:
+    """ConsistencyReport。"""
     issues: list[ConsistencyIssue] = field(default_factory=list)
     passed: bool = True
 
     @property
     def blockers(self) -> list[ConsistencyIssue]:
+        """执行 blockers 相关辅助逻辑。"""
         return [i for i in self.issues if i.level == "blocker"]
 
     @property
     def warnings(self) -> list[ConsistencyIssue]:
+        """执行 warnings 相关辅助逻辑。"""
         return [i for i in self.issues if i.level == "warning"]
 
     def summary(self) -> str:
+        """执行 summary 相关辅助逻辑。"""
         if not self.issues:
             return "一致性检查通过，无异常。"
         parts = []
@@ -437,6 +442,7 @@ def _check_progression_conflicts(
     context: dict,
     chapter_num: int,
 ) -> None:
+    """检查progressionconflicts。"""
     outline_contract = normalize_outline_contract(outline, chapter_num)
     anti_repeat = context.get("anti_repeat_constraints") or {}
     objective = str(outline_contract.get("chapter_objective") or "").strip()
@@ -490,6 +496,7 @@ def _check_transition_conflicts(
     context: dict,
     chapter_num: int,
 ) -> None:
+    """检查transitionconflicts。"""
     if chapter_num <= 1:
         return
     outline_contract = normalize_outline_contract(outline, chapter_num)

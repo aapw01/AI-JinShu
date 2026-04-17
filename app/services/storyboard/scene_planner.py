@@ -8,6 +8,7 @@ from app.services.storyboard.adapter import AdaptedChapter
 
 @dataclass(slots=True)
 class EpisodePlan:
+    """Episode计划。"""
     episode_no: int
     title: str
     hook: str
@@ -18,6 +19,7 @@ class EpisodePlan:
 
 @dataclass(slots=True)
 class ScenePlan:
+    """Scene计划。"""
     episode_no: int
     scene_no: int
     location: str
@@ -27,6 +29,7 @@ class ScenePlan:
 
 
 def partition_episodes(chapters: list[AdaptedChapter], target_episodes: int) -> list[EpisodePlan]:
+    """执行 partition episodes 相关辅助逻辑。"""
     if not chapters:
         return []
     total = len(chapters)
@@ -53,6 +56,7 @@ def partition_episodes(chapters: list[AdaptedChapter], target_episodes: int) -> 
 
 
 def decompose_scenes(episode: EpisodePlan, lane: str) -> list[ScenePlan]:
+    """执行 decompose scenes 相关辅助逻辑。"""
     scene_count = 3 if lane == "vertical_feed" else 4
     purposes = ["建立冲突", "升级对抗", "反转揭示", "悬念收束"]
     emotions = ["紧张", "压迫", "爆发", "悬念"]

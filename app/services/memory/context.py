@@ -1,11 +1,20 @@
-"""Layered context builder - assembles context within a token budget.
+"""章节写作前的分层上下文构建器。
 
-Layers (priority order):
-1. Global Bible     - Novel specs, worldview, character roster (always included, compressed)
-2. Thread Ledger    - Active foreshadowing/unresolved conflicts for current chapter
-3. Recent Window   - Last 3-5 chapter summaries + last chapter's ending paragraph
-4. Volume Brief     - Compressed summary of current volume (chapters grouped by ~30)
-5. Knowledge Chunks - Vector store results filtered by chapter outline relevance
+模块职责：
+- 在 token 预算内组装最有价值的写作上下文，而不是粗暴拼接全部前文。
+- 把全局设定、近期摘要、人物动态、卷级摘要、检索块整理成结构化上下文。
+- 记录每一层上下文为什么被选中，便于调试和面试讲解。
+
+层级优先级：
+1. 全局设定：世界观、角色 roster、创作宪法。
+2. 线程账本：活跃伏笔、未解钩子、当前冲突线。
+3. 近期窗口：最近摘要 + 上章结尾，保证局部连续性。
+4. 卷/整书推进状态：防重复、控节奏、保主线。
+5. 可选检索块：只在预算允许且与当前大纲足够相关时注入。
+
+面试可讲点：
+- 为什么不是每次把所有人物、所有章节摘要都塞给模型。
+- 为什么上下文治理的核心不是“存得多”，而是“选得准、选得稳”。
 """
 import re
 from typing import Any, Optional
@@ -39,6 +48,7 @@ _SELECTION_TOKEN_RE = re.compile(r"[A-Za-z0-9_]{2,}|[\u4e00-\u9fff]{2,6}")
 
 
 def _expand_selection_token(token: str) -> set[str]:
+    """扩展一个检索 token，提升中文人名/术语匹配召回率。"""
     expanded = {token}
     if re.fullmatch(r"[\u4e00-\u9fff]{3,6}", token):
         max_window = min(4, len(token))
@@ -49,6 +59,11 @@ def _expand_selection_token(token: str) -> set[str]:
 
 
 def _selection_terms_from_outline(outline: dict | None) -> set[str]:
+    """从当前章大纲中抽取候选检索词。
+
+    这一步决定“本章到底和谁、什么事件更相关”，后续人物状态和知识块选择
+    都会以这些词作为软排序依据。
+    """
     if not isinstance(outline, dict):
         return set()
     pieces: list[str] = []
@@ -138,6 +153,11 @@ def _select_recent_summary_window(
     recent_summaries: list[dict[str, Any]],
     max_items: int,
 ) -> list[dict[str, Any]]:
+    """在近期章节摘要里选出本章最值得注入的一小窗内容。
+
+    这里会强保留“上一章”，再用大纲相关性补其它摘要，避免模型忘掉
+    最近因果链，同时又不把窗口浪费在无关章节上。
+    """
     normalized = [item for item in recent_summaries if isinstance(item, dict)]
     if max_items <= 0 or not normalized:
         return []
@@ -189,6 +209,7 @@ def _select_recent_summary_window(
 
 
 def _chapter_range_for_items(items: list[dict] | list[Any]) -> list[int] | None:
+    """从上下文条目里提取章节范围，供观测元数据展示使用。"""
     chapter_nums: list[int] = []
     for item in items or []:
         if not isinstance(item, dict):
@@ -214,6 +235,7 @@ def _make_context_source(
     chapter_range: list[int] | None = None,
     included: bool = True,
 ) -> dict:
+    """构造一条上下文来源元数据，解释某块内容为什么被选进来。"""
     return {
         "source_type": source_type,
         "source_key": source_key,
@@ -226,6 +248,7 @@ def _make_context_source(
 
 
 def _estimate_source_tokens(value: Any) -> int:
+    """粗略估算某块上下文的 token 成本，用于预算裁剪。"""
     if isinstance(value, str):
         return int(estimate_tokens(value))
     if isinstance(value, list):
@@ -273,6 +296,11 @@ def _build_story_bible_context(
     db: Session,
     outline: dict | None = None,
 ) -> str:
+    """构建人物/事件/事实导向的 Story Bible 上下文。
+
+    这里不是简单打印角色表，而是优先挑出和当前章大纲相关的人物、
+    他们的动态状态、关系和事实，服务于人物一致性与剧情连续性。
+    """
     import logging as _lg
     _log = _lg.getLogger(__name__)
 
@@ -443,6 +471,7 @@ def _build_story_bible_context(
     return "\n".join(lines)[:STORY_BIBLE_MAX_CHARS]
 
 def _compress_global_bible(prewrite: dict) -> str:
+    """把 prewrite 阶段的全局设定压缩成可注入的短版世界观上下文。"""
     parts = []
     constitution = prewrite.get("constitution") or {}
     if isinstance(constitution, dict):
@@ -469,12 +498,14 @@ def _compress_global_bible(prewrite: dict) -> str:
 
 
 def _load_prewrite_from_db(novel_id: int, db: Session) -> dict:
+    """从数据库读取预写作产物。"""
     stmt = select(NovelSpecification).where(NovelSpecification.novel_id == novel_id)
     rows = db.execute(stmt).scalars().all()
     return {r.spec_type: r.content for r in rows}
 
 
 def _load_outline_from_db(novel_id: int, novel_version_id: int, chapter_num: int, db: Session) -> dict:
+    """从数据库读取指定章节大纲，缺失时返回一个最小占位结构。"""
     from app.models.novel import ChapterOutline
 
     stmt = select(ChapterOutline).where(
@@ -495,6 +526,7 @@ def _load_outline_from_db(novel_id: int, novel_version_id: int, chapter_num: int
 
 
 def _get_last_chapter_ending(novel_version_id: int, chapter_num: int, db: Session) -> str:
+    """提取上一章结尾片段，用于约束本章开场连续性。"""
     if chapter_num <= 1:
         return ""
     stmt = select(ChapterVersion).where(
@@ -508,6 +540,7 @@ def _get_last_chapter_ending(novel_version_id: int, chapter_num: int, db: Sessio
 
 
 def _format_thread_ledger(ledger: dict) -> str:
+    """把线程账本转成适合注入 prompt 的短文本。"""
     parts = []
     if ledger.get("active_foreshadowing"):
         items = ledger["active_foreshadowing"][:10]
@@ -530,7 +563,13 @@ def build_chapter_context(
     token_budget: int = CONTEXT_TOKEN_BUDGET,
     volume_size: int = 30,
 ) -> dict:
-    """Build layered context within token budget."""
+    """在固定 token 预算内构建章节写作上下文。
+
+    这个函数是“上下文治理”的核心实现。它做的不是把所有历史都交给模型，
+    而是回答两个问题：
+    1. 当前这一章最需要哪些已知信息。
+    2. 在预算有限时，哪些信息必须保留、哪些可以裁掉。
+    """
     should_close = db is None
     db = db or SessionLocal()
     summary_mgr = SummaryManager()

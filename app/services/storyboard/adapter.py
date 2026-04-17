@@ -7,6 +7,7 @@ from typing import Any
 
 @dataclass(slots=True)
 class AdaptedChapter:
+    """Adapted章节。"""
     chapter_num: int
     title: str
     summary: str
@@ -15,6 +16,7 @@ class AdaptedChapter:
 
 @dataclass(slots=True)
 class StyleIntent:
+    """StyleIntent。"""
     genre: str
     style: str
     tone: str
@@ -24,6 +26,7 @@ class StyleIntent:
 
 @dataclass(slots=True)
 class DirectorIntent:
+    """DirectorIntent。"""
     camera_language: str
     pacing_goal: str
     performance_focus: str
@@ -32,6 +35,7 @@ class DirectorIntent:
 
 @dataclass(slots=True)
 class PlatformIntent:
+    """PlatformIntent。"""
     lane: str
     target_seconds: int
     avg_shot_seconds: int
@@ -41,12 +45,14 @@ class PlatformIntent:
 
 @dataclass(slots=True)
 class HardConstraints:
+    """HardConstraints。"""
     must_keep_characters: list[str]
     must_keep_events: list[str]
     forbidden_new_mainline: bool
 
 
 def extract_style_intent(genre: str | None, style: str | None, novel_title: str, chapters: list[AdaptedChapter]) -> StyleIntent:
+    """提取styleintent。"""
     genre_val = (genre or "通用").strip() or "通用"
     style_val = (style or "网文通用").strip() or "网文通用"
     sample = "\n".join([c.title + " " + c.summary for c in chapters[:5]])
@@ -77,6 +83,7 @@ def extract_style_intent(genre: str | None, style: str | None, novel_title: str,
 
 
 def build_director_intent(style_intent: StyleIntent, lane: str) -> DirectorIntent:
+    """构建directorintent。"""
     if lane == "vertical_feed":
         return DirectorIntent(
             camera_language="高近景占比，快速切换，冲突先行",
@@ -93,6 +100,7 @@ def build_director_intent(style_intent: StyleIntent, lane: str) -> DirectorInten
 
 
 def build_platform_intent(lane: str, target_episode_seconds: int) -> PlatformIntent:
+    """构建platformintent。"""
     if lane == "vertical_feed":
         return PlatformIntent(
             lane=lane,
@@ -111,6 +119,7 @@ def build_platform_intent(lane: str, target_episode_seconds: int) -> PlatformInt
 
 
 def build_hard_constraints(chapters: list[AdaptedChapter]) -> HardConstraints:
+    """构建hardconstraints。"""
     core_events: list[str] = []
     core_characters: list[str] = []
     for chapter in chapters[:8]:
@@ -135,6 +144,7 @@ def prompt_contract(
     platform_intent: PlatformIntent,
     hard_constraints: HardConstraints,
 ) -> dict[str, Any]:
+    """执行 prompt contract 相关辅助逻辑。"""
     return {
         "StyleIntent": {
             "genre": style_intent.genre,

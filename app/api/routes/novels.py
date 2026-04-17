@@ -23,6 +23,7 @@ router = APIRouter()
 
 
 def _to_response(novel: Novel) -> NovelResponse:
+    """执行 to response 相关辅助逻辑。"""
     return NovelResponse(
         id=novel.uuid or str(novel.id),
         title=novel.title,
@@ -36,6 +37,7 @@ def _to_response(novel: Novel) -> NovelResponse:
 
 
 def _to_character_profile_response(row: StoryCharacterProfile, novel_public_id: str) -> CharacterProfileResponse:
+    """执行 to character profile response 相关辅助逻辑。"""
     return CharacterProfileResponse(
         id=row.id,
         novel_id=novel_public_id,
@@ -175,6 +177,7 @@ def list_character_profiles(
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.NOVEL_READ, resource_loader=load_novel_resource)),
 ):
+    """列出角色画像。"""
     novel = resolve_novel(db, novel_id)
     if not novel:
         raise HTTPException(404, "Novel not found")

@@ -14,6 +14,7 @@ RUNNING_SLOT_STATUSES = {"dispatching", "running"}
 
 
 def get_user_concurrency_limit(db: Session, *, user_uuid: str) -> int:
+    """返回用户并发limit。"""
     user = db.execute(select(User).where(User.uuid == user_uuid)).scalar_one_or_none()
     default_limit = max(1, int(get_effective_runtime_setting("creation_default_max_concurrent_tasks", int, 1) or 1))
     if not user:
@@ -24,6 +25,7 @@ def get_user_concurrency_limit(db: Session, *, user_uuid: str) -> int:
 
 
 def count_user_running_slots(db: Session, *, user_uuid: str) -> int:
+    """统计用户runningslots。"""
     count = (
         db.execute(
             select(func.count())

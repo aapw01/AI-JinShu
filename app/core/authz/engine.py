@@ -6,12 +6,15 @@ from app.core.authz.types import Permission, Principal, ResourceContext
 
 
 class AuthorizationResult:
+    """AuthorizationResult。"""
     def __init__(self, allowed: bool, reason: str):
+        """初始化对象所需的运行时依赖。"""
         self.allowed = allowed
         self.reason = reason
 
 
 def authorize(principal: Principal, permission: Permission, resource: ResourceContext | None = None) -> AuthorizationResult:
+    """执行 authorize 相关辅助逻辑。"""
     if not principal.is_authenticated:
         return AuthorizationResult(False, "unauthenticated")
 

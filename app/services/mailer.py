@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 def _can_send() -> bool:
+    """执行 can send 相关辅助逻辑。"""
     s = get_settings()
     return bool(s.sendgrid_api_key and s.sendgrid_from_email)
 
@@ -23,6 +24,7 @@ def can_send_email() -> bool:
 
 
 def send_email(to_email: str, subject: str, html_body: str, text_body: str) -> bool:
+    """执行 send email 相关辅助逻辑。"""
     s = get_settings()
     if not _can_send():
         log_event(logger, "mail.send.skipped", level=logging.WARNING, reason="sendgrid_not_configured", email=to_email, subject=subject)
@@ -84,6 +86,7 @@ def send_email(to_email: str, subject: str, html_body: str, text_body: str) -> b
 
 
 def send_verify_email(to_email: str, verify_link: str) -> bool:
+    """执行 send verify email 相关辅助逻辑。"""
     subject = "请激活你的 AI 锦书账号"
     text = f"请点击以下链接激活账号：{verify_link}"
     html = (
@@ -94,6 +97,7 @@ def send_verify_email(to_email: str, verify_link: str) -> bool:
 
 
 def send_reset_password_email(to_email: str, reset_link: str) -> bool:
+    """执行 send reset password email 相关辅助逻辑。"""
     subject = "AI 锦书密码重置"
     text = f"请点击以下链接重置密码：{reset_link}"
     html = (

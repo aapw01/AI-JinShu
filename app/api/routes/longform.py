@@ -21,6 +21,7 @@ router = APIRouter()
 
 
 def _resolve_version_or_400(db: Session, *, novel_id: int, version_id: int | None) -> NovelVersion:
+    """根据请求里的版本 ID 找到对应版本；缺失或越权时抛出错误。"""
     if version_id is None:
         raise http_error(400, "missing_version_id", "version_id is required")
     version = db.execute(
@@ -270,6 +271,7 @@ def list_feedback(
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.NOVEL_READ, resource_loader=load_novel_resource)),
 ):
+    """列出feedback。"""
     novel = resolve_novel(db, novel_id)
     if not novel:
         raise HTTPException(404, "Novel not found")
@@ -302,6 +304,7 @@ def create_feedback(
     db: Session = Depends(get_db),
     _: Principal = Depends(require_permission(Permission.NOVEL_UPDATE, resource_loader=load_novel_resource)),
 ):
+    """创建feedback。"""
     novel = resolve_novel(db, novel_id)
     if not novel:
         raise HTTPException(404, "Novel not found")

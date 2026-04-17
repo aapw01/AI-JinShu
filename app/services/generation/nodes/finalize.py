@@ -48,6 +48,7 @@ def _build_fallback_facts_from_summary(summary_text: str, chapter_num: int) -> d
 
 
 def _paragraph_fragmentation_metrics(content: str) -> dict[str, float]:
+    """执行 paragraph fragmentation metrics 相关辅助逻辑。"""
     paragraphs = [part.strip() for part in str(content or "").split("\n\n") if part.strip()]
     if not paragraphs:
         return {
@@ -73,6 +74,7 @@ def _paragraph_fragmentation_metrics(content: str) -> dict[str, float]:
 
 
 def _should_compact_paragraphs(metrics: dict[str, float]) -> bool:
+    """执行 should compact paragraphs 相关辅助逻辑。"""
     paragraph_count = int(metrics.get("paragraph_count") or 0)
     avg_len = float(metrics.get("avg_paragraph_len") or 0.0)
     short_ratio = float(metrics.get("short_paragraph_ratio") or 0.0)
@@ -87,6 +89,7 @@ def _should_compact_paragraphs(metrics: dict[str, float]) -> bool:
 
 
 def _paragraph_compaction_feedback(metrics: dict[str, float]) -> str:
+    """执行 paragraph compaction feedback 相关辅助逻辑。"""
     return (
         "【段落整理】当前正文存在碎段过多问题，请在不改剧情与人物动机的前提下整理段落。\n"
         f"- 当前段落数：{int(metrics.get('paragraph_count') or 0)}\n"
@@ -102,6 +105,7 @@ def _paragraph_compaction_feedback(metrics: dict[str, float]) -> str:
 
 
 def _is_structural_replan(state: GenerationState) -> bool:
+    """执行 is structural replan 相关辅助逻辑。"""
     segment_plan = state.get("segment_plan")
     if not isinstance(segment_plan, dict):
         return False
@@ -110,6 +114,7 @@ def _is_structural_replan(state: GenerationState) -> bool:
 
 
 def _ensure_retry_write_allowed(state: GenerationState, chapter_num: int) -> None:
+    """确保retrywriteallowed存在并可用。"""
     retry_floor = int(state.get("retry_resume_chapter") or 0)
     if retry_floor <= 0:
         return
@@ -131,6 +136,7 @@ def _is_quality_passed(
     reviewer_aesthetic: float,
     aesthetic_score_val: float,
 ) -> bool:
+    """执行 is quality passed 相关辅助逻辑。"""
     return bool(
         review_score >= REVIEW_SCORE_THRESHOLD
         and factual_score >= 0.65
@@ -142,10 +148,12 @@ def _is_quality_passed(
 
 
 def node_finalize(state: GenerationState) -> GenerationState:
+    """执行 node finalize 相关辅助逻辑。"""
     def _call_finalizer_run(
         draft: str,
         feedback: str,
     ) -> str:
+        """按 finalizer 的真实签名裁剪参数后执行一次定稿调用。"""
         run_fn = state["finalizer"].run
         signature = inspect.signature(run_fn)
         kwargs = {

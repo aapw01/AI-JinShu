@@ -12,6 +12,7 @@ from app.services.generation.state import GenerationState
 
 
 def node_final_book_review(state: GenerationState) -> GenerationState:
+    """执行 node final book review 相关辅助逻辑。"""
     effective_end = int(state.get("book_effective_end_chapter") or state.get("end_chapter") or state.get("current_chapter") or 0)
     effective_total = max(int(state.get("book_target_total_chapters") or 0), effective_end)
     persist_resume_runtime_state(
