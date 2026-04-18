@@ -59,6 +59,18 @@
 </volume_brief>
 {% endif %}
 
+{% if context.retrieved_memory_brief | default("") %}
+<retrieved_memory_brief>
+{{ context.retrieved_memory_brief }}
+</retrieved_memory_brief>
+{% endif %}
+
+{% if context.retrieved_evidence %}
+<retrieved_evidence_json>
+{{ context.retrieved_evidence | tojson_pretty }}
+</retrieved_evidence_json>
+{% endif %}
+
 {% if context.recent_advancement_window %}
 <recent_advancement_window_json>
 {{ context.recent_advancement_window | tojson_pretty }}

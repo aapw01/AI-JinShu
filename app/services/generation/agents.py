@@ -137,6 +137,8 @@ def _build_reviewer_context_json(context: dict[str, Any], *, reviewer_kind: str)
             "transition_constraints",
             "anti_repeat_constraints",
             "story_bible_context",
+            "retrieved_memory_brief",
+            "retrieved_evidence",
             "character_states",
             "summaries",
             "memory_governance_notes",

@@ -126,6 +126,10 @@ def test_chapter_finalized_quality_handler_is_required(monkeypatch):
         lambda _event: None,
     )
     monkeypatch.setattr(
+        "app.services.generation.chapter_commit._chapter_finalized_knowledge_chunk_handler",
+        lambda _event: None,
+    )
+    monkeypatch.setattr(
         "app.services.generation.chapter_commit._chapter_finalized_checkpoint_handler",
         lambda _event: None,
     )

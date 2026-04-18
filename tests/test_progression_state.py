@@ -152,12 +152,21 @@ def test_build_chapter_context_includes_context_sources(monkeypatch):
         def get_volume_brief(self, *_args, **_kwargs):
             return "第一卷概览"
 
-    class _VectorStore:
-        def search(self, *_args, **_kwargs):
-            return [{"content": "知识块", "chunk_type": "memory"}]
+    class _Retriever:
+        def retrieve(self, *_args, **_kwargs):
+            return [
+                {
+                    "chunk_id": "fact-1",
+                    "source_type": "chapter_fact_delta",
+                    "chapter_num": 1,
+                    "summary": "林初确认云家线索",
+                    "content": "林初确认了云家主线线索，并怀疑苏晚隐瞒真相。",
+                    "fusion_score": 1.2,
+                }
+            ]
 
     monkeypatch.setattr("app.services.memory.context.SummaryManager", lambda: _SummaryMgr())
-    monkeypatch.setattr("app.services.memory.context.VectorStoreWrapper", lambda: _VectorStore())
+    monkeypatch.setattr("app.services.memory.context.KnowledgeRetriever", lambda: _Retriever())
 
     ctx = build_chapter_context(
         novel.id,
@@ -171,6 +180,9 @@ def test_build_chapter_context_includes_context_sources(monkeypatch):
     assert any(item["source_type"] == "global_bible" for item in ctx["context_sources"])
     assert any(item["source_type"] == "recent_advancement_window" for item in ctx["context_sources"])
     assert any(item["source_type"] == "knowledge_chunks" for item in ctx["context_sources"])
+    assert ctx["retrieved_memory_brief"]
+    assert ctx["retrieved_evidence"]
+    assert ctx["retrieval_debug"]["retrieved_chunk_ids"] == ["fact-1"]
     assert ctx["context_sources"][-1]["included"] in {True, False}
     assert all("value" not in item for item in ctx["context_sources"])
     assert all(set(item.keys()) == {"source_type", "source_key", "chapter_range", "selection_reason", "priority", "approx_tokens", "included"} for item in ctx["context_sources"])
@@ -205,12 +217,12 @@ def test_build_chapter_context_recent_window_preserves_immediate_predecessor(mon
         def get_volume_brief(self, *_args, **_kwargs):
             return ""
 
-    class _VectorStore:
-        def search(self, *_args, **_kwargs):
+    class _Retriever:
+        def retrieve(self, *_args, **_kwargs):
             return []
 
     monkeypatch.setattr("app.services.memory.context.SummaryManager", lambda: _SummaryMgr())
-    monkeypatch.setattr("app.services.memory.context.VectorStoreWrapper", lambda: _VectorStore())
+    monkeypatch.setattr("app.services.memory.context.KnowledgeRetriever", lambda: _Retriever())
 
     ctx = build_chapter_context(
         novel.id,
@@ -225,3 +237,142 @@ def test_build_chapter_context_recent_window_preserves_immediate_predecessor(mon
 
     assert 8 in selected_chapters
     assert ctx["constraint_usage_notes"]["selected_recent_chapters"] == selected_chapters
+
+
+def test_build_chapter_context_preserves_retriever_fusion_order(monkeypatch):
+    novel = _create_novel("context-fusion-order")
+
+    monkeypatch.setattr(
+        "app.services.memory.context._build_story_bible_context",
+        lambda *_args, **_kwargs: "",
+    )
+    monkeypatch.setattr(
+        "app.services.memory.context.get_thread_ledger",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "app.services.memory.context._get_last_chapter_ending",
+        lambda *_args, **_kwargs: "",
+    )
+
+    class _SummaryMgr:
+        def get_summaries_before(self, *_args, **_kwargs):
+            return []
+
+        def get_volume_brief(self, *_args, **_kwargs):
+            return ""
+
+    class _Retriever:
+        def retrieve(self, *_args, **_kwargs):
+            return [
+                {
+                    "chunk_id": "high-fusion",
+                    "source_type": "chapter_fact_delta",
+                    "chapter_num": 4,
+                    "summary": "真正有价值的证据",
+                    "content": "幕后主使并非苏晚，而是旧账背后的第三人。",
+                    "fusion_score": 4.0,
+                    "vector_rank": 1,
+                    "fts_rank": 4,
+                },
+                {
+                    "chunk_id": "low-fusion",
+                    "source_type": "chapter_summary",
+                    "chapter_num": 1,
+                    "summary": "云家线索反复出现",
+                    "content": "云家线索、云家线索、云家线索。",
+                    "fusion_score": 0.2,
+                    "fts_rank": 1,
+                },
+            ]
+
+    monkeypatch.setattr("app.services.memory.context.SummaryManager", lambda: _SummaryMgr())
+    monkeypatch.setattr("app.services.memory.context.KnowledgeRetriever", lambda: _Retriever())
+
+    ctx = build_chapter_context(
+        novel.id,
+        novel_version_id=None,
+        chapter_num=5,
+        prewrite={"specification": {"characters": []}},
+        outline={"chapter_num": 5, "title": "第5章", "outline": "继续推进云家线"},
+    )
+
+    assert [item["chunk_id"] for item in ctx["knowledge_chunks"]] == ["high-fusion", "low-fusion"]
+    assert ctx["retrieval_debug"]["retrieved_chunk_ids"] == ["high-fusion", "low-fusion"]
+
+
+def test_build_chapter_context_drops_retrieved_evidence_when_budget_too_tight(monkeypatch):
+    novel = _create_novel("context-budget-tight")
+
+    monkeypatch.setattr("app.services.memory.context.estimate_tokens", lambda value: len(str(value or "")))
+    monkeypatch.setattr(
+        "app.services.memory.context._build_story_bible_context",
+        lambda *_args, **_kwargs: "",
+    )
+    monkeypatch.setattr(
+        "app.services.memory.context.get_thread_ledger",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "app.services.memory.context._get_last_chapter_ending",
+        lambda *_args, **_kwargs: "",
+    )
+    monkeypatch.setattr(
+        "app.services.memory.context.build_anti_repeat_constraints",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        "app.services.memory.context.build_transition_constraints",
+        lambda *_args, **_kwargs: {},
+    )
+
+    class _SummaryMgr:
+        def get_summaries_before(self, *_args, **_kwargs):
+            return []
+
+        def get_volume_brief(self, *_args, **_kwargs):
+            return ""
+
+    class _ProgressionMgr:
+        def list_recent_advancements(self, *_args, **_kwargs):
+            return []
+
+        def get_previous_transition(self, *_args, **_kwargs):
+            return {}
+
+        def get_volume_arc_state(self, *_args, **_kwargs):
+            return {}
+
+        def get_book_progression_state(self, *_args, **_kwargs):
+            return {}
+
+    class _Retriever:
+        def retrieve(self, *_args, **_kwargs):
+            return [
+                {
+                    "chunk_id": "fact-compact",
+                    "source_type": "chapter_fact_delta",
+                    "chapter_num": 2,
+                    "summary": "林舟已经知道云家真正操盘者不是苏晚",
+                    "content": "确认真凶。",
+                    "fusion_score": 2.5,
+                    "vector_rank": 1,
+                }
+            ]
+
+    monkeypatch.setattr("app.services.memory.context.SummaryManager", lambda: _SummaryMgr())
+    monkeypatch.setattr("app.services.memory.context.ProgressionMemoryManager", lambda: _ProgressionMgr())
+    monkeypatch.setattr("app.services.memory.context.KnowledgeRetriever", lambda: _Retriever())
+
+    ctx = build_chapter_context(
+        novel.id,
+        novel_version_id=None,
+        chapter_num=3,
+        prewrite={"specification": {"characters": []}},
+        outline={"chapter_num": 3, "title": "第3章", "outline": "承接上一章"},
+        token_budget=130,
+    )
+
+    assert ctx["retrieved_memory_brief"]
+    assert ctx["retrieved_evidence"] == []
+    assert ctx["budget_used"] <= ctx["budget_total"]

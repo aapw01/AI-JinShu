@@ -2,7 +2,8 @@
 import uuid
 import os
 from datetime import datetime, timezone
-from sqlalchemy import BigInteger, Column, Integer, String, Text, DateTime, ForeignKey, JSON, Float, Index
+from sqlalchemy import BigInteger, Column, Integer, String, Text, DateTime, ForeignKey, JSON, Float, Index, func
+from sqlalchemy.dialects.postgresql import TSVECTOR
 from pgvector.sqlalchemy import Vector
 
 from app.core.database import Base
@@ -10,6 +11,7 @@ from app.core.database import Base
 # Support both postgresql:// and postgres:// URL schemes
 _db_url = os.getenv("DATABASE_URL", "")
 EMBEDDING_COLUMN_TYPE = Vector(1536) if "postgres" in _db_url.lower() else Text
+SEARCH_VECTOR_COLUMN_TYPE = TSVECTOR if "postgres" in _db_url.lower() else Text
 
 
 def _uuid_default():
@@ -186,7 +188,14 @@ class KnowledgeChunk(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     novel_id = Column(Integer, ForeignKey("novels.id", ondelete="CASCADE"), nullable=False)
     novel_version_id = Column(Integer, ForeignKey("novel_versions.id", ondelete="CASCADE"), nullable=True, index=True)
+    source_type = Column(String(50), nullable=False, default="chapter_summary")
+    source_key = Column(String(255), nullable=False, default="")
+    chapter_num = Column(Integer, nullable=True)
+    summary = Column(Text, nullable=False, default="")
     content = Column(Text, nullable=False)
+    search_text = Column(Text, nullable=False, default="")
+    search_vector = Column(SEARCH_VECTOR_COLUMN_TYPE, nullable=True)
+    importance_score = Column(Float, nullable=False, default=0.0)
     chunk_type = Column(String(50), nullable=True)
     embedding = Column(EMBEDDING_COLUMN_TYPE, nullable=True)
     metadata_ = Column("metadata", JSON, default=dict)
@@ -631,6 +640,15 @@ Index("idx_chapter_versions_version_chapter", ChapterVersion.novel_version_id, C
 Index("idx_chapter_outlines_version_chapter", ChapterOutline.novel_version_id, ChapterOutline.chapter_num, unique=True)
 Index("idx_chapter_embeddings_version_chapter", ChapterEmbedding.novel_version_id, ChapterEmbedding.chapter_num, unique=True)
 Index("idx_knowledge_chunks_version_type", KnowledgeChunk.novel_version_id, KnowledgeChunk.chunk_type)
+Index(
+    "idx_knowledge_chunks_scope_source_key",
+    KnowledgeChunk.novel_id,
+    func.coalesce(KnowledgeChunk.novel_version_id, 0),
+    KnowledgeChunk.source_key,
+    unique=True,
+)
+Index("idx_knowledge_chunks_version_source_type", KnowledgeChunk.novel_version_id, KnowledgeChunk.source_type)
+Index("idx_knowledge_chunks_version_chapter", KnowledgeChunk.novel_version_id, KnowledgeChunk.chapter_num)
 Index("idx_rewrite_requests_novel_status", RewriteRequest.novel_id, RewriteRequest.status)
 Index("idx_rewrite_annotations_request_chapter", RewriteAnnotation.rewrite_request_id, RewriteAnnotation.chapter_num)
 Index("idx_users_email", User.email, unique=True)
