@@ -45,6 +45,12 @@
 } | tojson_pretty }}
 </outline_json>
 
+{% if context.character_focus_pack %}
+<character_focus_pack_json>
+{{ context.character_focus_pack | tojson_pretty }}
+</character_focus_pack_json>
+{% endif %}
+
 <recent_window>
 {{ context.recent_window | default("无前文摘要") }}
 </recent_window>

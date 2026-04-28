@@ -42,6 +42,12 @@
 }
 </outline_json>
 
+{% if context.character_focus_pack %}
+<character_focus_pack_json>
+{{ context.character_focus_pack | tojson_pretty }}
+</character_focus_pack_json>
+{% endif %}
+
 {% if context.book_progression_state %}
 <book_progression_state_json>
 {{ context.book_progression_state | tojson_pretty }}

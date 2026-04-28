@@ -8,14 +8,16 @@
 层级优先级：
 1. 全局设定：世界观、角色 roster、创作宪法。
 2. 线程账本：活跃伏笔、未解钩子、当前冲突线。
-3. 近期窗口：最近摘要 + 上章结尾，保证局部连续性。
-4. 卷/整书推进状态：防重复、控节奏、保主线。
-5. 可选检索块：只在预算允许且与当前大纲足够相关时注入。
+3. 人物约束包：当前章相关角色的动机、声纹、状态和硬锁定项。
+4. 近期窗口：最近摘要 + 上章结尾，保证局部连续性。
+5. 卷/整书推进状态：防重复、控节奏、保主线。
+6. 可选检索块：只在预算允许且与当前大纲足够相关时注入。
 
 面试可讲点：
 - 为什么不是每次把所有人物、所有章节摘要都塞给模型。
 - 为什么上下文治理的核心不是“存得多”，而是“选得准、选得稳”。
 """
+import logging
 import re
 from typing import Any, Optional
 
@@ -25,6 +27,8 @@ from sqlalchemy.orm import Session
 from app.core.database import SessionLocal
 from app.core.tokens import estimate_tokens
 from app.models.novel import ChapterVersion, NovelMemory, NovelSpecification, StoryFact
+from app.services.memory.character_focus import load_character_focus_pack
+from app.services.memory.context_blocks import ContextBlock, select_context_blocks
 from app.services.memory.progression_state import (
     ProgressionMemoryManager,
     build_anti_repeat_constraints,
@@ -45,6 +49,7 @@ RECENT_WINDOW_MAX_CHARS = 2000
 VOLUME_BRIEF_MAX_CHARS = 1600
 STORY_BIBLE_MAX_CHARS = 3200
 _SELECTION_TOKEN_RE = re.compile(r"[A-Za-z0-9_]{2,}|[\u4e00-\u9fff]{2,6}")
+logger = logging.getLogger(__name__)
 
 
 def _expand_selection_token(token: str) -> set[str]:
@@ -287,6 +292,66 @@ def _estimate_source_tokens(value: Any) -> int:
                 preview.extend(str(item)[:120] for item in raw[:4])
         return int(estimate_tokens("\n".join(preview)))
     return int(estimate_tokens(str(value or "")))
+
+
+def _empty_context_value(value: Any) -> Any:
+    """Return an empty value with the same broad shape as a context block."""
+    if isinstance(value, list):
+        return []
+    if isinstance(value, dict):
+        return {}
+    if isinstance(value, str):
+        return ""
+    return None
+
+
+def _apply_context_block_selection(
+    context: dict[str, Any],
+    *,
+    context_sources: list[dict[str, Any]],
+    token_budget: int,
+) -> dict[str, Any]:
+    """Apply token-budget block selection while preserving legacy context keys."""
+    blocks = [
+        ContextBlock("global_bible", "global_bible", "required", 1, _estimate_source_tokens(context.get("global_bible")), context.get("global_bible"), ("global_bible",)),
+        ContextBlock("outline_contract", "outline_contract", "required", 1, _estimate_source_tokens(context.get("outline_contract")), context.get("outline_contract"), ("outline_contract",)),
+        ContextBlock("thread_ledger", "thread_ledger", "preferred", 2, _estimate_source_tokens(context.get("thread_ledger_text")), context.get("thread_ledger_text"), ("thread_ledger", "thread_ledger_text")),
+        ContextBlock("character_focus_pack", "character_focus_pack", "preferred", 3, _estimate_source_tokens(context.get("character_focus_pack")), context.get("character_focus_pack"), ("character_focus_pack",)),
+        ContextBlock("story_bible_context", "story_bible_context", "preferred", 3, _estimate_source_tokens(context.get("story_bible_context")), context.get("story_bible_context"), ("story_bible_context",)),
+        ContextBlock("recent_advancement_window", "recent_advancement_window", "preferred", 4, _estimate_source_tokens(context.get("recent_advancement_window")), context.get("recent_advancement_window"), ("recent_advancement_window",)),
+        ContextBlock("previous_transition_state", "previous_transition_state", "required", 5, _estimate_source_tokens(context.get("previous_transition_state")), context.get("previous_transition_state"), ("previous_transition_state",)),
+        ContextBlock("current_volume_arc_state", "current_volume_arc_state", "optional", 6, _estimate_source_tokens(context.get("current_volume_arc_state")), context.get("current_volume_arc_state"), ("current_volume_arc_state",)),
+        ContextBlock("book_progression_state", "book_progression_state", "optional", 7, _estimate_source_tokens(context.get("book_progression_state")), context.get("book_progression_state"), ("book_progression_state",)),
+        ContextBlock("recent_window", "recent_window", "preferred", 8, _estimate_source_tokens(context.get("recent_window")), context.get("recent_window"), ("summaries", "recent_window")),
+        ContextBlock("volume_brief", "volume_brief", "optional", 9, _estimate_source_tokens(context.get("volume_brief")), context.get("volume_brief"), ("volume_brief",)),
+        ContextBlock("knowledge_chunks", "knowledge_chunks", "optional", 10, _estimate_source_tokens(context.get("knowledge_chunks")), context.get("knowledge_chunks"), ("knowledge_chunks",)),
+        ContextBlock("anti_repeat_constraints", "anti_repeat_constraints", "required", 11, _estimate_source_tokens(context.get("anti_repeat_constraints")), context.get("anti_repeat_constraints"), ("anti_repeat_constraints",)),
+        ContextBlock("transition_constraints", "transition_constraints", "required", 12, _estimate_source_tokens(context.get("transition_constraints")), context.get("transition_constraints"), ("transition_constraints",)),
+    ]
+    selection = select_context_blocks(blocks, token_budget=token_budget)
+    selected_by_source = {
+        block.source_type: block
+        for block in selection.blocks
+    }
+    for block in selection.blocks:
+        if block.included:
+            continue
+        for field_name in block.field_names:
+            if field_name in context:
+                context[field_name] = _empty_context_value(context[field_name])
+
+    for source in context_sources:
+        block = selected_by_source.get(str(source.get("source_type") or ""))
+        if block is not None:
+            source["included"] = bool(source.get("included")) and bool(block.included)
+
+    selector_meta = dict(context.get("context_selector_meta") or {})
+    selector_meta.update(selection.as_metadata())
+    context["context_selector_meta"] = selector_meta
+    context["context_blocks"] = selection.as_metadata()["blocks"]
+    context["budget_used"] = selection.used_tokens
+    context["budget_total"] = token_budget
+    return context
 
 
 def _build_story_bible_context(
@@ -614,6 +679,30 @@ def build_chapter_context(
                 included=bool(story_bible_context),
             )
         )
+        try:
+            character_focus_pack = load_character_focus_pack(
+                db,
+                novel_id=novel_id,
+                novel_version_id=novel_version_id,
+                prewrite=prewrite,
+                outline=outline,
+                max_items=6,
+            )
+        except Exception:
+            logger.warning("character_focus_pack build failed novel=%s chapter=%s", novel_id, chapter_num, exc_info=True)
+            character_focus_pack = {}
+        if not character_focus_pack.get("characters"):
+            character_focus_pack = {}
+        context_sources.append(
+            _make_context_source(
+                source_type="character_focus_pack",
+                source_key="character_focus",
+                selection_reason="chapter_character_motivation_voice",
+                priority=3,
+                approx_tokens=_estimate_source_tokens(character_focus_pack),
+                included=bool(character_focus_pack.get("characters")),
+            )
+        )
         recent_advancement_window = progression_mgr.list_recent_advancements(
             novel_id,
             chapter_num,
@@ -824,10 +913,11 @@ def build_chapter_context(
             "knowledge_chunks_candidate_count": len(chunk_candidates),
         }
 
-        return {
+        context_payload = {
             "global_bible": global_bible,
             "thread_ledger": thread_ledger,
             "thread_ledger_text": thread_ledger_str,
+            "character_focus_pack": character_focus_pack,
             "story_bible_context": story_bible_context,
             "outline_contract": outline_contract,
             "recent_advancement_window": recent_advancement_window,
@@ -848,6 +938,11 @@ def build_chapter_context(
             "budget_used": used,
             "budget_total": token_budget,
         }
+        return _apply_context_block_selection(
+            context_payload,
+            context_sources=context_sources,
+            token_budget=token_budget,
+        )
     finally:
         if should_close:
             db.close()
