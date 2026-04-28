@@ -135,6 +135,56 @@ def persist_resume_runtime_state(
         db.close()
 
 
+def persist_chapter_runtime_snapshot(
+    state: GenerationState | dict[str, Any],
+    *,
+    chapter_num: int,
+    stage: str,
+    prompt_meta: dict[str, Any] | None,
+    diagnostics: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Persist a lightweight, replay-oriented snapshot for one generated chapter."""
+    context = state.get("context") if isinstance(state, dict) else {}
+    context = context if isinstance(context, dict) else {}
+    selector_meta = context.get("context_selector_meta") if isinstance(context.get("context_selector_meta"), dict) else {}
+    snapshot = {
+        "chapter_num": int(chapter_num),
+        "stage": str(stage),
+        "strategy": str(state.get("strategy") or ""),
+        "prompt": dict(prompt_meta or {}),
+        "context": {
+            "included_block_ids": list(selector_meta.get("included_block_ids") or []),
+            "dropped_block_ids": list(selector_meta.get("dropped_block_ids") or []),
+            "used_tokens": int(selector_meta.get("used_tokens") or context.get("budget_used") or 0),
+            "token_budget": int(selector_meta.get("token_budget") or context.get("budget_total") or 0),
+            "sources": list(context.get("context_sources") or []),
+        },
+        "diagnostics": dict(diagnostics or {}),
+    }
+
+    local_snapshots = state.setdefault("chapter_runtime_snapshots", {})
+    if isinstance(local_snapshots, dict):
+        local_snapshots[str(int(chapter_num))] = snapshot
+
+    creation_task_id = state.get("creation_task_id")
+    if not creation_task_id:
+        return snapshot
+    db = SessionLocal()
+    try:
+        update_resume_runtime_state(
+            db,
+            creation_task_id=int(creation_task_id),
+            runtime_state={"chapter_runtime_snapshots": {str(int(chapter_num)): snapshot}},
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.warning("Failed to persist chapter runtime snapshot", exc_info=True)
+    finally:
+        db.close()
+    return snapshot
+
+
 def chapter_progress(state: GenerationState, phase_ratio: float) -> float:
     """把“当前章节内部进度”映射为“整本书的全局进度百分比”。"""
     total = max(

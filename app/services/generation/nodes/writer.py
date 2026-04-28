@@ -5,12 +5,33 @@ import inspect
 from typing import Any
 
 from app.core.constants import DEFAULT_CHAPTER_WORD_COUNT
+from app.core.llm_contract import get_last_prompt_meta
 from app.core.llm_usage import snapshot_usage
 from app.core.strategy import resolve_ai_profile
 from app.services.generation.contracts import OutputContractError
 from app.services.generation.length_control import trim_generated_text
-from app.services.generation.progress import chapter_progress, progress
+from app.services.generation.progress import chapter_progress, persist_chapter_runtime_snapshot, progress
 from app.services.generation.state import GenerationState
+
+
+def _writer_prompt_meta(chapter_num: int, provider: str | None, model: str | None) -> dict[str, Any]:
+    """Return prompt metadata only when it belongs to the current writer call."""
+    fallback = {
+        "stage": "writer",
+        "chapter_num": int(chapter_num),
+        "provider": provider,
+        "model": model,
+    }
+    meta = get_last_prompt_meta() or {}
+    if str(meta.get("stage") or "") != "writer":
+        return fallback
+    if int(meta.get("chapter_num") or 0) != int(chapter_num):
+        return fallback
+    if str(meta.get("provider") or "") != str(provider or ""):
+        return fallback
+    if str(meta.get("model") or "") != str(model or ""):
+        return fallback
+    return dict(meta)
 
 
 def node_writer(state: GenerationState) -> GenerationState:
@@ -174,4 +195,17 @@ def node_writer(state: GenerationState) -> GenerationState:
     input_tokens = int(usage.get("input_tokens") or state["total_input_tokens"] or 0)
     output_tokens = int(usage.get("output_tokens") or state["total_output_tokens"] or 0)
     primary = draft_a or draft_b
+    persist_chapter_runtime_snapshot(
+        state,
+        chapter_num=chapter_num,
+        stage="writer",
+        prompt_meta=_writer_prompt_meta(chapter_num, w_provider, w_model),
+        diagnostics={
+            "ab_variants": [str(item.get("variant")) for item in candidates],
+            "selected_variant": "A" if draft_a else "B",
+            "word_count_target": target_word_count,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+        },
+    )
     return {"candidate_drafts": candidates, "draft": primary, "total_input_tokens": input_tokens, "total_output_tokens": output_tokens}

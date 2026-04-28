@@ -21,6 +21,7 @@ from app.core.llm import extract_provider_block, get_llm_with_fallback, response
 from app.core.strategy import resolve_ai_profile
 from app.core.llm_contract import invoke_chapter_body_structured
 from app.prompts import render_prompt
+from app.prompts.registry import render_prompt_asset
 from app.services.generation.common import (
     is_outline_content_valid,
     load_outlines_from_db,
@@ -1553,9 +1554,10 @@ class WriterAgent:
         closure_state: dict[str, Any] | None = None,
     ) -> str:
         """执行run。"""
-        template = "first_chapter" if chapter_num == 1 else "next_chapter"
-        prompt = render_prompt(
-            template,
+        asset_id = "generation.chapter.first_writer" if chapter_num == 1 else "generation.chapter.writer"
+        rendered = render_prompt_asset(
+            asset_id,
+            renderer=render_prompt,
             novel_id=novel_id,
             chapter_num=chapter_num,
             outline=outline,
@@ -1573,6 +1575,7 @@ class WriterAgent:
             ),
             **build_chapter_length_prompt_kwargs(word_count),
         )
+        prompt = rendered.text
         try:
             content = invoke_chapter_body_structured(
                 prompt=prompt,
@@ -1581,8 +1584,9 @@ class WriterAgent:
                 provider=provider,
                 model=model,
                 inference=inference,
-                prompt_template=template,
-                prompt_version="v2",
+                prompt_template=str(rendered.meta["prompt_template"]),
+                prompt_version=str(rendered.meta["prompt_version"]),
+                prompt_asset_id=str(rendered.meta["prompt_asset_id"]),
             )
             logger.info(f"WriterAgent completed for novel {novel_id} chapter {chapter_num}, length: {len(content)}")
             return content
@@ -1624,16 +1628,18 @@ class ReviewerAgent:
         inference: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """执行structured。"""
-        template = "reviewer_structured"
+        asset_id = "generation.review.structured"
         llm = get_llm_with_fallback(provider, model, inference=inference)
-        prompt = render_prompt(
-            template,
+        rendered = render_prompt_asset(
+            asset_id,
+            renderer=render_prompt,
             chapter_num=chapter_num,
             language=language,
             native_style_profile=(native_style_profile or "默认"),
             draft=(draft[:7000]),
             role_section=build_reviewer_role_section("结构审校角色"),
         )
+        prompt = rendered.text
         result = _invoke_json_with_schema(
             llm,
             prompt,
@@ -1643,8 +1649,8 @@ class ReviewerAgent:
             provider=provider,
             model=model,
             chapter_num=chapter_num,
-            prompt_template=template,
-            prompt_version="v2",
+            prompt_template=str(rendered.meta["prompt_template"]),
+            prompt_version=str(rendered.meta["prompt_version"]),
         )
         score = float(result.get("score", 0.8))
         if score > 1:
@@ -1708,16 +1714,18 @@ class ReviewerAgent:
         inference: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """执行factualstructured。"""
-        template = "reviewer_factual_structured"
+        asset_id = "generation.review.factual"
         llm = get_llm_with_fallback(provider, model, inference=inference)
-        prompt = render_prompt(
-            template,
+        rendered = render_prompt_asset(
+            asset_id,
+            renderer=render_prompt,
             chapter_num=chapter_num,
             context_json=_build_reviewer_context_json(context, reviewer_kind="factual"),
             draft=(draft[:6000]),
             role_section=build_reviewer_role_section("事实一致性审校角色"),
             memory_policy_section=build_memory_governance_sections(include_constraint_usage=True),
         )
+        prompt = rendered.text
         result = _invoke_json_with_schema(
             llm,
             prompt,
@@ -1727,8 +1735,8 @@ class ReviewerAgent:
             provider=provider,
             model=model,
             chapter_num=chapter_num,
-            prompt_template=template,
-            prompt_version="v2",
+            prompt_template=str(rendered.meta["prompt_template"]),
+            prompt_version=str(rendered.meta["prompt_version"]),
         )
         score = float(result.get("score", 0.8))
         if score > 1:
@@ -1750,10 +1758,11 @@ class ReviewerAgent:
         inference: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """执行progressionstructured。"""
-        template = "reviewer_progression_structured"
+        asset_id = "generation.review.progression"
         llm = get_llm_with_fallback(provider, model, inference=inference)
-        prompt = render_prompt(
-            template,
+        rendered = render_prompt_asset(
+            asset_id,
+            renderer=render_prompt,
             chapter_num=chapter_num,
             language=language,
             context_json=_build_reviewer_context_json(context, reviewer_kind="progression"),
@@ -1761,6 +1770,7 @@ class ReviewerAgent:
             role_section=build_reviewer_role_section("推进与连续性审校角色"),
             memory_policy_section=build_memory_governance_sections(include_constraint_usage=True),
         )
+        prompt = rendered.text
         result = _invoke_json_with_schema(
             llm,
             prompt,
@@ -1770,8 +1780,8 @@ class ReviewerAgent:
             provider=provider,
             model=model,
             chapter_num=chapter_num,
-            prompt_template=template,
-            prompt_version="v1",
+            prompt_template=str(rendered.meta["prompt_template"]),
+            prompt_version=str(rendered.meta["prompt_version"]),
         )
         score = float(result.get("score", 0.8))
         if score > 1:
@@ -1815,14 +1825,16 @@ class ReviewerAgent:
         inference: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """执行aestheticstructured。"""
-        template = "reviewer_aesthetic_structured"
+        asset_id = "generation.review.aesthetic"
         llm = get_llm_with_fallback(provider, model, inference=inference)
-        prompt = render_prompt(
-            template,
+        rendered = render_prompt_asset(
+            asset_id,
+            renderer=render_prompt,
             chapter_num=chapter_num,
             draft=(draft[:6000]),
             role_section=build_reviewer_role_section("审美审校角色"),
         )
+        prompt = rendered.text
         result = _invoke_json_with_schema(
             llm,
             prompt,
@@ -1832,8 +1844,8 @@ class ReviewerAgent:
             provider=provider,
             model=model,
             chapter_num=chapter_num,
-            prompt_template=template,
-            prompt_version="v2",
+            prompt_template=str(rendered.meta["prompt_template"]),
+            prompt_version=str(rendered.meta["prompt_version"]),
         )
         score = float(result.get("score", 0.8))
         if score > 1:
@@ -1872,7 +1884,7 @@ class ReviewerAgent:
                 WebnovelPrinciplesSchema().model_dump(),
             )
 
-        template = "reviewer_combined"
+        asset_id = "generation.review.combined"
         combined_inference = dict(inference or {})
         if "temperature" not in combined_inference:
             combined_inference["temperature"] = 0.18
@@ -1880,8 +1892,9 @@ class ReviewerAgent:
         prog_ctx = _build_reviewer_context_json(context, reviewer_kind="progression")
         try:
             llm = get_llm_with_fallback(provider, model, inference=combined_inference)
-            prompt = render_prompt(
-                template,
+            rendered = render_prompt_asset(
+                asset_id,
+                renderer=render_prompt,
                 chapter_num=chapter_num,
                 language=language,
                 native_style_profile=(native_style_profile or "默认"),
@@ -1891,6 +1904,7 @@ class ReviewerAgent:
                 role_section=build_reviewer_role_section("综合审校角色"),
                 memory_policy_section=build_memory_governance_sections(include_constraint_usage=True),
             )
+            prompt = rendered.text
             result = _invoke_json_with_schema(
                 llm,
                 prompt,
@@ -1900,8 +1914,8 @@ class ReviewerAgent:
                 provider=provider,
                 model=model,
                 chapter_num=chapter_num,
-                prompt_template=template,
-                prompt_version="v1",
+                prompt_template=str(rendered.meta["prompt_template"]),
+                prompt_version=str(rendered.meta["prompt_version"]),
             )
         except Exception as exc:
             logger.warning("run_combined LLM call failed chapter=%s: %s", chapter_num, exc)
@@ -2042,9 +2056,9 @@ class FinalizerAgent:
         if not feedback or feedback == "Auto-review: acceptable quality":
             return draft
 
-        template = "finalizer_polish"
-        prompt = render_prompt(
-            template,
+        rendered = render_prompt_asset(
+            "generation.chapter.finalizer",
+            renderer=render_prompt,
             feedback=feedback,
             draft=draft,
             language=language,
@@ -2059,6 +2073,7 @@ class FinalizerAgent:
             ),
             **build_chapter_length_prompt_kwargs(word_count),
         )
+        prompt = rendered.text
 
         try:
             content = invoke_chapter_body_structured(
@@ -2067,8 +2082,9 @@ class FinalizerAgent:
                 provider=provider,
                 model=model,
                 inference=inference,
-                prompt_template=template,
-                prompt_version="v2",
+                prompt_template=str(rendered.meta["prompt_template"]),
+                prompt_version=str(rendered.meta["prompt_version"]),
+                prompt_asset_id=str(rendered.meta["prompt_asset_id"]),
             )
             logger.info(f"FinalizerAgent completed, length: {len(content)}")
             return content

@@ -83,6 +83,6 @@ def validate_chapter_body(
             provider=provider,
             model=model,
             detail=f"chapter_body_too_short len={len(body)} min_chars={int(min_chars)}",
-            retryable=False,
+            retryable=True,
         )
     return body

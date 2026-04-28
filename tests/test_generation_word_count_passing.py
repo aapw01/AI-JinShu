@@ -136,6 +136,67 @@ def test_node_writer_passes_default_word_count(monkeypatch):
     assert writer.calls == [DEFAULT_CHAPTER_WORD_COUNT]
 
 
+def test_node_writer_runtime_snapshot_ignores_stale_prompt_meta(monkeypatch):
+    class _PlainWriter:
+        def run(self, *_args, **_kwargs):
+            return "章节正文"
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "app.services.generation.nodes.writer.resolve_ai_profile",
+        lambda *_args, **_kwargs: {
+            "provider": "openai",
+            "model": "current-model",
+            "inference": {},
+            "resolution_trace": [],
+        },
+    )
+    monkeypatch.setattr("app.services.generation.nodes.writer.snapshot_usage", lambda: {"input_tokens": 0, "output_tokens": 0})
+    monkeypatch.setattr(
+        "app.services.generation.nodes.writer.get_last_prompt_meta",
+        lambda: {
+            "stage": "reviewer",
+            "chapter_num": 99,
+            "provider": "openai",
+            "model": "old-model",
+            "prompt_hash": "stale",
+        },
+    )
+
+    def _capture_snapshot(_state, *, prompt_meta, **_kwargs):
+        captured["prompt_meta"] = prompt_meta
+        return {}
+
+    monkeypatch.setattr("app.services.generation.nodes.writer.persist_chapter_runtime_snapshot", _capture_snapshot)
+
+    state = {
+        "novel_id": 1,
+        "strategy": "web-novel",
+        "writer": _PlainWriter(),
+        "current_chapter": 3,
+        "num_chapters": 15,
+        "start_chapter": 1,
+        "outline": {"chapter_num": 3, "title": "第3章"},
+        "context": {},
+        "target_language": "zh",
+        "native_style_profile": "默认",
+        "progress_callback": None,
+        "total_input_tokens": 0,
+        "total_output_tokens": 0,
+    }
+
+    node_writer(state)
+
+    prompt_meta = captured["prompt_meta"]
+    assert prompt_meta == {
+        "stage": "writer",
+        "chapter_num": 3,
+        "provider": "openai",
+        "model": "current-model",
+    }
+
+
 def test_node_finalize_passes_default_word_count(monkeypatch):
     class _CaptureFinalizer:
         def __init__(self):

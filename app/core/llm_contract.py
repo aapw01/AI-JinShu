@@ -83,6 +83,17 @@ def get_last_prompt_meta() -> dict[str, Any] | None:
     return dict(value)
 
 
+def _build_semantic_retry_prompt(prompt: str, detail: str) -> str:
+    """Append business/schema failure guidance for the next structured attempt."""
+    return (
+        f"{prompt}\n\n"
+        "【业务语义校验未通过】\n"
+        f"失败原因：{detail}\n"
+        "请重新生成完整 JSON 对象，必须修正上述问题；"
+        "只输出符合 schema 的 JSON，不要输出解释、Markdown 或额外文本。"
+    )
+
+
 def invoke_chapter_body_structured(
     *,
     prompt: str,
@@ -96,6 +107,7 @@ def invoke_chapter_body_structured(
     max_provider_fallbacks: int | None = None,
     prompt_template: str | None = None,
     prompt_version: str = "v2",
+    prompt_asset_id: str | None = None,
 ) -> str:
     """以严格结构化契约调用 LLM 生成章节正文。
 
@@ -112,6 +124,7 @@ def invoke_chapter_body_structured(
     min_body_chars = int(min_chars if min_chars is not None else LLM_OUTPUT_MIN_CHARS)
     p_template = str(prompt_template or stage)
     p_version = str(prompt_version or "v2")
+    p_asset_id = str(prompt_asset_id or "")
     p_hash = prompt_hash(prompt)
 
     failures: list[str] = []
@@ -121,6 +134,7 @@ def invoke_chapter_body_structured(
         adapter, _ = resolve_effective_adapter(candidate_provider)
         methods = _method_order(adapter)
         for method in methods:
+            prompt_for_attempt = prompt
             for attempt in range(schema_retries + 1):
                 try:
                     llm = get_llm(candidate_provider, candidate_model, inference=inference)
@@ -138,7 +152,7 @@ def invoke_chapter_body_structured(
                         # Safety net for unexpected strict-incompatible combinations
                         kwargs.pop("strict", None)
                         structured = llm.with_structured_output(ChapterBodySchema, **kwargs)
-                    result = structured.invoke(prompt)
+                    result = structured.invoke(prompt_for_attempt)
                     raw_resp: Any = None
                     parsed: Any = None
                     parsing_error: Any = None
@@ -183,8 +197,10 @@ def invoke_chapter_body_structured(
                     _LAST_PROMPT_META.set(
                         {
                             "stage": stage,
+                            "chapter_num": chapter_num,
                             "prompt_template": p_template,
                             "prompt_version": p_version,
+                            "prompt_asset_id": p_asset_id,
                             "prompt_hash": p_hash,
                             "provider": candidate_provider,
                             "model": candidate_model,
@@ -202,8 +218,16 @@ def invoke_chapter_body_structured(
                         retryable=True,
                     )
                     failures.append(str(err))
+                    if attempt < schema_retries:
+                        prompt_for_attempt = _build_semantic_retry_prompt(prompt, err.detail or err.code)
                 except OutputContractError as exc:
                     failures.append(str(exc))
+                    if (
+                        exc.retryable
+                        and exc.code in {"MODEL_OUTPUT_POLICY_VIOLATION", "MODEL_OUTPUT_SCHEMA_INVALID"}
+                        and attempt < schema_retries
+                    ):
+                        prompt_for_attempt = _build_semantic_retry_prompt(prompt, exc.detail or exc.code)
                 except Exception as exc:
                     failures.append(
                         f"stage={stage} provider={candidate_provider} model={candidate_model} method={method} call_error={type(exc).__name__}: {exc}"
@@ -237,8 +261,10 @@ def invoke_chapter_body_structured(
     _LAST_PROMPT_META.set(
         {
             "stage": stage,
+            "chapter_num": chapter_num,
             "prompt_template": p_template,
             "prompt_version": p_version,
+            "prompt_asset_id": p_asset_id,
             "prompt_hash": p_hash,
             "provider": provider,
             "model": model,

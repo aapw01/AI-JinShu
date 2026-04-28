@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import pytest
 
+from app.core.llm import _TrackedLLMProxy
 from app.core.llm_contract import get_last_prompt_meta, invoke_chapter_body_structured
-from app.services.generation.contracts import OutputContractError
+from app.core.llm_usage import begin_usage_session, end_usage_session, snapshot_usage
+from app.services.generation.contracts import ChapterBodySchema, OutputContractError
 
 
 class _RawResponse:
@@ -108,9 +110,104 @@ def test_invoke_contract_strict_exhausted_raises(monkeypatch):
     assert exc_info.value.code == "MODEL_OUTPUT_CONTRACT_EXHAUSTED"
 
 
-from types import SimpleNamespace
-from app.core.llm import _TrackedLLMProxy
-from app.core.llm_usage import begin_usage_session, end_usage_session, snapshot_usage
+def test_invoke_contract_semantic_retry_appends_guidance(monkeypatch):
+    prompts: list[str] = []
+
+    class _SemanticRunner:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, prompt: str):
+            prompts.append(prompt)
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "parsed": {"chapter_body": "太短"},
+                    "raw": _RawResponse(),
+                    "parsing_error": None,
+                }
+            return {
+                "parsed": {"chapter_body": "第二次输出已经补足了有效剧情推进和章节内容。"},
+                "raw": _RawResponse(),
+                "parsing_error": None,
+            }
+
+    class _SemanticLLM:
+        def __init__(self):
+            self.runner = _SemanticRunner()
+
+        def with_structured_output(self, _schema, *, method: str, include_raw: bool, **_kwargs):
+            assert method == "json_schema"
+            assert include_raw is True
+            return self.runner
+
+    fake = _SemanticLLM()
+    monkeypatch.setattr("app.core.llm_contract.get_llm", lambda *_args, **_kwargs: fake)
+
+    out = invoke_chapter_body_structured(
+        prompt="base prompt",
+        stage="writer",
+        provider="openai",
+        model="m",
+        chapter_num=2,
+        retries=1,
+        min_chars=10,
+        prompt_template="next_chapter",
+        prompt_version="v2",
+    )
+
+    assert out.startswith("第二次输出")
+    assert len(prompts) == 2
+    assert "业务语义校验未通过" in prompts[1]
+    assert "chapter_body_too_short" in prompts[1]
+
+
+def test_invoke_contract_schema_retry_appends_guidance(monkeypatch):
+    prompts: list[str] = []
+
+    class _SchemaRetryRunner:
+        def __init__(self):
+            self.calls = 0
+
+        def invoke(self, prompt: str):
+            prompts.append(prompt)
+            self.calls += 1
+            if self.calls == 1:
+                ChapterBodySchema.model_validate({})
+            return {
+                "parsed": {"chapter_body": "第二次输出修复了 JSON schema 缺失字段问题。"},
+                "raw": _RawResponse(),
+                "parsing_error": None,
+            }
+
+    class _SchemaRetryLLM:
+        def __init__(self):
+            self.runner = _SchemaRetryRunner()
+
+        def with_structured_output(self, _schema, *, method: str, include_raw: bool, **_kwargs):
+            assert method == "json_schema"
+            assert include_raw is True
+            return self.runner
+
+    fake = _SchemaRetryLLM()
+    monkeypatch.setattr("app.core.llm_contract.get_llm", lambda *_args, **_kwargs: fake)
+
+    out = invoke_chapter_body_structured(
+        prompt="base prompt",
+        stage="writer",
+        provider="openai",
+        model="m",
+        chapter_num=2,
+        retries=1,
+        min_chars=10,
+        prompt_template="next_chapter",
+        prompt_version="v2",
+    )
+
+    assert out.startswith("第二次输出")
+    assert len(prompts) == 2
+    assert "业务语义校验未通过" in prompts[1]
+    assert "chapter_body" in prompts[1]
 
 
 class _FakeRaw:

@@ -1,13 +1,15 @@
 # Prompt Engineering
 
-AI-JinShu 的提示词工程保持现有 `agents.py + render_prompt() + llm_contract` 主链不变，但在其上增加了 6 个治理层：
+AI-JinShu 的提示词工程保持现有 `agents.py + render_prompt() + llm_contract` 主链不变，但在其上增加了 8 个治理层：
 
-1. `Memory governance prompt pack`
-2. `Reviewer / Finalizer / Progression extractor` 角色宪法
-3. `Prompt section registry`
-4. `Lightweight context selector`
-5. `Style overlay`
-6. `Prompt rationale / eval note`
+1. `Prompt asset registry`
+2. `Memory governance prompt pack`
+3. `Reviewer / Finalizer / Progression extractor` 角色宪法
+4. `Prompt section registry`
+5. `Context block selector`
+6. `Character focus pack`
+7. `Style overlay`
+8. `Prompt rationale / eval note`
 
 ## 设计目标
 
@@ -42,6 +44,17 @@ AI-JinShu 的提示词工程保持现有 `agents.py + render_prompt() + llm_cont
 - `finalizer_polish.j2`
 - `final_book_review.j2`
 
+## Prompt Asset Registry
+
+`app/prompts/registry.py` 为核心生成 prompt 提供稳定资产编号：
+
+- `generation.chapter.writer@v2`
+- `generation.chapter.finalizer@v2`
+- `generation.review.combined@v1`
+- `generation.outline.volume_batch@v1`
+
+Registry 不替代 Jinja2 模板，只记录 `id/version/template/task_type/output_contract/context_policy`。模型调用日志和 runtime snapshot 应优先记录 `prompt_asset_id`、`prompt_version`、`prompt_template` 和 `prompt_hash`。
+
 ## Memory Governance
 
 Memory policy 的核心原则：
@@ -70,21 +83,36 @@ Memory policy 的核心原则：
 
 角色宪法只负责角色纪律，不负责业务上下文。业务上下文仍由各模板本身和 `context.py` 负责。
 
-## Context Selector
+## Context Block Selector
 
-`app/services/memory/context.py` 中的 `select_context_candidates()` 用于在主上下文组装前对高噪声候选进行轻量筛选。
+`app/services/memory/context.py` 中的 `select_context_candidates()` 用于在主上下文组装前对高噪声候选进行轻量筛选。`app/services/memory/context_blocks.py` 再把最终上下文分成：
 
-第一阶段只筛选：
+- `required`
+- `preferred`
+- `optional`
 
-- `knowledge_chunks`
-- `recent_window`
-- `story_bible_context` 内的扩展条目
+预算不足时，系统保留 required，按优先级裁剪 preferred / optional，并把 `included_block_ids`、`dropped_block_ids`、`used_tokens` 写入 `context_selector_meta`。
 
 它是 soft-fail 的：
 
 - 选择失败时回退到现有 heuristic
 - 不新增任务状态
 - 不改变 graph 拓扑
+
+## Runtime Snapshot
+
+writer 节点会把每章的 prompt asset、prompt hash、上下文 block 选择、模型与诊断信息写入 `creation_tasks.resume_cursor_json.runtime_state.chapter_runtime_snapshots`。该快照用于失败复盘和重跑解释，不参与前端 API 形态。
+
+## Character Focus Pack
+
+`app/services/memory/character_focus.py` 会为当前章节生成轻量人物约束包，来源包括：
+
+- prewrite 中的人物设定、目标、动机、声纹；
+- 当前章 outline 提到的人物、站位、冲突轴、关系变化；
+- `novel_memory` 中的角色动态状态；
+- `story_character_profiles` 中的硬形象锁定项。
+
+该包写入 `context.character_focus_pack`，并作为 `character_focus_pack` context block 参与 token 预算选择。写作模板只读取 JSON，不新增 API、数据库字段或前端功能。
 
 ## Style Overlay
 
