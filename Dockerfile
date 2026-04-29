@@ -62,8 +62,8 @@ COPY --from=builder /app/pyproject.toml /app/uv.lock /app/alembic.ini /app/
 COPY --from=builder /app/web/.next /app/web/.next
 COPY --from=builder /app/web/node_modules /app/web/node_modules
 COPY --from=builder /app/web/package.json /app/web/package-lock.json /app/web/next.config.js /app/web/
-COPY deploy/supervisord.conf /app/deploy/supervisord.conf
+COPY deploy/entrypoint.sh deploy/supervisord.conf /app/deploy/
 
 EXPOSE 8000 3000
 
-CMD ["supervisord", "-c", "/app/deploy/supervisord.conf"]
+CMD ["bash", "/app/deploy/entrypoint.sh"]
