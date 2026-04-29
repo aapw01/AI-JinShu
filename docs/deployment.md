@@ -22,7 +22,7 @@ cp .env.deploy.example .env.deploy
 docker compose -f docker-compose.deploy.yml --env-file .env.deploy up -d
 ```
 
-`app` 容器启动时会默认执行 `alembic upgrade head`，迁移成功后再启动 API、Web、worker 和 beat。需要临时关闭自动迁移时，可在 `.env.deploy` 中设置 `AUTO_MIGRATE_ON_START=false`。
+生产 compose 会先运行一次性 `migrate` service 执行 `alembic upgrade head`，迁移成功后再启动 `app`。`app` 容器仍保留 `AUTO_MIGRATE_ON_START` 开关，默认关闭；仅在单容器直跑、不使用 compose migrate service 时设为 `true`。
 
 默认发布镜像地址：
 
@@ -52,6 +52,6 @@ APP_IMAGE=ai-jinshu docker compose -f docker-compose.deploy.yml --env-file .env.
   - Next.js production server
   - Celery worker
   - Celery beat
-  - 启动前默认执行 Alembic 数据库迁移
+- `migrate`: 一次性数据库迁移任务，成功退出后 `app` 才会启动
 - `postgres`: PostgreSQL + pgvector
 - `redis`: Redis broker/cache

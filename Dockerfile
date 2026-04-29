@@ -13,6 +13,8 @@ RUN apt-get update \
         python3-venv \
         python3-pip \
     && ln -sf /usr/bin/python3 /usr/local/bin/python \
+    && groupadd --system app \
+    && useradd --system --gid app --home-dir /app --shell /usr/sbin/nologin app \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ghcr.io/astral-sh/uv:0.7.22 /uv /uvx /usr/local/bin/
@@ -48,22 +50,25 @@ RUN cd /app/web && npm run build && npm prune --omit=dev
 
 FROM base AS runtime
 WORKDIR /app
+RUN chown app:app /app
 
 ENV PATH="/app/.venv/bin:/app/web/node_modules/.bin:${PATH}" \
     NEXT_TELEMETRY_DISABLED=1 \
     PORT=3000
 
-COPY --from=builder /app/.venv /app/.venv
-COPY --from=builder /app/app /app/app
-COPY --from=builder /app/alembic /app/alembic
-COPY --from=builder /app/presets /app/presets
-COPY --from=builder /app/scripts /app/scripts
-COPY --from=builder /app/pyproject.toml /app/uv.lock /app/alembic.ini /app/
-COPY --from=builder /app/web/.next /app/web/.next
-COPY --from=builder /app/web/node_modules /app/web/node_modules
-COPY --from=builder /app/web/package.json /app/web/package-lock.json /app/web/next.config.js /app/web/
-COPY deploy/entrypoint.sh deploy/supervisord.conf /app/deploy/
+COPY --chown=app:app --from=builder /app/.venv /app/.venv
+COPY --chown=app:app --from=builder /app/app /app/app
+COPY --chown=app:app --from=builder /app/alembic /app/alembic
+COPY --chown=app:app --from=builder /app/presets /app/presets
+COPY --chown=app:app --from=builder /app/scripts /app/scripts
+COPY --chown=app:app --from=builder /app/pyproject.toml /app/uv.lock /app/alembic.ini /app/
+COPY --chown=app:app --from=builder /app/web/.next /app/web/.next
+COPY --chown=app:app --from=builder /app/web/node_modules /app/web/node_modules
+COPY --chown=app:app --from=builder /app/web/package.json /app/web/package-lock.json /app/web/next.config.js /app/web/
+COPY --chown=app:app deploy/entrypoint.sh deploy/supervisord.conf /app/deploy/
 
 EXPOSE 8000 3000
+
+USER app
 
 CMD ["bash", "/app/deploy/entrypoint.sh"]

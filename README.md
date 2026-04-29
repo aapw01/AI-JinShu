@@ -31,7 +31,7 @@ cp .env.deploy.example .env.deploy
 docker compose -f docker-compose.deploy.yml --env-file .env.deploy up -d
 ```
 
-`app` 容器启动前会自动执行 Alembic 迁移。
+生产 compose 会先运行一次性 `migrate` service 执行 Alembic 迁移，成功后再启动 `app`。
 
 默认会拉取 GitHub Actions 发布的镜像：`ghcr.io/aapw01/ai-jinshu:latest`
 
@@ -79,7 +79,7 @@ APP_IMAGE=ai-jinshu docker compose -f docker-compose.deploy.yml --env-file .env.
 - 生产 compose：[`docker-compose.deploy.yml`](docker-compose.deploy.yml)
 - 详细部署说明：[`docs/deployment.md`](docs/deployment.md)
 - GitHub Actions 会构建并发布多架构 GHCR 镜像
-- 部署形态为：`postgres`、`redis` 两个基础容器 + 一个 `app` 应用容器（内含 `api/web/worker/beat`）
+- 部署形态为：`postgres`、`redis` 两个基础容器 + 一个一次性 `migrate` 任务 + 一个 `app` 应用容器（内含 `api/web/worker/beat`）
 
 ## Common Commands
 
