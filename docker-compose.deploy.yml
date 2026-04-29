@@ -29,8 +29,44 @@ services:
   app:
     image: ${APP_IMAGE}
     restart: unless-stopped
-    env_file:
-      - .env.deploy
+    environment:
+      ENV: "${ENV:-production}"
+      DATABASE_URL: "${DATABASE_URL:?DATABASE_URL is required}"
+      AUTO_MIGRATE_ON_START: "${AUTO_MIGRATE_ON_START:-true}"
+      REDIS_URL: "${REDIS_URL:?REDIS_URL is required}"
+      CELERY_BROKER_URL: "${CELERY_BROKER_URL:?CELERY_BROKER_URL is required}"
+      LLM_PROVIDER: "${LLM_PROVIDER:-openai}"
+      LLM_MODEL: "${LLM_MODEL:-gpt-4o-mini}"
+      LLM_BASE_URL: "${LLM_BASE_URL:-}"
+      LLM_API_KEY: "${LLM_API_KEY:?LLM_API_KEY is required}"
+      LLM_PROTOCOL_OVERRIDE: "${LLM_PROTOCOL_OVERRIDE:-}"
+      EMBEDDING_ENABLED: "${EMBEDDING_ENABLED:-true}"
+      EMBEDDING_MODEL: "${EMBEDDING_MODEL:-text-embedding-3-small}"
+      EMBEDDING_REUSE_PRIMARY_CONNECTION: "${EMBEDDING_REUSE_PRIMARY_CONNECTION:-true}"
+      EMBEDDING_BASE_URL: "${EMBEDDING_BASE_URL:-}"
+      EMBEDDING_API_KEY: "${EMBEDDING_API_KEY:-}"
+      AUTH_JWT_SECRET: "${AUTH_JWT_SECRET:?AUTH_JWT_SECRET is required}"
+      AUTH_JWT_ISSUER: "${AUTH_JWT_ISSUER:-ai-jinshu}"
+      AUTH_ACCESS_TOKEN_MINUTES: "${AUTH_ACCESS_TOKEN_MINUTES:-15}"
+      AUTH_COOKIE_SECURE: "${AUTH_COOKIE_SECURE:-true}"
+      AUTH_COOKIE_DOMAIN: "${AUTH_COOKIE_DOMAIN:-}"
+      AUTH_REQUIRE_EMAIL_VERIFICATION: "${AUTH_REQUIRE_EMAIL_VERIFICATION:-false}"
+      AUTH_LOGIN_MAX_FAILURES: "${AUTH_LOGIN_MAX_FAILURES:-5}"
+      AUTH_LOGIN_LOCK_MINUTES: "${AUTH_LOGIN_LOCK_MINUTES:-15}"
+      AUTH_VERIFY_TOKEN_MINUTES: "${AUTH_VERIFY_TOKEN_MINUTES:-1440}"
+      AUTH_RESET_TOKEN_MINUTES: "${AUTH_RESET_TOKEN_MINUTES:-30}"
+      AUTH_FRONTEND_BASE_URL: "${AUTH_FRONTEND_BASE_URL:?AUTH_FRONTEND_BASE_URL is required}"
+      SENDGRID_API_KEY: "${SENDGRID_API_KEY:-}"
+      SENDGRID_FROM_EMAIL: "${SENDGRID_FROM_EMAIL:-}"
+      CREATION_SCHEDULER_ENABLED: "${CREATION_SCHEDULER_ENABLED:-true}"
+      CREATION_DEFAULT_MAX_CONCURRENT_TASKS: "${CREATION_DEFAULT_MAX_CONCURRENT_TASKS:-1}"
+      LOG_FORMAT: "${LOG_FORMAT:-json}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+      LOG_SLOW_THRESHOLD_MS: "${LOG_SLOW_THRESHOLD_MS:-1500}"
+      LOG_NODE_SLOW_THRESHOLD_MS: "${LOG_NODE_SLOW_THRESHOLD_MS:-2500}"
+      LOG_REDACTION_LEVEL: "${LOG_REDACTION_LEVEL:-minimal}"
+      LOG_DIR: "${LOG_DIR:-log}"
+      SYSTEM_SETTINGS_MASTER_KEY: "${SYSTEM_SETTINGS_MASTER_KEY:-}"
     depends_on:
       postgres:
         condition: service_healthy
@@ -39,6 +75,18 @@ services:
     ports:
       - "${API_PORT:-8000}:8000"
       - "${WEB_PORT:-3000}:3000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).read()",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
 volumes:
   postgres_data:

@@ -31,6 +31,8 @@ cp .env.deploy.example .env.deploy
 docker compose -f docker-compose.deploy.yml --env-file .env.deploy up -d
 ```
 
+`app` 容器启动前会自动执行 Alembic 迁移。
+
 默认会拉取 GitHub Actions 发布的镜像：`ghcr.io/aapw01/ai-jinshu:latest`
 
 如果先本地构建镜像：
