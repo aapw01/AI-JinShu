@@ -11,7 +11,9 @@ from app.core.llm_usage import (
 
 def test_usage_session_accumulates_usage_metadata():
     begin_usage_session("s1")
-    resp = SimpleNamespace(usage_metadata={"input_tokens": 120, "output_tokens": 45, "total_tokens": 165})
+    resp = SimpleNamespace(
+        usage_metadata={"input_tokens": 120, "output_tokens": 45, "total_tokens": 165}
+    )
     delta = record_usage_from_response(resp, stage="writer")
     assert delta["input_tokens"] == 120
     snap = snapshot_usage()
@@ -25,7 +27,15 @@ def test_usage_session_accumulates_usage_metadata():
 
 def test_usage_session_reads_response_metadata_token_usage():
     begin_usage_session("s2")
-    resp = SimpleNamespace(response_metadata={"token_usage": {"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28}})
+    resp = SimpleNamespace(
+        response_metadata={
+            "token_usage": {
+                "prompt_tokens": 20,
+                "completion_tokens": 8,
+                "total_tokens": 28,
+            }
+        }
+    )
     record_usage_from_response(resp, stage="rewrite")
     out = end_usage_session()
     assert out["input_tokens"] == 20
@@ -33,16 +43,45 @@ def test_usage_session_reads_response_metadata_token_usage():
     assert out["total_tokens"] == 28
 
 
+def test_usage_session_tracks_billable_total_from_reasoning_details():
+    begin_usage_session("reasoning-billable")
+    resp = SimpleNamespace(
+        response_metadata={
+            "token_usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 40,
+                "completion_tokens_details": {"reasoning_tokens": 260},
+            }
+        }
+    )
+    delta = record_usage_from_response(resp, stage="writer")
+
+    snap = snapshot_usage()
+    assert delta["billable_total_tokens"] == 400
+    assert snap["input_tokens"] == 100
+    assert snap["output_tokens"] == 40
+    assert snap["total_tokens"] == 400
+    assert snap["billable_total_tokens"] == 400
+    assert snap["stages"]["writer"]["billable_total_tokens"] == 400
+    out = end_usage_session()
+    assert out["billable_total_tokens"] == 400
+
+
 def test_begin_session_with_base_tokens():
     """Resume scenario: session starts at historical token count, new calls accumulate on top."""
-    begin_usage_session("resume-test", base_input=1000, base_output=500)
-    resp = SimpleNamespace(usage_metadata={"input_tokens": 100, "output_tokens": 50, "total_tokens": 150})
+    begin_usage_session(
+        "resume-test", base_input=1000, base_output=500, base_billable=2000
+    )
+    resp = SimpleNamespace(
+        usage_metadata={"input_tokens": 100, "output_tokens": 50, "total_tokens": 150}
+    )
     record_usage_from_response(resp, stage="writer")
     snap = snapshot_usage()
-    assert snap["input_tokens"] == 1100   # 1000 base + 100 new
-    assert snap["output_tokens"] == 550   # 500 base + 50 new
-    assert snap["calls"] == 1             # only new calls counted
-    assert snap["total_tokens"] == 1650   # (1000+500) base + (100+50) new
+    assert snap["input_tokens"] == 1100  # 1000 base + 100 new
+    assert snap["output_tokens"] == 550  # 500 base + 50 new
+    assert snap["calls"] == 1  # only new calls counted
+    assert snap["total_tokens"] == 1650  # (1000+500) base + (100+50) new
+    assert snap["billable_total_tokens"] == 2150
     end_usage_session()
 
 
@@ -62,4 +101,3 @@ def test_session_without_base_defaults_to_zero():
     assert snap["input_tokens"] == 0
     assert snap["embedding_calls"] == 0
     end_usage_session()
-

@@ -138,6 +138,7 @@ def _to_status_response(payload: dict) -> GenerationStatusResponse:
         progress=payload.get("progress", 0) or 0,
         token_usage_input=payload.get("token_usage_input", 0) or 0,
         token_usage_output=payload.get("token_usage_output", 0) or 0,
+        token_usage_billable=payload.get("token_usage_billable", 0) or 0,
         estimated_cost=payload.get("estimated_cost", 0.0) or 0.0,
         volume_no=payload.get("volume_no"),
         volume_size=payload.get("volume_size"),

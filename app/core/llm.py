@@ -234,10 +234,14 @@ def _is_openai_reasoning_model(model_name: str | None) -> bool:
 
 
 def thinking_disabled_kwargs_for_adapter(
-    adapter_type: str, model_name: str | None, provider_key: str | None = None
+    adapter_type: str,
+    model_name: str | None,
+    provider_key: str | None = None,
+    base_url: str | None = None,
 ) -> dict[str, Any]:
     """Return provider-native kwargs that disable or minimize model-side thinking."""
     configured_provider = str(provider_key or "").strip().lower()
+    has_custom_gateway = bool(str(base_url or "").strip())
     if adapter_type == "anthropic":
         return {"thinking": {"type": "disabled"}}
     if adapter_type == "gemini":
@@ -256,6 +260,8 @@ def thinking_disabled_kwargs_for_adapter(
             }
         if _is_openai_reasoning_model(model_name):
             return {"reasoning_effort": "minimal"}
+        if has_custom_gateway:
+            return {"extra_body": {"thinking": {"type": "disabled"}}}
     return {}
 
 
@@ -316,7 +322,7 @@ def _build_chat_model(
     resolved_api_key = _resolve_api_key(provider_key)
     normalized_inference = normalize_inference_for_provider(provider_key, inference)
     thinking_disabled_kwargs = thinking_disabled_kwargs_for_adapter(
-        adapter_type, model_name, provider_key
+        adapter_type, model_name, provider_key, resolved_base_url
     )
 
     log_event(

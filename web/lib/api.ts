@@ -141,6 +141,7 @@ export interface GenerationStatus {
   };
   token_usage_input?: number;
   token_usage_output?: number;
+  token_usage_billable?: number;
   estimated_cost?: number;
   message?: string;
   error?: string;
@@ -387,6 +388,7 @@ export interface UsageLedgerItem {
   source: string;
   input_tokens: number;
   output_tokens: number;
+  billable_tokens: number;
   chapters_generated: number;
   estimated_cost: number;
   created_at: string;

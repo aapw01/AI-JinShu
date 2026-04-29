@@ -58,6 +58,12 @@ def _month_range_utc(now: datetime) -> tuple[datetime, datetime]:
     return start, end
 
 
+def _ledger_billable_tokens_expr():
+    """Return billable token expression, falling back for rows created before this column existed."""
+    visible_total = UsageLedger.input_tokens + UsageLedger.output_tokens
+    return func.coalesce(func.nullif(UsageLedger.billable_tokens, 0), visible_total)
+
+
 def ensure_user_quota(db: Session, user: User) -> UserQuota:
     """确保用户配额存在并可用。"""
     quota = db.execute(select(UserQuota).where(UserQuota.user_id == user.id)).scalar_one_or_none()
@@ -143,7 +149,7 @@ def check_generation_quota(
 
     used_tokens = (
         db.execute(
-            select(func.coalesce(func.sum(UsageLedger.input_tokens + UsageLedger.output_tokens), 0))
+            select(func.coalesce(func.sum(_ledger_billable_tokens_expr()), 0))
             .where(
                 UsageLedger.user_id == user.id,
                 UsageLedger.created_at >= month_start,
@@ -199,11 +205,16 @@ def record_generation_usage(
 
     input_tokens = int(result.get("token_usage_input") or 0)
     output_tokens = int(result.get("token_usage_output") or 0)
+    billable_tokens = max(
+        int(result.get("token_usage_billable") or 0),
+        input_tokens + output_tokens,
+    )
     estimated_cost = float(result.get("estimated_cost") or 0.0)
     existed = db.execute(select(UsageLedger).where(UsageLedger.task_id == task_id)).scalar_one_or_none()
     if existed:
         existed.input_tokens = input_tokens
         existed.output_tokens = output_tokens
+        existed.billable_tokens = billable_tokens
         existed.chapters_generated = completed_chapters
         existed.estimated_cost = estimated_cost
         return
@@ -215,6 +226,7 @@ def record_generation_usage(
             source=source,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            billable_tokens=billable_tokens,
             chapters_generated=completed_chapters,
             estimated_cost=estimated_cost,
         )

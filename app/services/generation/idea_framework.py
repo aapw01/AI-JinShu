@@ -153,14 +153,13 @@ def _litellm_completion(model: str, prompt: str) -> str:
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.7,
     }
-    kwargs.update(
-        thinking_disabled_kwargs_for_adapter(
-            adapter_type, model, primary.get("provider")
-        )
-    )
-
     api_key = str(primary.get("api_key") or "").strip()
     base_url = str(primary.get("base_url") or "").strip().rstrip("/") or None
+    kwargs.update(
+        thinking_disabled_kwargs_for_adapter(
+            adapter_type, model, primary.get("provider"), base_url
+        )
+    )
 
     if litellm_provider == "anthropic":
         kwargs["api_key"] = api_key

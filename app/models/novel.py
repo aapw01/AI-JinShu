@@ -427,6 +427,7 @@ class UsageLedger(Base):
     source = Column(String(32), nullable=False, default="generation")  # generation, rewrite
     input_tokens = Column(Integer, nullable=False, default=0)
     output_tokens = Column(Integer, nullable=False, default=0)
+    billable_tokens = Column(Integer, nullable=False, default=0)
     chapters_generated = Column(Integer, nullable=False, default=0)
     estimated_cost = Column(Float, nullable=False, default=0.0)
     created_at = Column(DateTime, default=_utc_now)

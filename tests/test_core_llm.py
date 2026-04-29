@@ -213,6 +213,38 @@ def test_build_chat_model_openai_reasoning_models_use_minimal_reasoning(monkeypa
     assert "reasoning" not in captured
 
 
+def test_build_chat_model_custom_openai_gateway_disables_thinking(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(llm, "ChatOpenAI", _FakeOpenAI)
+    monkeypatch.setattr(
+        llm,
+        "get_primary_chat_runtime",
+        lambda: {
+            "provider": "openai",
+            "model": "qwen3-coder",
+            "base_url": "http://gateway.example.com/v1",
+        },
+    )
+    monkeypatch.setattr(
+        llm,
+        "resolve_effective_adapter",
+        lambda provider: ("openai_compatible", "auto_infer"),
+    )
+    monkeypatch.setattr(llm, "_resolve_api_key", lambda provider: "sk-gateway")
+    monkeypatch.setattr(
+        llm, "_resolve_base_url", lambda provider: "http://gateway.example.com/v1"
+    )
+
+    llm._build_chat_model("openai", "qwen3-coder")
+
+    assert captured["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
 def test_build_chat_model_anthropic_openai_gateway_disables_thinking(monkeypatch):
     captured: dict[str, object] = {}
 

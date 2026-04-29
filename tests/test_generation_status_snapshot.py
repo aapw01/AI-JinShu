@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import redis
 
+from app.api.routes.generation import _to_status_response
 from app.core.database import SessionLocal
 from app.models.creation_task import CreationTask
 from app.services.generation.status_snapshot import (
+    build_generation_snapshot,
     delete_generation_novel_cache,
     delete_generation_worker_cache,
     generation_novel_key,
@@ -65,12 +67,16 @@ def test_generation_cache_reads_from_db_when_redis_unavailable(monkeypatch):
         assert novel_snapshot is not None
         assert novel_snapshot["task_id"] == row.public_id
     finally:
-        db.query(CreationTask).filter(CreationTask.resource_id == 9901).delete(synchronize_session=False)
+        db.query(CreationTask).filter(CreationTask.resource_id == 9901).delete(
+            synchronize_session=False
+        )
         db.commit()
         db.close()
 
 
-def test_generation_cache_delete_does_not_break_db_rehydration_when_redis_unavailable(monkeypatch):
+def test_generation_cache_delete_does_not_break_db_rehydration_when_redis_unavailable(
+    monkeypatch,
+):
     monkeypatch.setattr(
         "app.services.generation.status_snapshot.get_generation_redis",
         lambda: _BrokenRedis(),
@@ -103,9 +109,57 @@ def test_generation_cache_delete_does_not_break_db_rehydration_when_redis_unavai
         delete_generation_worker_cache("worker-db-2")
         delete_generation_novel_cache(9902)
 
-        assert read_generation_cache(generation_task_key("worker-db-2"))["status"] == "running"
+        assert (
+            read_generation_cache(generation_task_key("worker-db-2"))["status"]
+            == "running"
+        )
         assert read_generation_cache(generation_novel_key(9902))["status"] == "running"
     finally:
-        db.query(CreationTask).filter(CreationTask.resource_id == 9902).delete(synchronize_session=False)
+        db.query(CreationTask).filter(CreationTask.resource_id == 9902).delete(
+            synchronize_session=False
+        )
         db.commit()
         db.close()
+
+
+def test_generation_snapshot_includes_billable_token_total():
+    row = CreationTask(
+        user_uuid="test-admin-user",
+        task_type="generation",
+        resource_type="novel",
+        resource_id=9903,
+        status="running",
+        phase="writer",
+        message="写作章节草稿",
+        result_json={
+            "token_usage_input": 100,
+            "token_usage_output": 40,
+            "token_usage_billable": 400,
+            "estimated_cost": 0.8,
+        },
+    )
+
+    snapshot = build_generation_snapshot(row)
+
+    assert snapshot["token_usage_input"] == 100
+    assert snapshot["token_usage_output"] == 40
+    assert snapshot["token_usage_billable"] == 400
+
+
+def test_status_response_preserves_billable_token_total():
+    response = _to_status_response(
+        {
+            "task_id": "task-billable",
+            "status": "running",
+            "step": "writer",
+            "current_chapter": 3,
+            "total_chapters": 10,
+            "token_usage_input": 100,
+            "token_usage_output": 40,
+            "token_usage_billable": 400,
+        }
+    )
+
+    assert response.token_usage_input == 100
+    assert response.token_usage_output == 40
+    assert response.token_usage_billable == 400

@@ -341,6 +341,9 @@ export default function ProgressPage() {
       (status?.step ? SUBTASK_LABELS[status.step] || status.step : "");
   const closureState = status?.decision_state?.closure || closureReport?.state;
   const pacingState = status?.decision_state?.pacing;
+  const tokenInput = status?.token_usage_input || 0;
+  const tokenOutput = status?.token_usage_output || 0;
+  const tokenBillable = status?.token_usage_billable || tokenInput + tokenOutput;
 
   return (
     <main className="min-h-screen">
@@ -477,7 +480,7 @@ export default function ProgressPage() {
             <p className="text-xs text-[#7E756D] mt-1">预计剩余时间：{status.eta_label}</p>
           ) : null}
           {!isRewriteMode ? <p className="text-xs text-[#7E756D] mt-2">
-            估算 Token：输入 {status?.token_usage_input || 0} / 输出 {status?.token_usage_output || 0}，预估费用 $
+            估算 Token：输入 {tokenInput} / 输出 {tokenOutput} / 计费 {tokenBillable}，预估费用 $
             {(status?.estimated_cost || 0).toFixed(4)}
           </p> : null}
           {!isRewriteMode ? (
@@ -556,7 +559,7 @@ export default function ProgressPage() {
         </Card>
         </motion.div>
 
-        {!isRewriteMode ? <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        {!isRewriteMode ? <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
           <StatsCard
             label="当前章节"
             value={`${status?.current_chapter || 0} / ${status?.total_chapters || 0}`}
@@ -564,13 +567,18 @@ export default function ProgressPage() {
           />
           <StatsCard
             label="输入 Token"
-            value={`${status?.token_usage_input || 0}`}
+            value={`${tokenInput}`}
             hint="估算值"
           />
           <StatsCard
-            label="输出 Token / 成本"
-            value={`${status?.token_usage_output || 0}`}
-            hint={`$${(status?.estimated_cost || 0).toFixed(4)}`}
+            label="计费 Token / 成本"
+            value={`${tokenBillable}`}
+            hint={`输出 ${tokenOutput} · $${(status?.estimated_cost || 0).toFixed(4)}`}
+          />
+          <StatsCard
+            label="输出 Token"
+            value={`${tokenOutput}`}
+            hint="可见输出"
           />
         </div> : null}
 

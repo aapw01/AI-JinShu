@@ -3,6 +3,7 @@
 这层把 LangGraph 节点里的局部进度，转换成前端和任务系统都能理解的
 全局进度语义，同时把恢复所需的运行时上下文落到数据库。
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -25,7 +26,14 @@ def volume_no_for_chapter(state: GenerationState, chapter: int) -> int:
     return (offset // volume_size) + 1
 
 
-def progress(state: GenerationState, step: str, chapter: int, pct: float, msg: str, meta: dict | None = None) -> None:
+def progress(
+    state: GenerationState,
+    step: str,
+    chapter: int,
+    pct: float,
+    msg: str,
+    meta: dict | None = None,
+) -> None:
     """向外部 progress callback 汇报一次标准化进度事件。
 
     这里顺带把 token 用量、估算成本、卷号等信息打平，避免各节点重复拼装。
@@ -37,12 +45,27 @@ def progress(state: GenerationState, step: str, chapter: int, pct: float, msg: s
     usage = snapshot_usage()
     usage_in = int(usage.get("input_tokens") or 0)
     usage_out = int(usage.get("output_tokens") or 0)
-    payload.setdefault("token_usage_input", usage_in or int(state.get("total_input_tokens") or 0))
-    payload.setdefault("token_usage_output", usage_out or int(state.get("total_output_tokens") or 0))
+    usage_billable = int(usage.get("billable_total_tokens") or 0)
+    payload.setdefault(
+        "token_usage_input", usage_in or int(state.get("total_input_tokens") or 0)
+    )
+    payload.setdefault(
+        "token_usage_output", usage_out or int(state.get("total_output_tokens") or 0)
+    )
+    payload.setdefault(
+        "token_usage_billable",
+        usage_billable
+        or int(payload.get("token_usage_input") or 0)
+        + int(payload.get("token_usage_output") or 0),
+    )
     if payload.get("estimated_cost") is None:
         input_tokens = int(payload.get("token_usage_input") or 0)
         output_tokens = int(payload.get("token_usage_output") or 0)
-        payload["estimated_cost"] = round((input_tokens / 1000) * 0.0015 + (output_tokens / 1000) * 0.002, 6)
+        billable_tokens = int(payload.get("token_usage_billable") or 0)
+        billed_output_tokens = max(output_tokens, billable_tokens - input_tokens)
+        payload["estimated_cost"] = round(
+            (input_tokens / 1000) * 0.0015 + (billed_output_tokens / 1000) * 0.002, 6
+        )
     logger.info(
         "PIPELINE progress task_id=%s novel_id=%s step=%s chapter=%s pct=%.2f msg=%s meta=%s",
         payload.get("task_id"),
@@ -88,16 +111,28 @@ def persist_resume_runtime_state(
         return
     runtime_state: dict[str, Any] = {
         "mode": str(mode),
-        "volume_no": int(volume_no if volume_no is not None else int(state.get("volume_no") or 1)),
+        "volume_no": int(
+            volume_no if volume_no is not None else int(state.get("volume_no") or 1)
+        ),
         "segment_start_chapter": int(
-            segment_start_chapter if segment_start_chapter is not None else int(state.get("segment_start_chapter") or state.get("start_chapter") or 1)
+            segment_start_chapter
+            if segment_start_chapter is not None
+            else int(
+                state.get("segment_start_chapter") or state.get("start_chapter") or 1
+            )
         ),
         "segment_end_chapter": int(
-            segment_end_chapter if segment_end_chapter is not None else int(state.get("segment_end_chapter") or state.get("end_chapter") or 0)
+            segment_end_chapter
+            if segment_end_chapter is not None
+            else int(state.get("segment_end_chapter") or state.get("end_chapter") or 0)
         ),
         "next_chapter": int(next_chapter),
         "book_effective_end_chapter": int(
-            book_effective_end_chapter if book_effective_end_chapter is not None else int(state.get("book_effective_end_chapter") or state.get("end_chapter") or 0)
+            book_effective_end_chapter
+            if book_effective_end_chapter is not None
+            else int(
+                state.get("book_effective_end_chapter") or state.get("end_chapter") or 0
+            )
         ),
         "book_target_total_chapters": int(
             state.get("book_target_total_chapters")
@@ -106,10 +141,14 @@ def persist_resume_runtime_state(
             or 0
         ),
         "tail_rewrite_attempts": int(
-            tail_rewrite_attempts if tail_rewrite_attempts is not None else int(state.get("tail_rewrite_attempts") or 0)
+            tail_rewrite_attempts
+            if tail_rewrite_attempts is not None
+            else int(state.get("tail_rewrite_attempts") or 0)
         ),
         "bridge_attempts": int(
-            bridge_attempts if bridge_attempts is not None else int(state.get("bridge_attempts") or 0)
+            bridge_attempts
+            if bridge_attempts is not None
+            else int(state.get("bridge_attempts") or 0)
         ),
     }
     effective_retry_floor = retry_resume_chapter
@@ -126,7 +165,9 @@ def persist_resume_runtime_state(
         runtime_state["segment_plan"] = effective_segment_plan
     db = SessionLocal()
     try:
-        update_resume_runtime_state(db, creation_task_id=int(creation_task_id), runtime_state=runtime_state)
+        update_resume_runtime_state(
+            db, creation_task_id=int(creation_task_id), runtime_state=runtime_state
+        )
         db.commit()
     except Exception:
         db.rollback()
@@ -146,7 +187,11 @@ def persist_chapter_runtime_snapshot(
     """Persist a lightweight, replay-oriented snapshot for one generated chapter."""
     context = state.get("context") if isinstance(state, dict) else {}
     context = context if isinstance(context, dict) else {}
-    selector_meta = context.get("context_selector_meta") if isinstance(context.get("context_selector_meta"), dict) else {}
+    selector_meta = (
+        context.get("context_selector_meta")
+        if isinstance(context.get("context_selector_meta"), dict)
+        else {}
+    )
     snapshot = {
         "chapter_num": int(chapter_num),
         "stage": str(stage),
@@ -155,8 +200,12 @@ def persist_chapter_runtime_snapshot(
         "context": {
             "included_block_ids": list(selector_meta.get("included_block_ids") or []),
             "dropped_block_ids": list(selector_meta.get("dropped_block_ids") or []),
-            "used_tokens": int(selector_meta.get("used_tokens") or context.get("budget_used") or 0),
-            "token_budget": int(selector_meta.get("token_budget") or context.get("budget_total") or 0),
+            "used_tokens": int(
+                selector_meta.get("used_tokens") or context.get("budget_used") or 0
+            ),
+            "token_budget": int(
+                selector_meta.get("token_budget") or context.get("budget_total") or 0
+            ),
             "sources": list(context.get("context_sources") or []),
         },
         "diagnostics": dict(diagnostics or {}),
@@ -174,7 +223,9 @@ def persist_chapter_runtime_snapshot(
         update_resume_runtime_state(
             db,
             creation_task_id=int(creation_task_id),
-            runtime_state={"chapter_runtime_snapshots": {str(int(chapter_num)): snapshot}},
+            runtime_state={
+                "chapter_runtime_snapshots": {str(int(chapter_num)): snapshot}
+            },
         )
         db.commit()
     except Exception:
@@ -188,10 +239,14 @@ def persist_chapter_runtime_snapshot(
 def chapter_progress(state: GenerationState, phase_ratio: float) -> float:
     """把“当前章节内部进度”映射为“整本书的全局进度百分比”。"""
     total = max(
-        int(state.get("book_effective_end_chapter") or 0) - int(state.get("book_start_chapter") or 1) + 1,
+        int(state.get("book_effective_end_chapter") or 0)
+        - int(state.get("book_start_chapter") or 1)
+        + 1,
         1,
     )
-    idx = max(0, int(state["current_chapter"]) - int(state.get("book_start_chapter") or 1))
+    idx = max(
+        0, int(state["current_chapter"]) - int(state.get("book_start_chapter") or 1)
+    )
     base_pct = 20 + (idx / total) * 70
     span = 70 / total
     raw = base_pct + span * phase_ratio
@@ -201,7 +256,9 @@ def chapter_progress(state: GenerationState, phase_ratio: float) -> float:
 
 def is_volume_start(state: GenerationState, chapter: int) -> bool:
     """判断当前章节是否为本 segment / 分卷的起点。"""
-    segment_start = int(state.get("segment_start_chapter") or state.get("start_chapter") or 1)
+    segment_start = int(
+        state.get("segment_start_chapter") or state.get("start_chapter") or 1
+    )
     return int(chapter) == segment_start
 
 

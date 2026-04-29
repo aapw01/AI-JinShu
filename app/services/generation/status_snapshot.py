@@ -8,6 +8,7 @@
 - 为什么前端状态不直接读 Celery，而是读业务快照。
 - 为什么需要 task / novel 两个 cache key 视角。
 """
+
 from __future__ import annotations
 
 import json
@@ -58,12 +59,25 @@ SUBTASK_LABELS: dict[str, str] = {
     "done": "全书完成",
 }
 
-GENERATION_ACTIVE_STATUSES = {"queued", "dispatching", "running", "awaiting_outline_confirmation"}
-GENERATION_CACHE_ACTIVE_STATUSES = {"queued", "dispatching", "running", "paused", "awaiting_outline_confirmation"}
+GENERATION_ACTIVE_STATUSES = {
+    "queued",
+    "dispatching",
+    "running",
+    "awaiting_outline_confirmation",
+}
+GENERATION_CACHE_ACTIVE_STATUSES = {
+    "queued",
+    "dispatching",
+    "running",
+    "paused",
+    "awaiting_outline_confirmation",
+}
 GENERATION_TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 GENERATION_NON_LIVE_STATUSES = GENERATION_TERMINAL_STATUSES | {"paused"}
 
 _redis_pool: redis.ConnectionPool | None = None
+
+
 def get_generation_redis() -> redis.Redis:
     """惰性初始化生成任务专用的 Redis 客户端。"""
     global _redis_pool
@@ -203,7 +217,12 @@ def delete_generation_novel_cache(novel_id: int | str | None) -> None:
 def with_subtask(payload: dict[str, Any]) -> dict[str, Any]:
     """把 step/current_phase 归一化成前端统一展示的子任务结构。"""
     merged = dict(payload)
-    step = str(merged.get("subtask_key") or merged.get("step") or merged.get("current_phase") or "").strip()
+    step = str(
+        merged.get("subtask_key")
+        or merged.get("step")
+        or merged.get("current_phase")
+        or ""
+    ).strip()
     if not step:
         return merged
     label = merged.get("subtask_label") or SUBTASK_LABELS.get(step, step)
@@ -237,7 +256,9 @@ def creation_task_runtime_state(row: CreationTask) -> dict[str, Any]:
 
 def payload_book_start(payload_data: dict[str, Any]) -> int:
     """从 payload 推导整本小说的起始章节。"""
-    return int(payload_data.get("book_start_chapter") or payload_data.get("start_chapter") or 1)
+    return int(
+        payload_data.get("book_start_chapter") or payload_data.get("start_chapter") or 1
+    )
 
 
 def payload_book_total(payload_data: dict[str, Any]) -> int:
@@ -260,19 +281,29 @@ def payload_book_end(payload_data: dict[str, Any]) -> int:
 def creation_task_waiting_outline_confirmation(row: CreationTask) -> bool:
     """判断任务是否处于“等待大纲确认”的特殊前端态。"""
     payload = creation_task_payload(row)
-    return bool(payload.get("awaiting_outline_confirmation")) and not bool(payload.get("outline_confirmed"))
+    return bool(payload.get("awaiting_outline_confirmation")) and not bool(
+        payload.get("outline_confirmed")
+    )
 
 
 def creation_task_effective_status(row: CreationTask) -> str:
     """返回前端应该展示的有效状态，而不是原始数据库状态。"""
-    if row.status in {"queued", "dispatching", "running"} and creation_task_waiting_outline_confirmation(row):
+    if row.status in {
+        "queued",
+        "dispatching",
+        "running",
+    } and creation_task_waiting_outline_confirmation(row):
         return "awaiting_outline_confirmation"
     return str(row.status or "unknown")
 
 
 def creation_task_effective_phase(row: CreationTask) -> str:
     """返回任务对前端展示时应使用的有效阶段。"""
-    if row.status in {"queued", "dispatching", "running"} and creation_task_waiting_outline_confirmation(row):
+    if row.status in {
+        "queued",
+        "dispatching",
+        "running",
+    } and creation_task_waiting_outline_confirmation(row):
         return "outline_ready"
     return str(row.phase or row.status or "unknown")
 
@@ -285,9 +316,17 @@ def creation_task_display_totals(row: CreationTask) -> tuple[int, int]:
     book_start = payload_book_start(payload_data)
     default_total = payload_book_total(payload_data)
     payload_end = payload_book_end(payload_data)
-    effective_end = max(int(runtime_state.get("book_effective_end_chapter") or 0), payload_end)
-    effective_total = max(int(runtime_state.get("book_target_total_chapters") or 0), default_total, effective_end)
-    next_chapter = int(runtime_state.get("next_chapter") or cursor.get("next") or book_start)
+    effective_end = max(
+        int(runtime_state.get("book_effective_end_chapter") or 0), payload_end
+    )
+    effective_total = max(
+        int(runtime_state.get("book_target_total_chapters") or 0),
+        default_total,
+        effective_end,
+    )
+    next_chapter = int(
+        runtime_state.get("next_chapter") or cursor.get("next") or book_start
+    )
     mode = str(runtime_state.get("mode") or "").strip()
     if row.status == "completed" or mode == "completed":
         current_chapter = max(book_start, effective_end)
@@ -312,7 +351,9 @@ def resolve_live_chapter_display(
 
     redis_current = int(redis_payload.get("current_chapter") or 0)
     redis_total = int(redis_payload.get("total_chapters") or 0)
-    live_phase = str(redis_payload.get("current_phase") or redis_payload.get("step") or "")
+    live_phase = str(
+        redis_payload.get("current_phase") or redis_payload.get("step") or ""
+    )
 
     if live_phase == "chapter_done" and current > redis_current > 0:
         resolved_current = current
@@ -345,9 +386,18 @@ def build_generation_snapshot(
         "current_phase": effective_phase,
         "current_chapter": current_chapter,
         "total_chapters": total_chapters,
-        "progress": float(row.progress or (100.0 if row.status == "completed" else 0.0) or 0.0),
+        "progress": float(
+            row.progress or (100.0 if row.status == "completed" else 0.0) or 0.0
+        ),
         "token_usage_input": int(result_data.get("token_usage_input") or 0),
         "token_usage_output": int(result_data.get("token_usage_output") or 0),
+        "token_usage_billable": int(
+            result_data.get("token_usage_billable")
+            or (
+                int(result_data.get("token_usage_input") or 0)
+                + int(result_data.get("token_usage_output") or 0)
+            )
+        ),
         "estimated_cost": float(result_data.get("estimated_cost") or 0.0),
         "volume_no": int(runtime_state.get("volume_no") or 0) or None,
         "volume_size": None,
@@ -366,7 +416,10 @@ def build_generation_snapshot(
     }
     snapshot = with_subtask(snapshot)
 
-    if isinstance(live_payload, dict) and row.status not in GENERATION_NON_LIVE_STATUSES:
+    if (
+        isinstance(live_payload, dict)
+        and row.status not in GENERATION_NON_LIVE_STATUSES
+    ):
         for key in (
             "run_state",
             "step",
@@ -374,6 +427,7 @@ def build_generation_snapshot(
             "progress",
             "token_usage_input",
             "token_usage_output",
+            "token_usage_billable",
             "estimated_cost",
             "volume_no",
             "volume_size",
@@ -411,7 +465,9 @@ def build_generation_snapshot(
         snapshot["message"] = row.message or snapshot.get("message")
         snapshot["error"] = row.error_detail or snapshot.get("error")
         snapshot["error_code"] = row.error_code or snapshot.get("error_code")
-        snapshot["error_category"] = row.error_category or snapshot.get("error_category")
+        snapshot["error_category"] = row.error_category or snapshot.get(
+            "error_category"
+        )
         snapshot["retryable"] = bool((row.retry_count or 0) < (row.max_retries or 0))
         snapshot = with_subtask(snapshot)
     return snapshot

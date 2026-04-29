@@ -8,8 +8,17 @@ from app.core.database import SessionLocal
 from app.models.creation_task import CreationTask
 from app.models.novel import Novel, NovelVersion, UsageLedger, User
 from app.models.storyboard import StoryboardProject, StoryboardTask, StoryboardVersion
-from app.services.quota import record_generation_usage
-from app.tasks.generation import _resolve_completed_usage_totals, _resolve_generation_resume
+from app.services.quota import (
+    QuotaReason,
+    check_generation_quota,
+    ensure_user_quota,
+    record_generation_usage,
+)
+from app.tasks.generation import (
+    _load_prior_tokens,
+    _resolve_completed_usage_totals,
+    _resolve_generation_resume,
+)
 from app.services.scheduler.scheduler_service import dispatch_user_queue, reclaim_stale_running_tasks
 from app.services.task_runtime.checkpoint_repo import get_last_completed_unit, mark_unit_completed
 from app.services.task_runtime.cursor_service import resume_from_last_completed
@@ -601,6 +610,7 @@ def test_record_generation_usage_reads_creation_task_result():
             result_json={
                 "token_usage_input": 123,
                 "token_usage_output": 456,
+                "token_usage_billable": 1000,
                 "estimated_cost": 1.23,
                 "start_chapter": 5,
                 "current_chapter": 7,
@@ -619,5 +629,66 @@ def test_record_generation_usage_reads_creation_task_result():
 
     assert ledger.input_tokens == 123
     assert ledger.output_tokens == 456
+    assert ledger.billable_tokens == 1000
     assert ledger.chapters_generated == 3
     assert ledger.estimated_cost == 1.23
+
+
+def test_load_prior_tokens_reads_billable_total():
+    db = SessionLocal()
+    try:
+        task = CreationTask(
+            user_uuid="usage-resume",
+            task_type="generation",
+            resource_type="novel",
+            resource_id=9911,
+            status="failed",
+            result_json={
+                "token_usage_input": 123,
+                "token_usage_output": 456,
+                "token_usage_billable": 1000,
+            },
+        )
+        db.add(task)
+        db.commit()
+        db.refresh(task)
+        task_id = int(task.id)
+    finally:
+        db.close()
+
+    assert _load_prior_tokens(task_id) == (123, 456, 1000)
+
+
+def test_quota_counts_billable_tokens():
+    db = SessionLocal()
+    try:
+        user = User(
+            email="quota-billable@example.com",
+            password_hash="x",
+            role="user",
+            status="active",
+        )
+        db.add(user)
+        db.flush()
+        quota = ensure_user_quota(db, user)
+        quota.monthly_token_limit = 1000
+        quota.monthly_chapter_limit = 100
+        db.add(
+            UsageLedger(
+                user_id=int(user.id),
+                task_id="quota-billable-task",
+                source="generation",
+                input_tokens=100,
+                output_tokens=40,
+                billable_tokens=1000,
+                chapters_generated=1,
+            )
+        )
+        db.commit()
+
+        result = check_generation_quota(db, user=user, requested_chapters=1)
+    finally:
+        db.close()
+
+    assert result.ok is False
+    assert result.reason == QuotaReason.MONTHLY_TOKEN_LIMIT_EXCEEDED

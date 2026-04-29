@@ -14,6 +14,7 @@
 - 为什么恢复时复用原任务记录、但重建新的 worker 执行实例。
 - 为什么 stale finalize、lease、recovery_count 要一起设计。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -26,8 +27,14 @@ from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
 from app.models.creation_task import CreationTask
-from app.services.scheduler.concurrency_service import count_user_running_slots, get_user_concurrency_limit
-from app.core.constants import CREATION_MAX_DISPATCH_BATCH, CREATION_WORKER_LEASE_TTL_SECONDS
+from app.services.scheduler.concurrency_service import (
+    count_user_running_slots,
+    get_user_concurrency_limit,
+)
+from app.core.constants import (
+    CREATION_MAX_DISPATCH_BATCH,
+    CREATION_WORKER_LEASE_TTL_SECONDS,
+)
 from app.services.generation.status_snapshot import (
     GENERATION_CACHE_ACTIVE_STATUSES,
     build_generation_snapshot,
@@ -58,6 +65,7 @@ class DispatchReservation:
 
     这样可以避免 worker 读到未提交状态，也能在发布失败时回滚业务语义。
     """
+
     creation_task_id: int
     public_id: str
     task_type: str
@@ -112,7 +120,9 @@ def submit_task(
     return task
 
 
-def list_user_tasks(db: Session, *, user_uuid: str, limit: int = 50) -> list[CreationTask]:
+def list_user_tasks(
+    db: Session, *, user_uuid: str, limit: int = 50
+) -> list[CreationTask]:
     """列出 user tasks。"""
     stmt: Select[tuple[CreationTask]] = (
         select(CreationTask)
@@ -123,9 +133,13 @@ def list_user_tasks(db: Session, *, user_uuid: str, limit: int = 50) -> list[Cre
     return list(db.execute(stmt).scalars().all())
 
 
-def get_task_by_public_id(db: Session, *, public_id: str, user_uuid: str | None = None) -> CreationTask | None:
+def get_task_by_public_id(
+    db: Session, *, public_id: str, user_uuid: str | None = None
+) -> CreationTask | None:
     """按公开任务 ID 查询任务，可选校验任务归属用户。"""
-    stmt: Select[tuple[CreationTask]] = select(CreationTask).where(CreationTask.public_id == public_id)
+    stmt: Select[tuple[CreationTask]] = select(CreationTask).where(
+        CreationTask.public_id == public_id
+    )
     if user_uuid:
         stmt = stmt.where(CreationTask.user_uuid == user_uuid)
     return db.execute(stmt).scalar_one_or_none()
@@ -133,10 +147,14 @@ def get_task_by_public_id(db: Session, *, public_id: str, user_uuid: str | None 
 
 def get_task_by_id(db: Session, *, task_id: int) -> CreationTask | None:
     """按数据库主键查询统一任务记录。"""
-    return db.execute(select(CreationTask).where(CreationTask.id == task_id)).scalar_one_or_none()
+    return db.execute(
+        select(CreationTask).where(CreationTask.id == task_id)
+    ).scalar_one_or_none()
 
 
-def mark_task_running(db: Session, *, task_id: int, worker_task_id: str) -> CreationTask:
+def mark_task_running(
+    db: Session, *, task_id: int, worker_task_id: str
+) -> CreationTask:
     """在 worker 真正启动后，把任务从 `dispatching` 切到 `running`。
 
     这里会校验 worker 所有权，避免旧 worker 的迟到上报把新任务状态冲掉。
@@ -173,6 +191,7 @@ def update_task_progress(
     message: str | None = None,
     token_usage_input: int | None = None,
     token_usage_output: int | None = None,
+    token_usage_billable: int | None = None,
     estimated_cost: float | None = None,
 ) -> CreationTask | None:
     """更新进度、阶段信息与累计 token/cost 指标。
@@ -188,14 +207,34 @@ def update_task_progress(
         task.phase = phase
     if message is not None:
         task.message = message
-    if token_usage_input is not None or token_usage_output is not None or estimated_cost is not None:
+    if (
+        token_usage_input is not None
+        or token_usage_output is not None
+        or token_usage_billable is not None
+        or estimated_cost is not None
+    ):
         result = dict(task.result_json) if isinstance(task.result_json, dict) else {}
         if token_usage_input is not None:
-            result["token_usage_input"] = max(int(result.get("token_usage_input") or 0), int(token_usage_input or 0))
+            result["token_usage_input"] = max(
+                int(result.get("token_usage_input") or 0), int(token_usage_input or 0)
+            )
         if token_usage_output is not None:
-            result["token_usage_output"] = max(int(result.get("token_usage_output") or 0), int(token_usage_output or 0))
+            result["token_usage_output"] = max(
+                int(result.get("token_usage_output") or 0), int(token_usage_output or 0)
+            )
+        if token_usage_billable is not None:
+            visible_total = int(result.get("token_usage_input") or 0) + int(
+                result.get("token_usage_output") or 0
+            )
+            result["token_usage_billable"] = max(
+                int(result.get("token_usage_billable") or 0),
+                int(token_usage_billable or 0),
+                visible_total,
+            )
         if estimated_cost is not None:
-            result["estimated_cost"] = max(float(result.get("estimated_cost") or 0.0), float(estimated_cost or 0.0))
+            result["estimated_cost"] = max(
+                float(result.get("estimated_cost") or 0.0), float(estimated_cost or 0.0)
+            )
         task.result_json = result
     if task.status == "running":
         ttl = _lease_ttl_seconds()
@@ -285,10 +324,14 @@ def finalize_task(
     if task.status == "queued" and final_status != "queued":
         logger.info(
             "Ignoring stale finalize (status=%s→%s) for task %s — task was already re-queued",
-            task.status, final_status, task_id,
+            task.status,
+            final_status,
+            task_id,
         )
         return task
-    if task.status not in {"running", "dispatching", "queued"} and final_status not in {"queued"}:
+    if task.status not in {"running", "dispatching", "queued"} and final_status not in {
+        "queued"
+    }:
         return task
     if final_status not in {"completed", "failed", "cancelled", "queued", "paused"}:
         raise ValueError(f"unsupported final status: {final_status}")
@@ -324,8 +367,13 @@ def finalize_task(
         task.result_json = result_json
 
     _NOVEL_STATUS_SYNC = {"completed", "failed", "cancelled"}
-    if final_status in _NOVEL_STATUS_SYNC and task.resource_type == "novel" and task.resource_id:
+    if (
+        final_status in _NOVEL_STATUS_SYNC
+        and task.resource_type == "novel"
+        and task.resource_id
+    ):
         from app.models.novel import Novel
+
         novel = db.execute(
             select(Novel).where(Novel.id == task.resource_id)
         ).scalar_one_or_none()
@@ -346,9 +394,17 @@ def pause_task(db: Session, *, public_id: str, user_uuid: str) -> CreationTask:
     if task.status not in PAUSABLE_STATUSES:
         raise ValueError("task_not_pausable")
     if task.status in {"queued", "dispatching"}:
-        transition_task_status(db, task=task, to_status="paused", phase="paused", message="任务已暂停")
+        transition_task_status(
+            db, task=task, to_status="paused", phase="paused", message="任务已暂停"
+        )
     else:
-        transition_task_status(db, task=task, to_status="paused", phase="paused", message="任务暂停中，等待安全挂起")
+        transition_task_status(
+            db,
+            task=task,
+            to_status="paused",
+            phase="paused",
+            message="任务暂停中，等待安全挂起",
+        )
     task.worker_task_id = None
     task.worker_lease_expires_at = None
     return task
@@ -367,14 +423,26 @@ def resume_task(db: Session, *, public_id: str, user_uuid: str) -> CreationTask:
     if task.status not in RESUMABLE_STATUSES:
         raise ValueError("task_not_resumable")
     old_status = task.status
-    cursor = task.resume_cursor_json if isinstance(task.resume_cursor_json, dict) else {}
+    cursor = (
+        task.resume_cursor_json if isinstance(task.resume_cursor_json, dict) else {}
+    )
     next_unit = cursor.get("next")
     resume_msg = "任务已恢复并重新入队"
     if next_unit is not None:
         resume_msg = f"任务已恢复并重新入队，将从第{int(next_unit)}章继续"
-    transition_task_status(db, task=task, to_status="queued", phase="queued", message=resume_msg)
-    payload = dict(task.resume_cursor_json) if isinstance(task.resume_cursor_json, dict) else {}
-    runtime_state = dict(payload.get("runtime_state")) if isinstance(payload.get("runtime_state"), dict) else {}
+    transition_task_status(
+        db, task=task, to_status="queued", phase="queued", message=resume_msg
+    )
+    payload = (
+        dict(task.resume_cursor_json)
+        if isinstance(task.resume_cursor_json, dict)
+        else {}
+    )
+    runtime_state = (
+        dict(payload.get("runtime_state"))
+        if isinstance(payload.get("runtime_state"), dict)
+        else {}
+    )
     if next_unit is not None:
         runtime_state["retry_resume_chapter"] = int(next_unit)
     payload["runtime_state"] = runtime_state
@@ -394,15 +462,20 @@ def cancel_task(db: Session, *, public_id: str, user_uuid: str) -> CreationTask:
     if task.status in TERMINAL_STATUSES:
         return task
     worker_id = task.worker_task_id
-    transition_task_status(db, task=task, to_status="cancelled", phase="cancelled", message="任务已取消")
+    transition_task_status(
+        db, task=task, to_status="cancelled", phase="cancelled", message="任务已取消"
+    )
     task.worker_task_id = None
     task.worker_lease_expires_at = None
     if worker_id:
         try:
             from app.workers.celery_app import app as celery_app
+
             celery_app.control.revoke(worker_id, terminate=True)
         except Exception:
-            logger.warning("Failed to revoke worker %s on cancel", worker_id, exc_info=True)
+            logger.warning(
+                "Failed to revoke worker %s on cancel", worker_id, exc_info=True
+            )
     return task
 
 
@@ -429,7 +502,9 @@ def repair_active_dispatching_tasks(db: Session) -> int:
                 CreationTask.worker_lease_expires_at >= now,
             )
             .with_for_update(skip_locked=True)
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
     )
     repaired = 0
     for row in rows:
@@ -469,7 +544,9 @@ def reclaim_stale_running_tasks(db: Session) -> int:
                 CreationTask.worker_lease_expires_at < now,
             )
             .with_for_update(skip_locked=True)
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
     )
     orphaned_dispatching = list(
         db.execute(
@@ -480,7 +557,9 @@ def reclaim_stale_running_tasks(db: Session) -> int:
                 CreationTask.updated_at < dispatching_timeout,
             )
             .with_for_update(skip_locked=True)
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
     )
     all_stale = stale + orphaned_dispatching
     reclaimed = 0
@@ -515,6 +594,7 @@ def reclaim_stale_running_tasks(db: Session) -> int:
     if old_worker_ids:
         try:
             from app.workers.celery_app import app as celery_app
+
             for wid in old_worker_ids:
                 celery_app.control.revoke(wid, terminate=True)
         except Exception:
@@ -532,21 +612,29 @@ def reclaim_stale_running_tasks(db: Session) -> int:
                 worker_task_id=row.worker_task_id,
                 mirror_worker=False,
                 clear_worker_ids=[stale_worker_id] if stale_worker_id else [],
-                mirror_novel=str(snapshot.get("status") or "") in GENERATION_CACHE_ACTIVE_STATUSES,
+                mirror_novel=str(snapshot.get("status") or "")
+                in GENERATION_CACHE_ACTIVE_STATUSES,
             )
-            if str(snapshot.get("status") or "") not in GENERATION_CACHE_ACTIVE_STATUSES:
+            if (
+                str(snapshot.get("status") or "")
+                not in GENERATION_CACHE_ACTIVE_STATUSES
+            ):
                 sync_generation_novel_snapshot(db, novel_id=int(row.resource_id))
     return reclaimed
 
 
-def _reserve_dispatch_batch(db: Session, *, user_uuid: str) -> list[DispatchReservation]:
+def _reserve_dispatch_batch(
+    db: Session, *, user_uuid: str
+) -> list[DispatchReservation]:
     """为单个用户预留一批可安全派发的任务。
 
     这里先算剩余并发槽位，再按优先级和 queue_seq 排序选任务。
     预留成功只代表“数据库里占到了 dispatching 名额”，还不代表
     Celery publish 一定成功，所以返回的是 reservation 而不是最终结果。
     """
-    if not bool(get_effective_runtime_setting("creation_scheduler_enabled", bool, True)):
+    if not bool(
+        get_effective_runtime_setting("creation_scheduler_enabled", bool, True)
+    ):
         return []
     acquire_user_dispatch_lock(db, user_uuid=user_uuid)
     limit = get_user_concurrency_limit(db, user_uuid=user_uuid)
@@ -563,14 +651,26 @@ def _reserve_dispatch_batch(db: Session, *, user_uuid: str) -> list[DispatchRese
                 CreationTask.user_uuid == user_uuid,
                 CreationTask.status == "queued",
             )
-            .order_by(asc(CreationTask.priority), asc(CreationTask.queue_seq), asc(CreationTask.id))
+            .order_by(
+                asc(CreationTask.priority),
+                asc(CreationTask.queue_seq),
+                asc(CreationTask.id),
+            )
             .limit(to_dispatch_count)
             .with_for_update()
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
     )
     dispatched: list[DispatchReservation] = []
     for task in queued:
-        transition_task_status(db, task=task, to_status="dispatching", phase="dispatching", message="任务调度中")
+        transition_task_status(
+            db,
+            task=task,
+            to_status="dispatching",
+            phase="dispatching",
+            message="任务调度中",
+        )
         task.worker_task_id = str(uuid4())
         task.worker_lease_expires_at = _utc_now() + timedelta(seconds=120)
         db.flush()
@@ -615,11 +715,19 @@ def dispatch_user_queue_for_user(*, user_uuid: str) -> list[CreationTask]:
         db.commit()
 
         if reservations:
-            rows = db.execute(
-                select(CreationTask)
-                .where(CreationTask.id.in_([res.creation_task_id for res in reservations]))
-                .order_by(CreationTask.id.asc())
-            ).scalars().all()
+            rows = (
+                db.execute(
+                    select(CreationTask)
+                    .where(
+                        CreationTask.id.in_(
+                            [res.creation_task_id for res in reservations]
+                        )
+                    )
+                    .order_by(CreationTask.id.asc())
+                )
+                .scalars()
+                .all()
+            )
             by_id = {int(row.id): row for row in rows}
             for reservation in reservations:
                 row = by_id.get(reservation.creation_task_id)
@@ -666,7 +774,9 @@ def dispatch_global(db: Session) -> int:
             select(CreationTask.user_uuid)
             .where(CreationTask.status == "queued")
             .distinct()
-        ).scalars().all()
+        )
+        .scalars()
+        .all()
     )
     count = 0
     for user_uuid in users:
@@ -710,20 +820,43 @@ def _prepare_worker_task_dispatch(db: Session, *, task: CreationTask) -> None:
         from app.models.novel import RewriteRequest
 
         payload = task.payload_json or {}
-        for key in ("novel_id", "rewrite_request_id", "base_version_id", "target_version_id", "rewrite_from", "rewrite_to"):
+        for key in (
+            "novel_id",
+            "rewrite_request_id",
+            "base_version_id",
+            "target_version_id",
+            "rewrite_from",
+            "rewrite_to",
+        ):
             if payload.get(key) is None:
                 raise ValueError(f"missing payload key for rewrite: {key}")
-        req = db.execute(select(RewriteRequest).where(RewriteRequest.id == int(payload["rewrite_request_id"]))).scalar_one_or_none()
+        req = db.execute(
+            select(RewriteRequest).where(
+                RewriteRequest.id == int(payload["rewrite_request_id"])
+            )
+        ).scalar_one_or_none()
         if req:
             req.task_id = task.public_id
             req.status = "queued"
             req.message = "重写任务已入队"
     elif task.task_type == "storyboard_lane":
         from app.models.novel import NovelVersion
-        from app.models.storyboard import StoryboardProject, StoryboardRun, StoryboardRunLane, StoryboardVersion
+        from app.models.storyboard import (
+            StoryboardProject,
+            StoryboardRun,
+            StoryboardRunLane,
+            StoryboardVersion,
+        )
 
         payload = task.payload_json or {}
-        for key in ("project_id", "run_id", "run_lane_id", "lane", "version_id", "novel_version_id"):
+        for key in (
+            "project_id",
+            "run_id",
+            "run_lane_id",
+            "lane",
+            "version_id",
+            "novel_version_id",
+        ):
             if payload.get(key) is None:
                 raise ValueError(f"missing payload key for storyboard_lane: {key}")
         project_id = int(payload["project_id"])
@@ -733,7 +866,9 @@ def _prepare_worker_task_dispatch(db: Session, *, task: CreationTask) -> None:
         version_id = int(payload["version_id"])
         novel_version_id = int(payload["novel_version_id"])
 
-        project = db.execute(select(StoryboardProject).where(StoryboardProject.id == project_id)).scalar_one_or_none()
+        project = db.execute(
+            select(StoryboardProject).where(StoryboardProject.id == project_id)
+        ).scalar_one_or_none()
         if not project:
             raise ValueError(f"storyboard project not found: {project_id}")
         run = db.execute(
@@ -763,12 +898,18 @@ def _prepare_worker_task_dispatch(db: Session, *, task: CreationTask) -> None:
             raise ValueError(f"storyboard version context not found: {version_id}")
         if version.lane != lane:
             raise ValueError("storyboard run lane/version mismatch")
-        source_version = db.execute(select(NovelVersion).where(NovelVersion.id == novel_version_id)).scalar_one_or_none()
+        source_version = db.execute(
+            select(NovelVersion).where(NovelVersion.id == novel_version_id)
+        ).scalar_one_or_none()
         if not source_version or int(source_version.novel_id) != int(project.novel_id):
             raise ValueError("storyboard novel_version context invalid")
     elif task.task_type == "storyboard":
         from app.models.novel import NovelVersion
-        from app.models.storyboard import StoryboardProject, StoryboardTask, StoryboardVersion
+        from app.models.storyboard import (
+            StoryboardProject,
+            StoryboardTask,
+            StoryboardVersion,
+        )
 
         payload = task.payload_json or {}
         for key in ("project_id", "task_db_id", "novel_version_id"):
@@ -781,10 +922,14 @@ def _prepare_worker_task_dispatch(db: Session, *, task: CreationTask) -> None:
         if not version_ids:
             raise ValueError("missing payload key for storyboard: version_ids")
 
-        project = db.execute(select(StoryboardProject).where(StoryboardProject.id == project_id)).scalar_one_or_none()
+        project = db.execute(
+            select(StoryboardProject).where(StoryboardProject.id == project_id)
+        ).scalar_one_or_none()
         if not project:
             raise ValueError(f"storyboard project not found: {project_id}")
-        task_row = db.execute(select(StoryboardTask).where(StoryboardTask.id == task_db_id)).scalar_one_or_none()
+        task_row = db.execute(
+            select(StoryboardTask).where(StoryboardTask.id == task_db_id)
+        ).scalar_one_or_none()
         if not task_row or int(task_row.storyboard_project_id) != project_id:
             raise ValueError(f"storyboard task context not found: {task_db_id}")
         matched_version_ids = set(
@@ -793,13 +938,17 @@ def _prepare_worker_task_dispatch(db: Session, *, task: CreationTask) -> None:
                     StoryboardVersion.id.in_(version_ids),
                     StoryboardVersion.storyboard_project_id == project_id,
                 )
-            ).scalars().all()
+            )
+            .scalars()
+            .all()
         )
         requested_version_ids = set(version_ids)
         if matched_version_ids != requested_version_ids:
             raise ValueError("storyboard versions context invalid")
 
-        source_version = db.execute(select(NovelVersion).where(NovelVersion.id == novel_version_id)).scalar_one_or_none()
+        source_version = db.execute(
+            select(NovelVersion).where(NovelVersion.id == novel_version_id)
+        ).scalar_one_or_none()
         if not source_version or int(source_version.novel_id) != int(project.novel_id):
             raise ValueError("storyboard novel_version context invalid")
     else:
@@ -893,7 +1042,8 @@ def _publish_generation_dispatch_snapshot(task: CreationTask) -> None:
         payload=snapshot,
         worker_task_id=task.worker_task_id,
         mirror_worker=False,
-        mirror_novel=str(snapshot.get("status") or "") in GENERATION_CACHE_ACTIVE_STATUSES,
+        mirror_novel=str(snapshot.get("status") or "")
+        in GENERATION_CACHE_ACTIVE_STATUSES,
     )
 
 
@@ -902,11 +1052,16 @@ def _requeue_failed_dispatch(reservation: DispatchReservation, exc: Exception) -
     db = SessionLocal()
     try:
         task = db.execute(
-            select(CreationTask).where(CreationTask.id == reservation.creation_task_id).with_for_update()
+            select(CreationTask)
+            .where(CreationTask.id == reservation.creation_task_id)
+            .with_for_update()
         ).scalar_one_or_none()
         if not task:
             return
-        if task.status != "dispatching" or task.worker_task_id != reservation.worker_task_id:
+        if (
+            task.status != "dispatching"
+            or task.worker_task_id != reservation.worker_task_id
+        ):
             return
         transition_task_status(
             db,
@@ -924,7 +1079,9 @@ def _requeue_failed_dispatch(reservation: DispatchReservation, exc: Exception) -
             from app.models.novel import GenerationTask
 
             legacy = db.execute(
-                select(GenerationTask).where(GenerationTask.task_id == reservation.worker_task_id)
+                select(GenerationTask).where(
+                    GenerationTask.task_id == reservation.worker_task_id
+                )
             ).scalar_one_or_none()
             if legacy:
                 legacy.status = "failed"
@@ -944,7 +1101,8 @@ def _requeue_failed_dispatch(reservation: DispatchReservation, exc: Exception) -
                 worker_task_id=None,
                 mirror_worker=False,
                 clear_worker_ids=[reservation.worker_task_id],
-                mirror_novel=str(snapshot.get("status") or "") in GENERATION_CACHE_ACTIVE_STATUSES,
+                mirror_novel=str(snapshot.get("status") or "")
+                in GENERATION_CACHE_ACTIVE_STATUSES,
             )
     finally:
         db.close()

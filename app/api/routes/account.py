@@ -44,6 +44,7 @@ class UsageLedgerItem(BaseModel):
     source: str
     input_tokens: int
     output_tokens: int
+    billable_tokens: int
     chapters_generated: int
     estimated_cost: float
     created_at: str
@@ -91,6 +92,11 @@ def _normalize_quality_score(raw: float | int | None) -> float:
     return max(0.0, min(100.0, value))
 
 
+def _ledger_billable_tokens_expr():
+    visible_total = UsageLedger.input_tokens + UsageLedger.output_tokens
+    return func.coalesce(func.nullif(UsageLedger.billable_tokens, 0), visible_total)
+
+
 def _scoped_novel_filters(principal: Principal) -> list[object]:
     """执行 scoped novel filters 相关辅助逻辑。"""
     if principal.role == "admin":
@@ -119,7 +125,7 @@ def get_quota(
     )
     used_tokens = (
         db.execute(
-            select(func.coalesce(func.sum(UsageLedger.input_tokens + UsageLedger.output_tokens), 0))
+            select(func.coalesce(func.sum(_ledger_billable_tokens_expr()), 0))
             .where(UsageLedger.user_id == user.id, UsageLedger.created_at >= start, UsageLedger.created_at < end)
         ).scalar_one()
         or 0
@@ -159,6 +165,10 @@ def list_ledger(
             source=r.source,
             input_tokens=int(r.input_tokens or 0),
             output_tokens=int(r.output_tokens or 0),
+            billable_tokens=max(
+                int(r.billable_tokens or 0),
+                int(r.input_tokens or 0) + int(r.output_tokens or 0),
+            ),
             chapters_generated=int(r.chapters_generated or 0),
             estimated_cost=float(r.estimated_cost or 0.0),
             created_at=(r.created_at.isoformat() if r.created_at else ""),

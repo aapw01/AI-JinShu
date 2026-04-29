@@ -14,6 +14,7 @@
 - 为什么章节完成后要立刻落 checkpoint，再推进 `resume_cursor`。
 - 为什么恢复前要回滚 progression，避免半章状态污染后续续写。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -25,7 +26,10 @@ import redis
 from sqlalchemy import select
 
 from app.workers.celery_app import app
-from app.services.generation.pipeline import run_final_book_review_only, run_generation_pipeline
+from app.services.generation.pipeline import (
+    run_final_book_review_only,
+    run_generation_pipeline,
+)
 from app.core.database import SessionLocal
 from app.core.logging_config import bind_log_context, log_event
 from app.core.llm_usage import begin_usage_session, end_usage_session, snapshot_usage
@@ -53,7 +57,11 @@ from app.services.task_runtime.cursor_service import resume_from_last_completed
 from app.services.task_runtime.lease_service import background_heartbeat
 from app.core.constants import CREATION_WORKER_HEARTBEAT_SECONDS
 from app.services.generation.contracts import OutputContractError
-from app.services.generation.status_snapshot import SUBTASK_LABELS, sync_generation_novel_snapshot, write_generation_cache
+from app.services.generation.status_snapshot import (
+    SUBTASK_LABELS,
+    sync_generation_novel_snapshot,
+    write_generation_cache,
+)
 from app.core.llm_contract import get_last_prompt_meta
 from app.services.memory.progression_control import rollback_progression_range
 
@@ -63,6 +71,7 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class GenerationResumePlan:
     """描述生成任务恢复时需要的章节边界、分卷信息与恢复模式。"""
+
     next_chapter: int
     book_start_chapter: int
     book_target_total_chapters: int
@@ -79,7 +88,12 @@ _KEEP_RUNTIME_VALUE = object()
 
 def _task_book_start(payload_data: dict[str, Any], *, fallback_start: int) -> int:
     """从任务载荷中解析整本小说的起始章节。"""
-    return int(payload_data.get("book_start_chapter") or payload_data.get("start_chapter") or fallback_start or 1)
+    return int(
+        payload_data.get("book_start_chapter")
+        or payload_data.get("start_chapter")
+        or fallback_start
+        or 1
+    )
 
 
 def _task_book_total(payload_data: dict[str, Any], *, fallback_total: int) -> int:
@@ -93,14 +107,18 @@ def _task_book_total(payload_data: dict[str, Any], *, fallback_total: int) -> in
     )
 
 
-def _task_book_end(payload_data: dict[str, Any], *, fallback_start: int, fallback_total: int) -> int:
+def _task_book_end(
+    payload_data: dict[str, Any], *, fallback_start: int, fallback_total: int
+) -> int:
     """根据起始章节和目标总章数推导整本小说的结束章节。"""
     book_start = _task_book_start(payload_data, fallback_start=fallback_start)
     book_total = max(0, _task_book_total(payload_data, fallback_total=fallback_total))
     return book_start + max(book_total - 1, 0)
 
 
-def _volume_no_for_next_chapter(*, next_chapter: int, book_start_chapter: int, volume_size: int) -> int:
+def _volume_no_for_next_chapter(
+    *, next_chapter: int, book_start_chapter: int, volume_size: int
+) -> int:
     """根据下一章编号推导它所在的分卷序号。"""
     size = max(1, int(volume_size or 1))
     start = max(1, int(book_start_chapter or 1))
@@ -135,7 +153,11 @@ def _error_meta_from_exc(exc: Exception) -> tuple[str, str, bool]:
     if isinstance(exc, OutputContractError):
         if exc.code == "MODEL_OUTPUT_POLICY_VIOLATION":
             return exc.code, "policy", bool(exc.retryable)
-        if exc.code in {"MODEL_OUTPUT_PARSE_FAILED", "MODEL_OUTPUT_SCHEMA_INVALID", "MODEL_OUTPUT_CONTRACT_EXHAUSTED"}:
+        if exc.code in {
+            "MODEL_OUTPUT_PARSE_FAILED",
+            "MODEL_OUTPUT_SCHEMA_INVALID",
+            "MODEL_OUTPUT_CONTRACT_EXHAUSTED",
+        }:
             return exc.code, "transient", bool(exc.retryable)
         return exc.code, "transient", bool(exc.retryable)
     return "GENERATION_FAILED", "transient", True
@@ -161,7 +183,9 @@ def _with_subtask(payload: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
-def _volume_chunks(start_chapter: int, num_chapters: int, volume_size: int) -> list[tuple[int, int, int]]:
+def _volume_chunks(
+    start_chapter: int, num_chapters: int, volume_size: int
+) -> list[tuple[int, int, int]]:
     """Return [(volume_no, chunk_start, chunk_len), ...]."""
     volume_size = max(1, int(volume_size or 30))
     chunks: list[tuple[int, int, int]] = []
@@ -249,7 +273,9 @@ def _get_task_state(task_id: str) -> tuple[str | None, str | None]:
         ).scalar_one_or_none()
         if ct:
             return ct.status, ct.phase
-        row = db.execute(select(GenerationTask).where(GenerationTask.task_id == task_id)).scalar_one_or_none()
+        row = db.execute(
+            select(GenerationTask).where(GenerationTask.task_id == task_id)
+        ).scalar_one_or_none()
         if not row:
             return None, None
         return row.status, row.run_state
@@ -300,33 +326,41 @@ def _activate_creation_task(task_db_id: int, *, current_celery_id: str) -> None:
             raise RuntimeError("generation_paused")
         if state not in {"dispatching", "running"}:
             raise RuntimeError(f"generation_invalid_start:{state or 'unknown'}")
-        mark_creation_task_running(db, task_id=task_db_id, worker_task_id=current_celery_id)
+        mark_creation_task_running(
+            db, task_id=task_db_id, worker_task_id=current_celery_id
+        )
         db.commit()
     finally:
         db.close()
 
 
-def _load_prior_tokens(creation_task_id: int | None) -> tuple[int, int]:
+def _load_prior_tokens(creation_task_id: int | None) -> tuple[int, int, int]:
     """Load token totals from the creation_task's result_json for resume scenarios.
-    Returns (input_tokens, output_tokens). Safe to call with None."""
+    Returns (input_tokens, output_tokens, billable_tokens). Safe to call with None."""
     if creation_task_id is None:
-        return 0, 0
+        return 0, 0, 0
     db = SessionLocal()
     try:
         row = db.execute(
             select(CreationTask).where(CreationTask.id == creation_task_id)
         ).scalar_one_or_none()
         if row and isinstance(row.result_json, dict):
+            input_tokens = int(row.result_json.get("token_usage_input") or 0)
+            output_tokens = int(row.result_json.get("token_usage_output") or 0)
+            billable_tokens = int(row.result_json.get("token_usage_billable") or 0)
             return (
-                int(row.result_json.get("token_usage_input") or 0),
-                int(row.result_json.get("token_usage_output") or 0),
+                input_tokens,
+                output_tokens,
+                max(billable_tokens, input_tokens + output_tokens),
             )
-        return 0, 0
+        return 0, 0, 0
     finally:
         db.close()
 
 
-def _update_creation_progress(task_db_id: int, *, progress: float, phase: str, message: str) -> None:
+def _update_creation_progress(
+    task_db_id: int, *, progress: float, phase: str, message: str
+) -> None:
     """把当前章节进度和 Token 用量同步到统一任务表。"""
     db = SessionLocal()
     try:
@@ -339,6 +373,7 @@ def _update_creation_progress(task_db_id: int, *, progress: float, phase: str, m
             message=message,
             token_usage_input=int(usage.get("input_tokens") or 0),
             token_usage_output=int(usage.get("output_tokens") or 0),
+            token_usage_billable=int(usage.get("billable_total_tokens") or 0),
             estimated_cost=float(usage.get("estimated_cost") or 0.0),
         )
         db.commit()
@@ -356,19 +391,33 @@ def _resolve_completed_usage_totals(
     """基于恢复游标修正完成章节数与累计用量统计。"""
     current = max(0, int(fallback_current or 0))
     total = max(0, int(fallback_total or 0))
-    completed = max(0, current - int(start_chapter or 1) + 1) if current >= int(start_chapter or 1) else 0
+    completed = (
+        max(0, current - int(start_chapter or 1) + 1)
+        if current >= int(start_chapter or 1)
+        else 0
+    )
     if not row:
         return current, total, completed
 
     cursor = row.resume_cursor_json if isinstance(row.resume_cursor_json, dict) else {}
-    runtime_state = cursor.get("runtime_state") if isinstance(cursor.get("runtime_state"), dict) else {}
+    runtime_state = (
+        cursor.get("runtime_state")
+        if isinstance(cursor.get("runtime_state"), dict)
+        else {}
+    )
     runtime_end = int(runtime_state.get("book_effective_end_chapter") or 0)
-    runtime_total = max(int(runtime_state.get("book_target_total_chapters") or 0), runtime_end)
+    runtime_total = max(
+        int(runtime_state.get("book_target_total_chapters") or 0), runtime_end
+    )
     last_completed = int(cursor.get("last_completed") or 0)
 
     total = max(total, runtime_total, runtime_end, last_completed)
     current = max(current, runtime_end, last_completed)
-    completed = max(0, current - int(start_chapter or 1) + 1) if current >= int(start_chapter or 1) else 0
+    completed = (
+        max(0, current - int(start_chapter or 1) + 1)
+        if current >= int(start_chapter or 1)
+        else 0
+    )
     return int(current), int(total), int(completed)
 
 
@@ -415,7 +464,9 @@ def _persist_task_runtime_state(
             db,
             creation_task_id=task_db_id,
             unit_type="chapter",
-            last_completed_unit_no=max(int(book_start_chapter) - 1, int(next_chapter) - 1),
+            last_completed_unit_no=max(
+                int(book_start_chapter) - 1, int(next_chapter) - 1
+            ),
             next_unit_no=max(int(book_start_chapter), int(next_chapter)),
         )
         db.commit()
@@ -444,7 +495,9 @@ def _mark_creation_chapter_completed(task_db_id: int, *, chapter_num: int) -> No
             unit_no=int(chapter_num),
             payload={"phase": "chapter_done", "chapter_num": int(chapter_num)},
         )
-        last_completed = get_last_completed_unit(db, creation_task_id=task_db_id, unit_type="chapter")
+        last_completed = get_last_completed_unit(
+            db, creation_task_id=task_db_id, unit_type="chapter"
+        )
         next_chapter = int(last_completed or 0) + 1
         update_resume_cursor(
             db,
@@ -475,17 +528,28 @@ def _resolve_generation_resume(
     """
     db = SessionLocal()
     try:
-        row = db.execute(select(CreationTask).where(CreationTask.id == task_db_id)).scalar_one_or_none()
-        payload_data = row.payload_json if row and isinstance(row.payload_json, dict) else {}
+        row = db.execute(
+            select(CreationTask).where(CreationTask.id == task_db_id)
+        ).scalar_one_or_none()
+        payload_data = (
+            row.payload_json if row and isinstance(row.payload_json, dict) else {}
+        )
         task_start = int(payload_data.get("start_chapter") or start_chapter or 1)
         task_total = int(payload_data.get("num_chapters") or num_chapters or 0)
         task_end = task_start + max(task_total - 1, 0)
         book_start = _task_book_start(payload_data, fallback_start=task_start)
         book_total = max(1, _task_book_total(payload_data, fallback_total=task_total))
-        book_end = max(_task_book_end(payload_data, fallback_start=task_start, fallback_total=task_total), task_end)
+        book_end = max(
+            _task_book_end(
+                payload_data, fallback_start=task_start, fallback_total=task_total
+            ),
+            task_end,
+        )
         runtime_state = get_resume_runtime_state(db, creation_task_id=task_db_id)
         runtime_mode = str(runtime_state.get("mode") or "").strip() or "segment_running"
-        effective_book_end = int(runtime_state.get("book_effective_end_chapter") or book_end)
+        effective_book_end = int(
+            runtime_state.get("book_effective_end_chapter") or book_end
+        )
         next_chapter = int(runtime_state.get("next_chapter") or 0)
         current_volume_no = int(runtime_state.get("volume_no") or 0)
         runtime_segment_start = int(runtime_state.get("segment_start_chapter") or 0)
@@ -493,7 +557,11 @@ def _resolve_generation_resume(
         retry_resume_chapter = int(runtime_state.get("retry_resume_chapter") or 0)
 
         if not next_chapter:
-            cursor = row.resume_cursor_json if row and isinstance(row.resume_cursor_json, dict) else {}
+            cursor = (
+                row.resume_cursor_json
+                if row and isinstance(row.resume_cursor_json, dict)
+                else {}
+            )
             next_chapter = int(cursor.get("next") or task_start)
         if retry_resume_chapter <= 0:
             retry_resume_chapter = int(next_chapter)
@@ -502,7 +570,9 @@ def _resolve_generation_resume(
             book_start_chapter=book_start,
             volume_size=volume_size,
         )
-        if current_volume_no <= 0 or (runtime_segment_end > 0 and next_chapter > runtime_segment_end):
+        if current_volume_no <= 0 or (
+            runtime_segment_end > 0 and next_chapter > runtime_segment_end
+        ):
             current_volume_no = computed_volume_no
         segment_start, segment_end = _resolve_segment_window(
             next_chapter=max(next_chapter, task_start),
@@ -558,7 +628,9 @@ def _resolve_generation_resume(
                 db,
                 creation_task_id=task_db_id,
                 unit_type="chapter",
-                last_completed_unit_no=(resume_from - 1) if resume_from > task_start else None,
+                last_completed_unit_no=(resume_from - 1)
+                if resume_from > task_start
+                else None,
                 next_unit_no=resume_from,
             )
             db.commit()
@@ -570,7 +642,9 @@ def _resolve_generation_resume(
                 current_volume_no=current_volume_no,
                 segment_start_chapter=segment_start,
                 segment_end_chapter=segment_end,
-                retry_resume_chapter=max(int(retry_resume_chapter or 0), int(resume_from)),
+                retry_resume_chapter=max(
+                    int(retry_resume_chapter or 0), int(resume_from)
+                ),
                 mode="segment_running",
             )
         last_completed = get_last_completed_unit(
@@ -598,9 +672,19 @@ def _resolve_generation_resume(
             book_start_chapter=book_start,
             book_target_total_chapters=book_total,
             book_effective_end_chapter=max(book_end, effective_book_end),
-            current_volume_no=max(1, ((max(resume_from, book_start) - book_start) // max(int(volume_size or 1), 1)) + 1),
+            current_volume_no=max(
+                1,
+                (
+                    (max(resume_from, book_start) - book_start)
+                    // max(int(volume_size or 1), 1)
+                )
+                + 1,
+            ),
             segment_start_chapter=int(resume_from),
-            segment_end_chapter=min(int(resume_from) + max(int(volume_size or 1) - 1, 0), max(book_end, effective_book_end)),
+            segment_end_chapter=min(
+                int(resume_from) + max(int(volume_size or 1) - 1, 0),
+                max(book_end, effective_book_end),
+            ),
             retry_resume_chapter=int(resume_from),
             mode="segment_running",
         )
@@ -691,6 +775,7 @@ def _run_volume_generation(
     metric_state = {
         "token_usage_input": 0,
         "token_usage_output": 0,
+        "token_usage_billable": 0,
         "estimated_cost": 0.0,
         "trace_id": "",
     }
@@ -699,14 +784,25 @@ def _run_volume_generation(
         if cached_raw:
             cached = json.loads(cached_raw)
             if isinstance(cached, dict):
-                metric_state["token_usage_input"] = int(cached.get("token_usage_input") or 0)
-                metric_state["token_usage_output"] = int(cached.get("token_usage_output") or 0)
-                metric_state["estimated_cost"] = float(cached.get("estimated_cost") or 0.0)
+                metric_state["token_usage_input"] = int(
+                    cached.get("token_usage_input") or 0
+                )
+                metric_state["token_usage_output"] = int(
+                    cached.get("token_usage_output") or 0
+                )
+                metric_state["token_usage_billable"] = int(
+                    cached.get("token_usage_billable") or 0
+                )
+                metric_state["estimated_cost"] = float(
+                    cached.get("estimated_cost") or 0.0
+                )
                 metric_state["trace_id"] = str(cached.get("trace_id") or "")
     except Exception:
         pass
 
-    def progress_cb(step: str, chapter: int, pct: float, msg: str = "", meta: dict | None = None):
+    def progress_cb(
+        step: str, chapter: int, pct: float, msg: str = "", meta: dict | None = None
+    ):
         """接收生成主链路进度事件，并同步更新缓存、心跳、checkpoint 和任务表。"""
         task_status, run_state = _get_task_state(parent_task_id)
         if creation_task_id is not None:
@@ -722,9 +818,15 @@ def _run_volume_generation(
                 raise RuntimeError("generation_paused")
             if step == "chapter_done" and int(chapter or 0) > 0:
                 try:
-                    _mark_creation_chapter_completed(creation_task_id, chapter_num=int(chapter))
+                    _mark_creation_chapter_completed(
+                        creation_task_id, chapter_num=int(chapter)
+                    )
                 except Exception:
-                    logger.exception("failed to mark generation checkpoint task=%s chapter=%s", creation_task_id, chapter)
+                    logger.exception(
+                        "failed to mark generation checkpoint task=%s chapter=%s",
+                        creation_task_id,
+                        chapter,
+                    )
         if task_status == "cancelled" or run_state == "cancelled":
             raise RuntimeError("generation_cancelled")
         paused_iterations = 0
@@ -738,7 +840,11 @@ def _run_volume_generation(
                 "run_state": "paused",
                 "step": "paused",
                 "current_phase": "paused",
-                "current_subtask": {"key": "paused", "label": "任务已暂停", "progress": round(pct, 2)},
+                "current_subtask": {
+                    "key": "paused",
+                    "label": "任务已暂停",
+                    "progress": round(pct, 2),
+                },
                 "current_chapter": chapter,
                 "total_chapters": book_effective_end_chapter,
                 "progress": round(pct, 2),
@@ -767,10 +873,23 @@ def _run_volume_generation(
         if meta.get("token_usage_input") is not None:
             metric_state["token_usage_input"] = int(meta.get("token_usage_input") or 0)
         if meta.get("token_usage_output") is not None:
-            metric_state["token_usage_output"] = int(meta.get("token_usage_output") or 0)
+            metric_state["token_usage_output"] = int(
+                meta.get("token_usage_output") or 0
+            )
+        if meta.get("token_usage_billable") is not None:
+            metric_state["token_usage_billable"] = int(
+                meta.get("token_usage_billable") or 0
+            )
         if meta.get("estimated_cost") is not None:
             metric_state["estimated_cost"] = float(meta.get("estimated_cost") or 0.0)
-        effective_total_chapters = max(int(meta.get("total_chapters") or 0), int(book_effective_end_chapter or 0))
+        metric_state["token_usage_billable"] = max(
+            int(metric_state.get("token_usage_billable") or 0),
+            int(metric_state.get("token_usage_input") or 0)
+            + int(metric_state.get("token_usage_output") or 0),
+        )
+        effective_total_chapters = max(
+            int(meta.get("total_chapters") or 0), int(book_effective_end_chapter or 0)
+        )
         global_pct = max(0.0, min(100.0, float(pct or 0.0)))
         payload = {
             "status": meta.get("status", "running"),
@@ -783,10 +902,12 @@ def _run_volume_generation(
                 "progress": round(global_pct, 2),
             },
             "current_chapter": chapter,
-            "total_chapters": effective_total_chapters or int(book_effective_end_chapter or 0),
+            "total_chapters": effective_total_chapters
+            or int(book_effective_end_chapter or 0),
             "progress": round(global_pct, 2),
             "token_usage_input": metric_state["token_usage_input"],
             "token_usage_output": metric_state["token_usage_output"],
+            "token_usage_billable": metric_state["token_usage_billable"],
             "estimated_cost": metric_state["estimated_cost"],
             "volume_no": volume_no,
             "volume_size": volume_size,
@@ -840,7 +961,12 @@ def _run_volume_generation(
             task_id=parent_task_id,
             creation_task_id=creation_task_id,
         )
-    return {"ok": True, "volume_no": volume_no, "start": segment_start_chapter, "num_chapters": segment_target_chapters}
+    return {
+        "ok": True,
+        "volume_no": volume_no,
+        "start": segment_start_chapter,
+        "num_chapters": segment_target_chapters,
+    }
 
 
 @app.task(bind=True, acks_late=True, reject_on_worker_lost=True)
@@ -900,7 +1026,9 @@ def submit_book_generation_task(
     creation_public_id: str | None = None
     book_start_chapter = int(start_chapter or 1)
     book_target_total_chapters = int(num_chapters or 0)
-    book_effective_end_chapter = int(start_chapter or 1) + max(int(num_chapters or 0) - 1, 0)
+    book_effective_end_chapter = int(start_chapter or 1) + max(
+        int(num_chapters or 0) - 1, 0
+    )
     next_chapter = int(start_chapter or 1)
     current_volume_no = 1
     volume_size = 30
@@ -913,7 +1041,11 @@ def submit_book_generation_task(
         "run_state": "running",
         "step": "queued",
         "current_phase": "queued",
-        "current_subtask": {"key": "queued", "label": SUBTASK_LABELS.get("queued"), "progress": 0},
+        "current_subtask": {
+            "key": "queued",
+            "label": SUBTASK_LABELS.get("queued"),
+            "progress": 0,
+        },
         "progress": 0,
         "current_chapter": int(next_chapter),
         "total_chapters": int(book_target_total_chapters),
@@ -927,18 +1059,30 @@ def submit_book_generation_task(
     try:
         db = SessionLocal()
         try:
-            novel = db.execute(select(Novel).where(Novel.id == novel_id)).scalar_one_or_none()
-            volume_size = int(((novel.config or {}).get("volume_size") or 30)) if novel else 30
+            novel = db.execute(
+                select(Novel).where(Novel.id == novel_id)
+            ).scalar_one_or_none()
+            volume_size = (
+                int(((novel.config or {}).get("volume_size") or 30)) if novel else 30
+            )
             if creation_task_id is not None:
-                ct = db.execute(select(CreationTask).where(CreationTask.id == creation_task_id)).scalar_one_or_none()
+                ct = db.execute(
+                    select(CreationTask).where(CreationTask.id == creation_task_id)
+                ).scalar_one_or_none()
                 if not ct:
                     raise RuntimeError("creation_task_not_found")
                 creation_public_id = ct.public_id
                 if isinstance(ct.payload_json, dict):
                     payload_data = dict(ct.payload_json)
-                    trace_id = trace_id or str(payload_data.get("trace_id") or "") or trace_id
-                    book_start_chapter = _task_book_start(payload_data, fallback_start=book_start_chapter)
-                    book_target_total_chapters = _task_book_total(payload_data, fallback_total=book_target_total_chapters)
+                    trace_id = (
+                        trace_id or str(payload_data.get("trace_id") or "") or trace_id
+                    )
+                    book_start_chapter = _task_book_start(
+                        payload_data, fallback_start=book_start_chapter
+                    )
+                    book_target_total_chapters = _task_book_total(
+                        payload_data, fallback_total=book_target_total_chapters
+                    )
                     book_effective_end_chapter = max(
                         book_effective_end_chapter,
                         _task_book_end(
@@ -951,11 +1095,14 @@ def submit_book_generation_task(
             db.close()
             db = None
 
-        prior_input, prior_output = _load_prior_tokens(creation_task_id)
+        prior_input, prior_output, prior_billable = _load_prior_tokens(
+            creation_task_id
+        )
         begin_usage_session(
             f"generation:{task_id}",
             base_input=prior_input,
             base_output=prior_output,
+            base_billable=prior_billable,
         )
         if creation_task_id is not None:
             _activate_creation_task(creation_task_id, current_celery_id=task_id)
@@ -980,10 +1127,16 @@ def submit_book_generation_task(
                     "run_state": "completed",
                     "step": "done",
                     "current_phase": "completed",
-                    "current_subtask": {"key": "done", "label": SUBTASK_LABELS.get("done"), "progress": 100},
+                    "current_subtask": {
+                        "key": "done",
+                        "label": SUBTASK_LABELS.get("done"),
+                        "progress": 100,
+                    },
                     "progress": 100,
                     "current_chapter": max(0, int(book_effective_end_chapter)),
-                    "total_chapters": int(max(book_target_total_chapters, book_effective_end_chapter)),
+                    "total_chapters": int(
+                        max(book_target_total_chapters, book_effective_end_chapter)
+                    ),
                     "volume_no": 1,
                     "volume_size": 1,
                     "message": "任务已完成（已无待处理章节）",
@@ -1004,7 +1157,11 @@ def submit_book_generation_task(
                 )
                 return task_id
 
-        hb_ctx = background_heartbeat(creation_task_id, heartbeat_fn=_heartbeat_creation, interval_seconds=CREATION_WORKER_HEARTBEAT_SECONDS)
+        hb_ctx = background_heartbeat(
+            creation_task_id,
+            heartbeat_fn=_heartbeat_creation,
+            interval_seconds=CREATION_WORKER_HEARTBEAT_SECONDS,
+        )
         hb_ctx.__enter__()
 
         db = SessionLocal()
@@ -1014,7 +1171,11 @@ def submit_book_generation_task(
             ).scalar_one_or_none()
             ct_status = ct.status if ct else None
             ct_phase = ct.phase if ct else None
-            trace_id = trace_id or (((ct.payload_json or {}).get("trace_id")) if ct else None) or ""
+            trace_id = (
+                trace_id
+                or (((ct.payload_json or {}).get("trace_id")) if ct else None)
+                or ""
+            )
         finally:
             db.close()
             db = None
@@ -1032,7 +1193,11 @@ def submit_book_generation_task(
                 total_chapters=book_target_total_chapters,
             )
         if ct_status in {"completed", "cancelled"}:
-            logger.info("Skip replay for task %s because creation_task status=%s", task_id, ct_status)
+            logger.info(
+                "Skip replay for task %s because creation_task status=%s",
+                task_id,
+                ct_status,
+            )
             data.update(
                 {
                     "status": str(ct_status),
@@ -1050,9 +1215,15 @@ def submit_book_generation_task(
             "run_state": "running",
             "step": "book_orchestrator",
             "current_phase": "book_planning",
-            "current_subtask": {"key": "book_planning", "label": SUBTASK_LABELS.get("book_planning"), "progress": 5},
+            "current_subtask": {
+                "key": "book_planning",
+                "label": SUBTASK_LABELS.get("book_planning"),
+                "progress": 5,
+            },
             "current_chapter": next_chapter,
-            "total_chapters": max(book_target_total_chapters, book_effective_end_chapter),
+            "total_chapters": max(
+                book_target_total_chapters, book_effective_end_chapter
+            ),
             "novel_version_id": int(novel_version_id),
             "progress": 5,
             "volume_no": current_volume_no,
@@ -1073,19 +1244,38 @@ def submit_book_generation_task(
             db.close()
             db = None
 
-        while resume_mode == "segment_running" and next_chapter <= book_effective_end_chapter:
-            segment_start_chapter = int(current_segment_start if current_segment_start > 0 else next_chapter)
-            segment_end_chapter = int(current_segment_end if current_segment_end >= segment_start_chapter else min(segment_start_chapter + max(volume_size - 1, 0), book_effective_end_chapter))
+        while (
+            resume_mode == "segment_running"
+            and next_chapter <= book_effective_end_chapter
+        ):
+            segment_start_chapter = int(
+                current_segment_start if current_segment_start > 0 else next_chapter
+            )
+            segment_end_chapter = int(
+                current_segment_end
+                if current_segment_end >= segment_start_chapter
+                else min(
+                    segment_start_chapter + max(volume_size - 1, 0),
+                    book_effective_end_chapter,
+                )
+            )
             segment_end_chapter = min(segment_end_chapter, book_effective_end_chapter)
-            segment_target_chapters = max(1, segment_end_chapter - segment_start_chapter + 1)
+            segment_target_chapters = max(
+                1, segment_end_chapter - segment_start_chapter + 1
+            )
             announce = {
                 "status": "running",
                 "run_state": "running",
                 "step": "volume_dispatch",
                 "current_phase": "volume_dispatch",
-                "current_subtask": {"key": "volume_dispatch", "label": SUBTASK_LABELS.get("volume_dispatch")},
+                "current_subtask": {
+                    "key": "volume_dispatch",
+                    "label": SUBTASK_LABELS.get("volume_dispatch"),
+                },
                 "current_chapter": segment_start_chapter,
-                "total_chapters": max(book_target_total_chapters, book_effective_end_chapter),
+                "total_chapters": max(
+                    book_target_total_chapters, book_effective_end_chapter
+                ),
                 "novel_version_id": int(novel_version_id),
                 "progress": round(data.get("progress") or 5, 2),
                 "volume_no": current_volume_no,
@@ -1147,12 +1337,30 @@ def submit_book_generation_task(
 
             db = SessionLocal()
             try:
-                row = db.execute(select(CreationTask).where(CreationTask.id == creation_task_id)).scalar_one_or_none()
-                payload_data = row.payload_json if row and isinstance(row.payload_json, dict) else {}
-                cursor = row.resume_cursor_json if row and isinstance(row.resume_cursor_json, dict) else {}
-                runtime_state = cursor.get("runtime_state") if isinstance(cursor.get("runtime_state"), dict) else {}
-                book_start_chapter = _task_book_start(payload_data, fallback_start=book_start_chapter)
-                book_target_total_chapters = _task_book_total(payload_data, fallback_total=book_target_total_chapters)
+                row = db.execute(
+                    select(CreationTask).where(CreationTask.id == creation_task_id)
+                ).scalar_one_or_none()
+                payload_data = (
+                    row.payload_json
+                    if row and isinstance(row.payload_json, dict)
+                    else {}
+                )
+                cursor = (
+                    row.resume_cursor_json
+                    if row and isinstance(row.resume_cursor_json, dict)
+                    else {}
+                )
+                runtime_state = (
+                    cursor.get("runtime_state")
+                    if isinstance(cursor.get("runtime_state"), dict)
+                    else {}
+                )
+                book_start_chapter = _task_book_start(
+                    payload_data, fallback_start=book_start_chapter
+                )
+                book_target_total_chapters = _task_book_total(
+                    payload_data, fallback_total=book_target_total_chapters
+                )
                 book_effective_end_chapter = max(
                     book_effective_end_chapter,
                     int(runtime_state.get("book_effective_end_chapter") or 0),
@@ -1162,17 +1370,29 @@ def submit_book_generation_task(
                         fallback_total=book_target_total_chapters,
                     ),
                 )
-                next_chapter = int(runtime_state.get("next_chapter") or cursor.get("next") or (segment_end_chapter + 1))
-                retry_resume_chapter = int(runtime_state.get("retry_resume_chapter") or retry_resume_chapter or next_chapter)
+                next_chapter = int(
+                    runtime_state.get("next_chapter")
+                    or cursor.get("next")
+                    or (segment_end_chapter + 1)
+                )
+                retry_resume_chapter = int(
+                    runtime_state.get("retry_resume_chapter")
+                    or retry_resume_chapter
+                    or next_chapter
+                )
                 runtime_segment_end = int(runtime_state.get("segment_end_chapter") or 0)
-                runtime_segment_start = int(runtime_state.get("segment_start_chapter") or 0)
+                runtime_segment_start = int(
+                    runtime_state.get("segment_start_chapter") or 0
+                )
                 computed_volume_no = _volume_no_for_next_chapter(
                     next_chapter=next_chapter,
                     book_start_chapter=book_start_chapter,
                     volume_size=volume_size,
                 )
                 current_volume_no = int(runtime_state.get("volume_no") or 0)
-                if current_volume_no <= 0 or (runtime_segment_end > 0 and next_chapter > runtime_segment_end):
+                if current_volume_no <= 0 or (
+                    runtime_segment_end > 0 and next_chapter > runtime_segment_end
+                ):
                     current_volume_no = computed_volume_no
                 current_segment_start, current_segment_end = _resolve_segment_window(
                     next_chapter=next_chapter,
@@ -1189,7 +1409,12 @@ def submit_book_generation_task(
             _persist_task_runtime_state(
                 creation_task_id,
                 mode="book_final_review_pending",
-                volume_no=max(1, current_volume_no if next_chapter <= book_effective_end_chapter else current_volume_no - 1),
+                volume_no=max(
+                    1,
+                    current_volume_no
+                    if next_chapter <= book_effective_end_chapter
+                    else current_volume_no - 1,
+                ),
                 segment_start_chapter=max(book_start_chapter, next_chapter),
                 segment_end_chapter=max(book_start_chapter, book_effective_end_chapter),
                 next_chapter=max(book_effective_end_chapter + 1, next_chapter),
@@ -1202,13 +1427,20 @@ def submit_book_generation_task(
             _run_volume_generation(
                 novel_id=int(novel_id),
                 novel_version_id=int(novel_version_id),
-                segment_target_chapters=max(1, book_effective_end_chapter - book_start_chapter + 1),
+                segment_target_chapters=max(
+                    1, book_effective_end_chapter - book_start_chapter + 1
+                ),
                 segment_start_chapter=book_start_chapter,
                 parent_task_id=task_id,
                 book_start_chapter=book_start_chapter,
                 book_target_total_chapters=book_target_total_chapters,
                 book_effective_end_chapter=book_effective_end_chapter,
-                volume_no=max(1, current_volume_no if next_chapter <= book_effective_end_chapter else current_volume_no - 1),
+                volume_no=max(
+                    1,
+                    current_volume_no
+                    if next_chapter <= book_effective_end_chapter
+                    else current_volume_no - 1,
+                ),
                 volume_size=volume_size,
                 creation_task_id=creation_task_id,
                 creation_public_id=creation_public_id,
@@ -1220,12 +1452,23 @@ def submit_book_generation_task(
             "run_state": "completed",
             "step": "done",
             "current_phase": "completed",
-            "current_subtask": {"key": "done", "label": SUBTASK_LABELS.get("done"), "progress": 100},
+            "current_subtask": {
+                "key": "done",
+                "label": SUBTASK_LABELS.get("done"),
+                "progress": 100,
+            },
             "progress": 100,
             "current_chapter": book_effective_end_chapter,
-            "total_chapters": max(book_target_total_chapters, book_effective_end_chapter),
+            "total_chapters": max(
+                book_target_total_chapters, book_effective_end_chapter
+            ),
             "novel_version_id": int(novel_version_id),
-            "volume_no": max(1, current_volume_no if next_chapter <= book_effective_end_chapter else current_volume_no - 1),
+            "volume_no": max(
+                1,
+                current_volume_no
+                if next_chapter <= book_effective_end_chapter
+                else current_volume_no - 1,
+            ),
             "volume_size": volume_size,
             "message": "总控任务完成",
             "trace_id": trace_id,
@@ -1239,7 +1482,9 @@ def submit_book_generation_task(
             logger.error(f"Book generation failed for novel {novel_id}: {e}")
             is_paused = err == "generation_paused"
             is_cancelled = err == "generation_cancelled"
-            status = "paused" if is_paused else ("cancelled" if is_cancelled else "failed")
+            status = (
+                "paused" if is_paused else ("cancelled" if is_cancelled else "failed")
+            )
             error_code, error_category, retryable = _error_meta_from_exc(e)
             data = {
                 "status": status,
@@ -1248,17 +1493,27 @@ def submit_book_generation_task(
                 "current_phase": status,
                 "current_subtask": {
                     "key": status,
-                    "label": "任务已暂停" if is_paused else ("任务已取消" if is_cancelled else SUBTASK_LABELS.get("failed")),
+                    "label": "任务已暂停"
+                    if is_paused
+                    else (
+                        "任务已取消" if is_cancelled else SUBTASK_LABELS.get("failed")
+                    ),
                     "progress": 0,
                 },
                 "progress": 0,
-                "total_chapters": max(book_target_total_chapters, book_effective_end_chapter),
+                "total_chapters": max(
+                    book_target_total_chapters, book_effective_end_chapter
+                ),
                 "novel_version_id": int(novel_version_id),
                 "error": None if (is_paused or is_cancelled) else str(e),
                 "error_code": None if (is_paused or is_cancelled) else error_code,
-                "error_category": None if (is_paused or is_cancelled) else error_category,
+                "error_category": None
+                if (is_paused or is_cancelled)
+                else error_category,
                 "retryable": False if (is_paused or is_cancelled) else retryable,
-                "message": "任务暂停并等待恢复" if is_paused else ("任务已取消" if is_cancelled else "总控任务失败"),
+                "message": "任务暂停并等待恢复"
+                if is_paused
+                else ("任务已取消" if is_cancelled else "总控任务失败"),
                 "trace_id": trace_id,
             }
     finally:
@@ -1268,22 +1523,43 @@ def submit_book_generation_task(
             end_usage_session()
             return task_id
         usage = snapshot_usage()
-        data["token_usage_input"] = int(usage.get("input_tokens") or data.get("token_usage_input") or 0)
-        data["token_usage_output"] = int(usage.get("output_tokens") or data.get("token_usage_output") or 0)
-        data["estimated_cost"] = float(usage.get("estimated_cost") or data.get("estimated_cost") or 0.0)
+        data["token_usage_input"] = int(
+            usage.get("input_tokens") or data.get("token_usage_input") or 0
+        )
+        data["token_usage_output"] = int(
+            usage.get("output_tokens") or data.get("token_usage_output") or 0
+        )
+        data["token_usage_billable"] = int(
+            usage.get("billable_total_tokens")
+            or data.get("token_usage_billable")
+            or int(data.get("token_usage_input") or 0)
+            + int(data.get("token_usage_output") or 0)
+        )
+        data["estimated_cost"] = float(
+            usage.get("estimated_cost") or data.get("estimated_cost") or 0.0
+        )
         prompt_meta = get_last_prompt_meta() or {}
         status = str(data.get("status") or "")
         usage_summary = {
             "token_usage_input": int(data.get("token_usage_input") or 0),
             "token_usage_output": int(data.get("token_usage_output") or 0),
+            "token_usage_billable": int(
+                data.get("token_usage_billable")
+                or int(data.get("token_usage_input") or 0)
+                + int(data.get("token_usage_output") or 0)
+            ),
             "estimated_cost": float(data.get("estimated_cost") or 0.0),
             "start_chapter": int(book_start_chapter or 1),
             "current_chapter": int(data.get("current_chapter") or 0),
             "total_chapters": int(data.get("total_chapters") or 0),
             "completed_chapters": max(
                 0,
-                int(data.get("current_chapter") or 0) - int(book_start_chapter or 1) + 1,
-            ) if status == "completed" else 0,
+                int(data.get("current_chapter") or 0)
+                - int(book_start_chapter or 1)
+                + 1,
+            )
+            if status == "completed"
+            else 0,
             "usage_calls": int((usage or {}).get("calls") or 0),
             "usage_stages": (usage or {}).get("stages") or {},
             "prompt_version": str(prompt_meta.get("prompt_version") or "v2"),
@@ -1292,7 +1568,10 @@ def submit_book_generation_task(
         }
         db = SessionLocal()
         try:
-            if creation_task_id is not None and data.get("status") in {"failed", "paused"}:
+            if creation_task_id is not None and data.get("status") in {
+                "failed",
+                "paused",
+            }:
                 try:
                     last = get_last_completed_unit(
                         db,
@@ -1309,16 +1588,22 @@ def submit_book_generation_task(
                             next_unit_no=int(last) + 1,
                         )
                 except Exception:
-                    logger.warning("Failed to update resume_cursor on task failure", exc_info=True)
+                    logger.warning(
+                        "Failed to update resume_cursor on task failure", exc_info=True
+                    )
             if creation_task_id is not None:
-                row = db.execute(select(CreationTask).where(CreationTask.id == creation_task_id)).scalar_one_or_none()
+                row = db.execute(
+                    select(CreationTask).where(CreationTask.id == creation_task_id)
+                ).scalar_one_or_none()
                 if row:
                     if status == "completed":
-                        effective_current, effective_total, completed_chapters = _resolve_completed_usage_totals(
-                            row=row,
-                            start_chapter=int(book_start_chapter or 1),
-                            fallback_current=int(data.get("current_chapter") or 0),
-                            fallback_total=int(data.get("total_chapters") or 0),
+                        effective_current, effective_total, completed_chapters = (
+                            _resolve_completed_usage_totals(
+                                row=row,
+                                start_chapter=int(book_start_chapter or 1),
+                                fallback_current=int(data.get("current_chapter") or 0),
+                                fallback_total=int(data.get("total_chapters") or 0),
+                            )
                         )
                         data["current_chapter"] = effective_current
                         data["total_chapters"] = effective_total
@@ -1327,7 +1612,9 @@ def submit_book_generation_task(
                         usage_summary["completed_chapters"] = completed_chapters
                     row.result_json = usage_summary
             _persist_generation_task(db, task_id, data)
-            record_generation_usage(db, task_id=task_id, novel_id=int(novel_id), source="generation")
+            record_generation_usage(
+                db, task_id=task_id, novel_id=int(novel_id), source="generation"
+            )
             db.commit()
             log_event(
                 logger,
@@ -1393,7 +1680,9 @@ def submit_book_generation_task(
                         result_json=usage_summary,
                     )
             except Exception:
-                logger.exception("Failed to finalize creation task %s", creation_task_id)
+                logger.exception(
+                    "Failed to finalize creation task %s", creation_task_id
+                )
         if creation_task_id is not None:
             sync_db = SessionLocal()
             try:
