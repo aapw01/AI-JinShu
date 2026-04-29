@@ -1,4 +1,8 @@
 SHELL := /bin/bash
+DEV_DATABASE_URL ?= postgresql://novel:novel_secret@localhost:25432/novel_db
+DEV_REDIS_URL ?= redis://localhost:26379/0
+DEV_CELERY_BROKER_URL ?= redis://localhost:26379/1
+DEV_ENV := DATABASE_URL="$(DEV_DATABASE_URL)" REDIS_URL="$(DEV_REDIS_URL)" CELERY_BROKER_URL="$(DEV_CELERY_BROKER_URL)"
 
 .PHONY: help install web-install infra migrate migrate-safe dev-api dev-worker dev-beat dev-web dev stop test lint dev-reset logs
 
@@ -20,22 +24,22 @@ web-install:
 	@cd web && npm install
 
 infra:
-	@docker compose up -d
+	@docker compose up -d --wait --wait-timeout 60
 
 migrate:
-	@uv run alembic upgrade head
+	@$(DEV_ENV) uv run alembic upgrade head
 
 migrate-safe:
-	@PGOPTIONS='-c lock_timeout=5s -c statement_timeout=120s' uv run alembic upgrade head
+	@$(DEV_ENV) PGOPTIONS='-c lock_timeout=5s -c statement_timeout=120s' uv run alembic upgrade head
 
 dev-api:
-	@uv run uvicorn app.main:app --reload --host 127.0.0.1
+	@$(DEV_ENV) uv run uvicorn app.main:app --reload --host 127.0.0.1
 
 dev-worker:
-	@uv run celery -A app.workers.celery_app worker -l info
+	@$(DEV_ENV) uv run celery -A app.workers.celery_app worker -l info
 
 dev-beat:
-	@uv run celery -A app.workers.celery_app beat -l info
+	@$(DEV_ENV) uv run celery -A app.workers.celery_app beat -l info
 
 dev-web:
 	@cd web && npm run dev -- --hostname 127.0.0.1
@@ -44,7 +48,10 @@ dev:
 	@set -euo pipefail; \
 	command -v uv >/dev/null || (echo "uv is required. Install from https://docs.astral.sh/uv/" && exit 1); \
 	command -v npm >/dev/null || (echo "npm is required." && exit 1); \
-	docker compose up -d; \
+	export DATABASE_URL="$(DEV_DATABASE_URL)"; \
+	export REDIS_URL="$(DEV_REDIS_URL)"; \
+	export CELERY_BROKER_URL="$(DEV_CELERY_BROKER_URL)"; \
+	docker compose up -d --wait --wait-timeout 60; \
 	uv sync --extra dev; \
 	cd web && npm install; \
 	cd ..; \
@@ -83,8 +90,8 @@ stop:
 
 dev-reset:
 	@docker compose down -v
-	@docker compose up -d --build
-	@uv run alembic upgrade head
+	@docker compose up -d --build --wait --wait-timeout 60
+	@$(DEV_ENV) uv run alembic upgrade head
 
 logs:
 	@docker compose logs -f --tail=200
