@@ -30,7 +30,10 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
 from app.core.llm_usage import record_embedding_call, record_usage_from_response
 from app.core.logging_config import log_event
-from app.services.system_settings.runtime import get_embedding_runtime, get_primary_chat_runtime
+from app.services.system_settings.runtime import (
+    get_embedding_runtime,
+    get_primary_chat_runtime,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +41,7 @@ _LLM_REQUEST_TIMEOUT = 120
 _VALID_ADAPTER_TYPES = frozenset({"openai_compatible", "gemini", "anthropic"})
 _GEMINI_HARM_CATEGORY_MAP = {item.value: item for item in HarmCategory}
 _GEMINI_HARM_THRESHOLD_MAP = {item.value: item for item in HarmBlockThreshold}
+_OPENAI_REASONING_MODEL_PREFIXES = ("o1", "o3", "o4", "gpt-5")
 
 
 def _coerce_part_text(part: Any) -> str:
@@ -97,8 +101,13 @@ def _resolve_base_url(_provider: str | None = None) -> str | None:
 def resolve_effective_adapter(provider_key: str | None) -> tuple[str, str]:
     """返回本次调用最终采用的协议适配器及其命中来源。"""
     primary = get_primary_chat_runtime()
-    provider = str(provider_key or primary.get("provider") or "openai").strip().lower() or "openai"
-    protocol_override = str(primary.get("protocol_override") or "").strip().lower() or None
+    provider = (
+        str(provider_key or primary.get("provider") or "openai").strip().lower()
+        or "openai"
+    )
+    protocol_override = (
+        str(primary.get("protocol_override") or "").strip().lower() or None
+    )
     base_url = str(primary.get("base_url") or "").strip() or None
     if protocol_override in _VALID_ADAPTER_TYPES:
         return protocol_override, "override"
@@ -111,11 +120,17 @@ def resolve_effective_adapter(provider_key: str | None) -> tuple[str, str]:
     return "openai_compatible", "auto_native"
 
 
-def _resolve_chat_provider_and_model(provider: str | None, model: str | None) -> tuple[str, str]:
+def _resolve_chat_provider_and_model(
+    provider: str | None, model: str | None
+) -> tuple[str, str]:
     """返回当前调用真正生效的 provider 和 model。"""
     primary = get_primary_chat_runtime()
-    resolved_provider = str(primary.get("provider") or "openai").strip().lower() or "openai"
-    resolved_model = str(model or primary.get("model") or "gpt-4o-mini").strip() or "gpt-4o-mini"
+    resolved_provider = (
+        str(primary.get("provider") or "openai").strip().lower() or "openai"
+    )
+    resolved_model = (
+        str(model or primary.get("model") or "gpt-4o-mini").strip() or "gpt-4o-mini"
+    )
     requested_provider = str(provider or "").strip().lower()
     if requested_provider and requested_provider != resolved_provider:
         log_event(
@@ -161,14 +176,20 @@ def _normalize_gemini_safety_settings(
         category = _GEMINI_HARM_CATEGORY_MAP.get(category_raw)
         threshold = _GEMINI_HARM_THRESHOLD_MAP.get(threshold_raw)
         if category is None:
-            raise ValueError(f"unsupported Gemini harm category: {category_raw or entry.get('category')!r}")
+            raise ValueError(
+                f"unsupported Gemini harm category: {category_raw or entry.get('category')!r}"
+            )
         if threshold is None:
-            raise ValueError(f"unsupported Gemini harm threshold: {threshold_raw or entry.get('threshold')!r}")
+            raise ValueError(
+                f"unsupported Gemini harm threshold: {threshold_raw or entry.get('threshold')!r}"
+            )
         normalized[category] = threshold
     return normalized or None
 
 
-def normalize_inference_for_provider(provider_key: str | None, inference: dict[str, Any] | None) -> dict[str, Any]:
+def normalize_inference_for_provider(
+    provider_key: str | None, inference: dict[str, Any] | None
+) -> dict[str, Any]:
     """把通用 inference 参数裁剪成当前 provider 真正支持的子集。
 
     例如 Gemini 的 `safety_settings` 只应在 Gemini adapter 下生效；
@@ -197,14 +218,50 @@ def normalize_inference_for_provider(provider_key: str | None, inference: dict[s
             return normalized
         if not isinstance(gemini_cfg, dict):
             raise ValueError("gemini inference settings must be an object")
-        safety_settings = _normalize_gemini_safety_settings(gemini_cfg.get("safety_settings"))
+        safety_settings = _normalize_gemini_safety_settings(
+            gemini_cfg.get("safety_settings")
+        )
         if safety_settings:
             normalized["safety_settings"] = safety_settings
     return normalized
 
 
+def _is_openai_reasoning_model(model_name: str | None) -> bool:
+    normalized = str(model_name or "").strip().lower()
+    if "/" in normalized:
+        normalized = normalized.rsplit("/", 1)[-1]
+    return normalized.startswith(_OPENAI_REASONING_MODEL_PREFIXES)
+
+
+def thinking_disabled_kwargs_for_adapter(
+    adapter_type: str, model_name: str | None, provider_key: str | None = None
+) -> dict[str, Any]:
+    """Return provider-native kwargs that disable or minimize model-side thinking."""
+    configured_provider = str(provider_key or "").strip().lower()
+    if adapter_type == "anthropic":
+        return {"thinking": {"type": "disabled"}}
+    if adapter_type == "gemini":
+        return {"thinking_budget": 0, "include_thoughts": False}
+    if adapter_type == "openai_compatible":
+        if configured_provider == "anthropic":
+            return {"extra_body": {"thinking": {"type": "disabled"}}}
+        if configured_provider == "gemini":
+            return {
+                "extra_body": {
+                    "thinking_config": {
+                        "thinking_budget": 0,
+                        "include_thoughts": False,
+                    }
+                }
+            }
+        if _is_openai_reasoning_model(model_name):
+            return {"reasoning_effort": "minimal"}
+    return {}
+
+
 def extract_provider_block(resp: Any) -> dict[str, str] | None:
     """从 provider 响应里提取“被安全策略拦截”的结构化信息。"""
+
     def _extract_meta_dict(payload: Any) -> dict[str, Any] | None:
         """从 dict 或 SDK 响应对象中提取最可能携带 provider 元数据的字典。"""
         if isinstance(payload, dict):
@@ -233,7 +290,11 @@ def extract_provider_block(resp: Any) -> dict[str, str] | None:
         or prompt_feedback.get("message")
         or ""
     ).strip()
-    if not message and str(reason).lower() not in {"safety", "content_filter"} and not str(reason).upper().startswith("PROHIBITED_"):
+    if (
+        not message
+        and str(reason).lower() not in {"safety", "content_filter"}
+        and not str(reason).upper().startswith("PROHIBITED_")
+    ):
         return None
     return {
         "reason": reason,
@@ -241,7 +302,9 @@ def extract_provider_block(resp: Any) -> dict[str, str] | None:
     }
 
 
-def _build_chat_model(provider_key: str, model_name: str, *, inference: dict[str, Any] | None = None) -> BaseChatModel:
+def _build_chat_model(
+    provider_key: str, model_name: str, *, inference: dict[str, Any] | None = None
+) -> BaseChatModel:
     """按最终 adapter 构造底层 LangChain chat model。
 
     这里是 provider 差异的唯一汇聚点。上层生成节点不需要知道
@@ -252,6 +315,9 @@ def _build_chat_model(provider_key: str, model_name: str, *, inference: dict[str
     resolved_base_url = _resolve_base_url(provider_key)
     resolved_api_key = _resolve_api_key(provider_key)
     normalized_inference = normalize_inference_for_provider(provider_key, inference)
+    thinking_disabled_kwargs = thinking_disabled_kwargs_for_adapter(
+        adapter_type, model_name, provider_key
+    )
 
     log_event(
         logger,
@@ -274,6 +340,7 @@ def _build_chat_model(provider_key: str, model_name: str, *, inference: dict[str
             timeout=_LLM_REQUEST_TIMEOUT,
             max_retries=0,
             **normalized_inference,
+            **thinking_disabled_kwargs,
         )
     if adapter_type == "gemini":
         kwargs: dict[str, Any] = {
@@ -284,6 +351,7 @@ def _build_chat_model(provider_key: str, model_name: str, *, inference: dict[str
         if resolved_base_url:
             kwargs["base_url"] = resolved_base_url
         kwargs.update(normalized_inference)
+        kwargs.update(thinking_disabled_kwargs)
         return ChatGoogleGenerativeAI(**kwargs)
     return ChatOpenAI(
         base_url=resolved_base_url or "https://api.openai.com/v1",
@@ -292,6 +360,7 @@ def _build_chat_model(provider_key: str, model_name: str, *, inference: dict[str
         request_timeout=_LLM_REQUEST_TIMEOUT,
         max_retries=0,
         **normalized_inference,
+        **thinking_disabled_kwargs,
     )
 
 
@@ -314,7 +383,16 @@ def _is_retryable(exc: Exception) -> bool:
     if isinstance(exc, _RETRYABLE_EXCEPTIONS):
         return True
     name = type(exc).__name__
-    if any(kw in name for kw in ("Timeout", "Connection", "RateLimit", "ServiceUnavailable", "APIConnectionError")):
+    if any(
+        kw in name
+        for kw in (
+            "Timeout",
+            "Connection",
+            "RateLimit",
+            "ServiceUnavailable",
+            "APIConnectionError",
+        )
+    ):
         return True
     status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
     if isinstance(status, int) and status in {429, 500, 502, 503, 504}:
@@ -344,7 +422,9 @@ class _TrackedLLMProxy:
                 last_exc = exc
                 if not _is_retryable(exc) or attempt >= _MAX_RETRIES - 1:
                     raise
-                delay = _RETRY_BACKOFF[attempt] if attempt < len(_RETRY_BACKOFF) else 4.0
+                delay = (
+                    _RETRY_BACKOFF[attempt] if attempt < len(_RETRY_BACKOFF) else 4.0
+                )
                 log_event(
                     logger,
                     "llm.invoke.retry",
@@ -372,7 +452,9 @@ class _TrackedLLMProxy:
                 last_exc = exc
                 if not _is_retryable(exc) or attempt >= _MAX_RETRIES - 1:
                     raise
-                delay = _RETRY_BACKOFF[attempt] if attempt < len(_RETRY_BACKOFF) else 4.0
+                delay = (
+                    _RETRY_BACKOFF[attempt] if attempt < len(_RETRY_BACKOFF) else 4.0
+                )
                 log_event(
                     logger,
                     "llm.ainvoke.retry",
@@ -416,7 +498,9 @@ class _TrackedLLMProxy:
         stripped from the returned result so the caller sees what it expected.
         """
         caller_wants_raw = bool(kwargs.get("include_raw", False))
-        inner_chain = self._inner.with_structured_output(schema, **{**kwargs, "include_raw": True})
+        inner_chain = self._inner.with_structured_output(
+            schema, **{**kwargs, "include_raw": True}
+        )
         stage = self._stage_prefix
 
         class _StructuredOutputProxy:
@@ -515,19 +599,28 @@ def get_embedding_model() -> OpenAIEmbeddings:
     if embedding.get("reuse_primary_connection"):
         primary = get_primary_chat_runtime()
         if str(primary.get("resolved_protocol") or "") != "openai_compatible":
-            raise RuntimeError("Embedding cannot reuse a non-OpenAI-compatible primary connection")
+            raise RuntimeError(
+                "Embedding cannot reuse a non-OpenAI-compatible primary connection"
+            )
         return OpenAIEmbeddings(
             model=model_name,
             api_key=str(primary.get("api_key") or ""),
-            base_url=str(primary.get("base_url") or "").strip() or "https://api.openai.com/v1",
+            base_url=str(primary.get("base_url") or "").strip()
+            or "https://api.openai.com/v1",
         )
 
-    if str(embedding.get("resolved_protocol") or "openai_compatible") != "openai_compatible":
-        raise RuntimeError("Dedicated embedding connection currently only supports OpenAI-compatible protocol")
+    if (
+        str(embedding.get("resolved_protocol") or "openai_compatible")
+        != "openai_compatible"
+    ):
+        raise RuntimeError(
+            "Dedicated embedding connection currently only supports OpenAI-compatible protocol"
+        )
     return OpenAIEmbeddings(
         model=model_name,
         api_key=str(embedding.get("api_key") or ""),
-        base_url=str(embedding.get("base_url") or "").strip() or "https://api.openai.com/v1",
+        base_url=str(embedding.get("base_url") or "").strip()
+        or "https://api.openai.com/v1",
     )
 
 
@@ -547,7 +640,9 @@ def embed_query(text: str) -> list[float] | None:
         log_event(
             logger,
             "embed.query.success",
-            provider="primary" if runtime.get("reuse_primary_connection") else "openai_compatible",
+            provider="primary"
+            if runtime.get("reuse_primary_connection")
+            else "openai_compatible",
             model=str(runtime.get("model") or ""),
             latency_ms=round((time.perf_counter() - started) * 1000, 2),
         )
@@ -559,7 +654,9 @@ def embed_query(text: str) -> list[float] | None:
             logger,
             "embed.query.fallback",
             level=logging.WARNING,
-            provider="primary" if runtime.get("reuse_primary_connection") else "openai_compatible",
+            provider="primary"
+            if runtime.get("reuse_primary_connection")
+            else "openai_compatible",
             model=str(runtime.get("model") or ""),
             error_class=type(exc).__name__,
             error_category="permanent",

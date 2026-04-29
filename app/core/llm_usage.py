@@ -1,8 +1,10 @@
 """Centralized token usage tracking for all LLM calls."""
+
 from __future__ import annotations
 
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from threading import RLock
 from typing import Any
 
 
@@ -17,6 +19,7 @@ def _to_int(value: Any) -> int:
 @dataclass
 class UsageSession:
     """保存一次 LLM 用量会话的累计统计结果。"""
+
     session_id: str
     input_tokens: int = 0
     output_tokens: int = 0
@@ -24,9 +27,12 @@ class UsageSession:
     calls: int = 0
     embedding_calls: int = 0
     stages: dict[str, dict[str, int]] = field(default_factory=dict)
+    lock: Any = field(default_factory=RLock, repr=False, compare=False)
 
 
-_usage_session_var: ContextVar[UsageSession | None] = ContextVar("llm_usage_session", default=None)
+_usage_session_var: ContextVar[UsageSession | None] = ContextVar(
+    "llm_usage_session", default=None
+)
 
 
 def begin_usage_session(
@@ -59,16 +65,23 @@ def end_usage_session() -> dict[str, Any]:
             "estimated_cost": 0.0,
             "stages": {},
         }
+    with session.lock:
+        input_tokens = int(session.input_tokens)
+        output_tokens = int(session.output_tokens)
+        total_tokens = int(session.total_tokens)
+        calls = int(session.calls)
+        embedding_calls = int(session.embedding_calls)
+        stages = {key: dict(value) for key, value in session.stages.items()}
     return {
         "session_id": session.session_id,
-        "input_tokens": int(session.input_tokens),
-        "output_tokens": int(session.output_tokens),
-        "total_tokens": int(session.total_tokens),
-        "calls": int(session.calls),
-        "embedding_calls": int(session.embedding_calls),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "calls": calls,
+        "embedding_calls": embedding_calls,
         # Note: includes base tokens from prior runs — this is cumulative lifetime cost.
-        "estimated_cost": estimate_cost(session.input_tokens, session.output_tokens),
-        "stages": session.stages,
+        "estimated_cost": estimate_cost(input_tokens, output_tokens),
+        "stages": stages,
     }
 
 
@@ -86,21 +99,32 @@ def snapshot_usage() -> dict[str, Any]:
             "estimated_cost": 0.0,
             "stages": {},
         }
+    with session.lock:
+        input_tokens = int(session.input_tokens)
+        output_tokens = int(session.output_tokens)
+        total_tokens = int(session.total_tokens)
+        calls = int(session.calls)
+        embedding_calls = int(session.embedding_calls)
+        stages = {key: dict(value) for key, value in session.stages.items()}
     return {
         "session_id": session.session_id,
-        "input_tokens": int(session.input_tokens),
-        "output_tokens": int(session.output_tokens),
-        "total_tokens": int(session.total_tokens),
-        "calls": int(session.calls),
-        "embedding_calls": int(session.embedding_calls),
-        "estimated_cost": estimate_cost(session.input_tokens, session.output_tokens),
-        "stages": dict(session.stages),
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "calls": calls,
+        "embedding_calls": embedding_calls,
+        "estimated_cost": estimate_cost(input_tokens, output_tokens),
+        "stages": stages,
     }
 
 
 def estimate_cost(input_tokens: int, output_tokens: int) -> float:
     """执行 estimate cost 相关辅助逻辑。"""
-    return round((max(0, int(input_tokens)) / 1000) * 0.0015 + (max(0, int(output_tokens)) / 1000) * 0.002, 6)
+    return round(
+        (max(0, int(input_tokens)) / 1000) * 0.0015
+        + (max(0, int(output_tokens)) / 1000) * 0.002,
+        6,
+    )
 
 
 def _extract_usage(response: Any) -> tuple[int, int, int]:
@@ -117,10 +141,18 @@ def _extract_usage(response: Any) -> tuple[int, int, int]:
 
     meta = getattr(response, "response_metadata", None) or {}
     if isinstance(meta, dict):
-        token_usage = meta.get("token_usage") if isinstance(meta.get("token_usage"), dict) else None
+        token_usage = (
+            meta.get("token_usage")
+            if isinstance(meta.get("token_usage"), dict)
+            else None
+        )
         if token_usage:
-            in_t = _to_int(token_usage.get("prompt_tokens") or token_usage.get("input_tokens"))
-            out_t = _to_int(token_usage.get("completion_tokens") or token_usage.get("output_tokens"))
+            in_t = _to_int(
+                token_usage.get("prompt_tokens") or token_usage.get("input_tokens")
+            )
+            out_t = _to_int(
+                token_usage.get("completion_tokens") or token_usage.get("output_tokens")
+            )
             total_t = _to_int(token_usage.get("total_tokens"))
             if total_t <= 0:
                 total_t = in_t + out_t
@@ -128,7 +160,9 @@ def _extract_usage(response: Any) -> tuple[int, int, int]:
         usage2 = meta.get("usage") if isinstance(meta.get("usage"), dict) else None
         if usage2:
             in_t = _to_int(usage2.get("input_tokens") or usage2.get("prompt_tokens"))
-            out_t = _to_int(usage2.get("output_tokens") or usage2.get("completion_tokens"))
+            out_t = _to_int(
+                usage2.get("output_tokens") or usage2.get("completion_tokens")
+            )
             total_t = _to_int(usage2.get("total_tokens"))
             if total_t <= 0:
                 total_t = in_t + out_t
@@ -137,25 +171,29 @@ def _extract_usage(response: Any) -> tuple[int, int, int]:
     return 0, 0, 0
 
 
-def record_usage_from_response(response: Any, *, stage: str | None = None) -> dict[str, int]:
+def record_usage_from_response(
+    response: Any, *, stage: str | None = None
+) -> dict[str, int]:
     """记录用量来源响应。"""
     session = _usage_session_var.get()
     in_t, out_t, total_t = _extract_usage(response)
     if not session:
         return {"input_tokens": in_t, "output_tokens": out_t, "total_tokens": total_t}
-    session.input_tokens += in_t
-    session.output_tokens += out_t
-    session.total_tokens += total_t if total_t > 0 else (in_t + out_t)
-    session.calls += 1
-    if stage:
-        bucket = session.stages.setdefault(
-            str(stage),
-            {"calls": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
-        )
-        bucket["calls"] += 1
-        bucket["input_tokens"] += in_t
-        bucket["output_tokens"] += out_t
-        bucket["total_tokens"] += total_t if total_t > 0 else (in_t + out_t)
+    total_delta = total_t if total_t > 0 else (in_t + out_t)
+    with session.lock:
+        session.input_tokens += in_t
+        session.output_tokens += out_t
+        session.total_tokens += total_delta
+        session.calls += 1
+        if stage:
+            bucket = session.stages.setdefault(
+                str(stage),
+                {"calls": 0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+            )
+            bucket["calls"] += 1
+            bucket["input_tokens"] += in_t
+            bucket["output_tokens"] += out_t
+            bucket["total_tokens"] += total_delta
     return {"input_tokens": in_t, "output_tokens": out_t, "total_tokens": total_t}
 
 
@@ -165,4 +203,5 @@ def record_embedding_call() -> None:
     is tracked here."""
     session = _usage_session_var.get()
     if session:
-        session.embedding_calls += 1
+        with session.lock:
+            session.embedding_calls += 1

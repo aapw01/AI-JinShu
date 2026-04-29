@@ -1,10 +1,13 @@
 """Reviewer, revise, and rollback-rerun nodes."""
+
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from app.core.strategy import get_review_weights, resolve_ai_profile
 from app.prompts import render_prompt
+from app.services.generation.concurrency import submit_with_context
 from app.services.generation.common import logger
 from app.services.generation.heuristics import (
     build_review_gate,
@@ -21,22 +24,48 @@ from app.services.memory.progression_control import rollback_progression_range
 def node_review(state: GenerationState) -> GenerationState:
     """执行 node review 相关辅助逻辑。"""
     from app.core.strategy import get_pipeline_options
+
     _opts = get_pipeline_options(state.get("strategy"))
     _combined_mode = _opts.get("combined_reviewer", False)
     chapter_num = state["current_chapter"]
-    progress(state, "reviewer", chapter_num, chapter_progress(state, 0.55), "章节审校...", {"current_phase": "chapter_review", "total_chapters": state["num_chapters"]})
+    progress(
+        state,
+        "reviewer",
+        chapter_num,
+        chapter_progress(state, 0.55),
+        "章节审校...",
+        {"current_phase": "chapter_review", "total_chapters": state["num_chapters"]},
+    )
     novel_config = (state.get("novel_info") or {}).get("config")
-    struct_profile = resolve_ai_profile(state["strategy"], "reviewer.structured", novel_config=novel_config)
-    factual_profile = resolve_ai_profile(state["strategy"], "reviewer.factual", novel_config=novel_config)
-    progression_profile = resolve_ai_profile(state["strategy"], "reviewer.progression", novel_config=novel_config)
-    aesthetic_profile = resolve_ai_profile(state["strategy"], "reviewer.aesthetic", novel_config=novel_config)
-    combined_profile = resolve_ai_profile(state["strategy"], "reviewer.structured", novel_config=novel_config)
+    struct_profile = resolve_ai_profile(
+        state["strategy"], "reviewer.structured", novel_config=novel_config
+    )
+    factual_profile = resolve_ai_profile(
+        state["strategy"], "reviewer.factual", novel_config=novel_config
+    )
+    progression_profile = resolve_ai_profile(
+        state["strategy"], "reviewer.progression", novel_config=novel_config
+    )
+    aesthetic_profile = resolve_ai_profile(
+        state["strategy"], "reviewer.aesthetic", novel_config=novel_config
+    )
+    combined_profile = resolve_ai_profile(
+        state["strategy"], "reviewer.combined", novel_config=novel_config
+    )
     review_weights = get_review_weights(state["strategy"])
-    candidates = state.get("candidate_drafts") or [{"variant": "A", "draft": state.get("draft", "")}]
+    candidates = state.get("candidate_drafts") or [
+        {"variant": "A", "draft": state.get("draft", "")}
+    ]
     _REVIEWER_FALLBACK: dict[str, Any] = {
-        "score": 0.75, "confidence": 0.3, "feedback": "审校跳过（模型输出异常）",
-        "must_fix": [], "should_fix": [], "positives": [], "risks": ["reviewer_skipped"],
-        "contradictions": [], "raw": {},
+        "score": 0.75,
+        "confidence": 0.3,
+        "feedback": "审校跳过（模型输出异常）",
+        "must_fix": [],
+        "should_fix": [],
+        "positives": [],
+        "risks": ["reviewer_skipped"],
+        "contradictions": [],
+        "raw": {},
     }
 
     best = None
@@ -47,7 +76,14 @@ def node_review(state: GenerationState) -> GenerationState:
         ai_flavor_raw: dict[str, Any] = {}
         webnovel_raw: dict[str, Any] = {}
         if _combined_mode:
-            struct_raw, factual_raw, progression_raw, aesthetic_raw, ai_flavor_raw, webnovel_raw = state["reviewer"].run_combined(
+            (
+                struct_raw,
+                factual_raw,
+                progression_raw,
+                aesthetic_raw,
+                ai_flavor_raw,
+                webnovel_raw,
+            ) = state["reviewer"].run_combined(
                 text,
                 chapter_num,
                 state.get("context") or {},
@@ -59,74 +95,135 @@ def node_review(state: GenerationState) -> GenerationState:
             )
             # run_combined never raises; empty defaults are still usable
         if not _combined_mode or struct_raw is None:
-            # Legacy 4-call path (always used when combined_mode=False, or as last-resort fallback)
-            try:
-                if hasattr(state["reviewer"], "run_structured"):
-                    struct_raw = state["reviewer"].run_structured(
-                        text, chapter_num, state["target_language"],
-                        state["native_style_profile"], struct_profile["provider"], struct_profile["model"],
+            # Legacy 4-call path (or last-resort fallback), fanned out because checks are independent.
+            def _run_structured_review() -> dict[str, Any]:
+                try:
+                    if hasattr(state["reviewer"], "run_structured"):
+                        return state["reviewer"].run_structured(
+                            text,
+                            chapter_num,
+                            state["target_language"],
+                            state["native_style_profile"],
+                            struct_profile["provider"],
+                            struct_profile["model"],
+                            inference=struct_profile["inference"],
+                        )
+                    return state["reviewer"].run(
+                        text,
+                        chapter_num,
+                        state["target_language"],
+                        state["native_style_profile"],
+                        struct_profile["provider"],
+                        struct_profile["model"],
                         inference=struct_profile["inference"],
                     )
-                else:
-                    struct_raw = state["reviewer"].run(
-                        text, chapter_num, state["target_language"],
-                        state["native_style_profile"], struct_profile["provider"], struct_profile["model"],
-                        inference=struct_profile["inference"],
+                except Exception as exc:
+                    logger.warning(
+                        "reviewer.structured failed chapter=%s error=%s",
+                        chapter_num,
+                        exc,
                     )
-            except Exception as exc:
-                logger.warning("reviewer.structured failed chapter=%s error=%s", chapter_num, exc)
-                struct_raw = dict(_REVIEWER_FALLBACK)
+                    return dict(_REVIEWER_FALLBACK)
 
-            try:
-                if hasattr(state["reviewer"], "run_factual_structured"):
-                    factual_raw = state["reviewer"].run_factual_structured(
-                        text, chapter_num, state.get("context") or {},
-                        state["target_language"], factual_profile["provider"], factual_profile["model"],
+            def _run_factual_review() -> dict[str, Any]:
+                try:
+                    if hasattr(state["reviewer"], "run_factual_structured"):
+                        return state["reviewer"].run_factual_structured(
+                            text,
+                            chapter_num,
+                            state.get("context") or {},
+                            state["target_language"],
+                            factual_profile["provider"],
+                            factual_profile["model"],
+                            inference=factual_profile["inference"],
+                        )
+                    return state["reviewer"].run_factual(
+                        text,
+                        chapter_num,
+                        state.get("context") or {},
+                        state["target_language"],
+                        factual_profile["provider"],
+                        factual_profile["model"],
                         inference=factual_profile["inference"],
                     )
-                else:
-                    factual_raw = state["reviewer"].run_factual(
-                        text, chapter_num, state.get("context") or {},
-                        state["target_language"], factual_profile["provider"], factual_profile["model"],
-                        inference=factual_profile["inference"],
+                except Exception as exc:
+                    logger.warning(
+                        "reviewer.factual failed chapter=%s error=%s", chapter_num, exc
                     )
-            except Exception as exc:
-                logger.warning("reviewer.factual failed chapter=%s error=%s", chapter_num, exc)
-                factual_raw = dict(_REVIEWER_FALLBACK)
+                    return dict(_REVIEWER_FALLBACK)
 
-            try:
-                progression_raw = state["reviewer"].run_progression_structured(
-                    text, chapter_num, state.get("context") or {},
-                    state["target_language"], progression_profile["provider"], progression_profile["model"],
-                    inference=progression_profile["inference"],
-                )
-            except Exception as exc:
-                logger.warning("reviewer.progression failed chapter=%s error=%s", chapter_num, exc)
-                progression_raw = dict(_REVIEWER_FALLBACK)
+            def _run_progression_review() -> dict[str, Any]:
+                try:
+                    return state["reviewer"].run_progression_structured(
+                        text,
+                        chapter_num,
+                        state.get("context") or {},
+                        state["target_language"],
+                        progression_profile["provider"],
+                        progression_profile["model"],
+                        inference=progression_profile["inference"],
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "reviewer.progression failed chapter=%s error=%s",
+                        chapter_num,
+                        exc,
+                    )
+                    return dict(_REVIEWER_FALLBACK)
 
-            try:
-                if hasattr(state["reviewer"], "run_aesthetic_structured"):
-                    aesthetic_raw = state["reviewer"].run_aesthetic_structured(
-                        text, chapter_num, state["target_language"],
-                        aesthetic_profile["provider"], aesthetic_profile["model"],
+            def _run_aesthetic_review() -> dict[str, Any]:
+                try:
+                    if hasattr(state["reviewer"], "run_aesthetic_structured"):
+                        return state["reviewer"].run_aesthetic_structured(
+                            text,
+                            chapter_num,
+                            state["target_language"],
+                            aesthetic_profile["provider"],
+                            aesthetic_profile["model"],
+                            inference=aesthetic_profile["inference"],
+                        )
+                    return state["reviewer"].run_aesthetic(
+                        text,
+                        chapter_num,
+                        state["target_language"],
+                        aesthetic_profile["provider"],
+                        aesthetic_profile["model"],
                         inference=aesthetic_profile["inference"],
                     )
-                else:
-                    aesthetic_raw = state["reviewer"].run_aesthetic(
-                        text, chapter_num, state["target_language"],
-                        aesthetic_profile["provider"], aesthetic_profile["model"],
-                        inference=aesthetic_profile["inference"],
+                except Exception as exc:
+                    logger.warning(
+                        "reviewer.aesthetic failed chapter=%s error=%s",
+                        chapter_num,
+                        exc,
                     )
-            except Exception as exc:
-                logger.warning("reviewer.aesthetic failed chapter=%s error=%s", chapter_num, exc)
-                aesthetic_raw = dict(_REVIEWER_FALLBACK)
+                    return dict(_REVIEWER_FALLBACK)
+
+            with ThreadPoolExecutor(
+                max_workers=4, thread_name_prefix="reviewer"
+            ) as executor:
+                futures = {
+                    "structured": submit_with_context(executor, _run_structured_review),
+                    "factual": submit_with_context(executor, _run_factual_review),
+                    "progression": submit_with_context(
+                        executor, _run_progression_review
+                    ),
+                    "aesthetic": submit_with_context(executor, _run_aesthetic_review),
+                }
+                struct_raw = futures["structured"].result()
+                factual_raw = futures["factual"].result()
+                progression_raw = futures["progression"].result()
+                aesthetic_raw = futures["aesthetic"].result()
 
         struct_pack = normalize_reviewer_payload(struct_raw, "结构审校结果")
         factual_pack = normalize_reviewer_payload(factual_raw, "事实审校结果")
-        progression_pack = normalize_progression_payload(progression_raw, "推进审校结果")
+        progression_pack = normalize_progression_payload(
+            progression_raw, "推进审校结果"
+        )
         aesthetic_pack = normalize_reviewer_payload(aesthetic_raw, "审美审校结果")
         ai_flavor_pack = extract_ai_flavor({"ai_flavor": ai_flavor_raw})
-        webnovel_pack = extract_webnovel_principles({"webnovel_principles": webnovel_raw})
+        webnovel_pack = extract_webnovel_principles(
+            {"webnovel_principles": webnovel_raw}
+        )
         struct_score = float(struct_pack.get("score", 0.75))
         factual_score = float(factual_pack.get("score", 0.75))
         progression_score = float(progression_pack.get("score", 0.75))
@@ -137,12 +234,16 @@ def node_review(state: GenerationState) -> GenerationState:
             + (progression_score * review_weights["progression"])
             + (aesthetic_score_val * review_weights["aesthetic"])
         )
-        review_gate = build_review_gate(text, struct_pack, factual_pack, progression_pack, aesthetic_pack)
+        review_gate = build_review_gate(
+            text, struct_pack, factual_pack, progression_pack, aesthetic_pack
+        )
         if review_gate.get("over_correction_risk"):
             combined = max(0.0, combined - 0.02)
             logger.info(
                 "over_correction_risk chapter=%s evidence_coverage=%.2f combined_adjusted=%.3f",
-                chapter_num, review_gate.get("evidence_coverage", 0), combined,
+                chapter_num,
+                review_gate.get("evidence_coverage", 0),
+                combined,
             )
         item = {
             "variant": c.get("variant"),
@@ -172,7 +273,13 @@ def node_review(state: GenerationState) -> GenerationState:
         if best is None or item["combined"] > best["combined"]:
             best = item
     if best is None:
-        return {"score": 0.0, "feedback": "review failed", "factual_score": 0.75, "progression_score": 0.75, "aesthetic_review_score": 0.75}
+        return {
+            "score": 0.0,
+            "feedback": "review failed",
+            "factual_score": 0.75,
+            "progression_score": 0.75,
+            "aesthetic_review_score": 0.75,
+        }
     suggestions = {
         "missing_payoff": [],
         "weak_conflict": [],
@@ -199,9 +306,13 @@ def node_review(state: GenerationState) -> GenerationState:
     progression_fb = str(best.get("progression_feedback") or "")
     if progression_fb:
         suggestions["weak_conflict"].append(progression_fb[:180])
-    duplicate_beats = [str(x) for x in (best.get("duplicate_beats") or []) if str(x).strip()]
+    duplicate_beats = [
+        str(x) for x in (best.get("duplicate_beats") or []) if str(x).strip()
+    ]
     no_new_delta = [str(x) for x in (best.get("no_new_delta") or []) if str(x).strip()]
-    transition_conflict = [str(x) for x in (best.get("transition_conflict") or []) if str(x).strip()]
+    transition_conflict = [
+        str(x) for x in (best.get("transition_conflict") or []) if str(x).strip()
+    ]
     if duplicate_beats:
         suggestions["weak_conflict"].extend(duplicate_beats[:2])
     if no_new_delta:
@@ -267,9 +378,13 @@ def node_revise(state: GenerationState) -> GenerationState:
         if validated:
             structured.append("validated_issues: " + "；".join(validated[:2]))
         if gate.get("over_correction_risk"):
-            structured.append("guardrail: 低证据批评较多，保持主线与结构，不要大改无关段落。")
+            structured.append(
+                "guardrail: 低证据批评较多，保持主线与结构，不要大改无关段落。"
+            )
         if structured:
-            ctx["review_feedback"] = f"{ctx['review_feedback']}\n[结构化修正]\n" + "\n".join(structured)
+            ctx["review_feedback"] = (
+                f"{ctx['review_feedback']}\n[结构化修正]\n" + "\n".join(structured)
+            )
     return {"review_attempt": review_attempt, "context": ctx}
 
 
@@ -285,7 +400,14 @@ def node_rollback_rerun(state: GenerationState) -> GenerationState:
     ).strip()
     if suggestions:
         ctx["review_suggestions"] = suggestions
-    progress(state, "rollback_rerun", chapter_num, chapter_progress(state, 0.60), f"第{chapter_num}章审校未通过，回滚并重跑一次...", {"current_phase": "rollback_rerun", "total_chapters": state["num_chapters"]})
+    progress(
+        state,
+        "rollback_rerun",
+        chapter_num,
+        chapter_progress(state, 0.60),
+        f"第{chapter_num}章审校未通过，回滚并重跑一次...",
+        {"current_phase": "rollback_rerun", "total_chapters": state["num_chapters"]},
+    )
     rollback_progression_range(
         novel_id=state["novel_id"],
         novel_version_id=state.get("novel_version_id"),

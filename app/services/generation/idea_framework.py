@@ -1,4 +1,5 @@
 """Idea framework generation service."""
+
 from __future__ import annotations
 
 import json
@@ -12,7 +13,12 @@ import litellm
 import yaml
 from pydantic import BaseModel
 
-from app.core.llm import get_llm_with_fallback, resolve_effective_adapter, response_to_text
+from app.core.llm import (
+    get_llm_with_fallback,
+    resolve_effective_adapter,
+    response_to_text,
+    thinking_disabled_kwargs_for_adapter,
+)
 from app.core.strategy import get_model_for_stage
 from app.prompts import render_prompt
 from app.services.system_settings.runtime import get_primary_chat_runtime
@@ -44,6 +50,7 @@ def _load_style_options() -> list[dict[str, str]]:
 
 class IdeaFrameworkSchema(BaseModel):
     """创意框架结构化模型。"""
+
     one_liner: str
     premise: str
     conflict: str
@@ -96,6 +103,7 @@ def _coerce_framework_payload(raw: Any) -> dict[str, Any]:
         return raw.model_dump()
 
     from langchain_core.messages import BaseMessage
+
     if isinstance(raw, BaseMessage):
         text = response_to_text(raw)
         payload = _extract_json(text)
@@ -145,6 +153,11 @@ def _litellm_completion(model: str, prompt: str) -> str:
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.7,
     }
+    kwargs.update(
+        thinking_disabled_kwargs_for_adapter(
+            adapter_type, model, primary.get("provider")
+        )
+    )
 
     api_key = str(primary.get("api_key") or "").strip()
     base_url = str(primary.get("base_url") or "").strip().rstrip("/") or None

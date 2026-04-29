@@ -1,0 +1,61 @@
+id: fast-pro
+name: Fast Pro Strategy
+description: |
+  Backend-only speed profile for production-like generation.
+  It keeps cross-chapter consistency checks enabled, combines reviewer calls,
+  reduces review retry depth, and skips per-chapter outline refinement.
+
+stages:
+  architect:
+    provider: __default__
+    model: __default__
+  outliner:
+    provider: __default__
+    model: __default__
+  writer:
+    provider: __default__
+    model: __default__
+  finalizer:
+    provider: __default__
+    model: __default__
+  reviewer:
+    provider: __default__
+    model: __default__
+  reviewer.combined:
+    provider: __default__
+    model: __default__
+  reviewer.factual:
+    provider: __default__
+    model: __default__
+  reviewer.progression:
+    provider: __default__
+    model: __default__
+  reviewer.aesthetic:
+    provider: __default__
+    model: __default__
+  fact_extractor:
+    provider: __default__
+    model: __default__
+  progression_memory:
+    provider: __default__
+    model: __default__
+
+inference:
+  reviewer.combined:
+    temperature: 0.18
+  fact_extractor:
+    temperature: 0.1
+  progression_memory:
+    temperature: 0.1
+
+review_weights:
+  structure: 0.28
+  factual: 0.24
+  progression: 0.28
+  aesthetic: 0.20
+
+pipeline_options:
+  combined_reviewer: true
+  max_retries: 1
+  enable_cross_chapter_check: true
+  enable_refine_outline: false

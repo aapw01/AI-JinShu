@@ -1,4 +1,5 @@
 """Strategy factory - load stage-to-model mapping from presets/strategies/*.yaml."""
+
 from __future__ import annotations
 
 from copy import deepcopy
@@ -35,6 +36,7 @@ DEFAULT_INFERENCE = {
     "reviewer.factual": {"temperature": 0.1},
     "reviewer.progression": {"temperature": 0.15},
     "reviewer.aesthetic": {"temperature": 0.2},
+    "reviewer.combined": {"temperature": 0.18},
     "reviewer.book": {"temperature": 0.2},
 }
 DEFAULT_REVIEW_WEIGHTS = {
@@ -55,6 +57,7 @@ DEFAULT_ASSET_PROFILES: dict[str, dict[str, Any]] = {
     "reviewer.factual": {"stage": "reviewer.factual"},
     "reviewer.progression": {"stage": "reviewer.progression"},
     "reviewer.aesthetic": {"stage": "reviewer.aesthetic"},
+    "reviewer.combined": {"stage": "reviewer.combined"},
     "reviewer.book": {"stage": "reviewer.book"},
     "finalizer": {"stage": "finalizer"},
     "fact_extractor": {"stage": "fact_extractor"},
@@ -91,9 +94,19 @@ def get_strategy_config(strategy_key: str | None) -> dict:
         data = yaml.safe_load(f) or {}
     stages = _deep_merge_dicts(DEFAULT_STAGES, data.get("stages") or {})
     inference = _deep_merge_dicts(DEFAULT_INFERENCE, data.get("inference") or {})
-    review_weights = _deep_merge_dicts(DEFAULT_REVIEW_WEIGHTS, data.get("review_weights") or {})
-    asset_profiles = _deep_merge_dicts(DEFAULT_ASSET_PROFILES, data.get("asset_profiles") or {})
-    return {**data, "stages": stages, "inference": inference, "review_weights": review_weights, "asset_profiles": asset_profiles}
+    review_weights = _deep_merge_dicts(
+        DEFAULT_REVIEW_WEIGHTS, data.get("review_weights") or {}
+    )
+    asset_profiles = _deep_merge_dicts(
+        DEFAULT_ASSET_PROFILES, data.get("asset_profiles") or {}
+    )
+    return {
+        **data,
+        "stages": stages,
+        "inference": inference,
+        "review_weights": review_weights,
+        "asset_profiles": asset_profiles,
+    }
 
 
 def get_model_for_stage(strategy_key: str | None, stage: str) -> tuple[str, str]:
@@ -105,11 +118,13 @@ def get_model_for_stage(strategy_key: str | None, stage: str) -> tuple[str, str]
     stages = config.get("stages") or DEFAULT_STAGES
     s = stages.get(stage) or DEFAULT_STAGES.get(stage)
     if isinstance(s, dict):
-        provider = default_provider
+        provider = s.get("provider", default_provider)
+        if provider in ("__default__", "default", "", None):
+            provider = default_provider
         model = s.get("model", default_model)
         if model in ("__default__", "default", "", None):
             model = default_model
-        return provider, model
+        return str(provider), str(model)
     return default_provider, default_model
 
 
@@ -129,15 +144,23 @@ def get_inference_for_stage(strategy_key: str | None, stage: str) -> dict[str, A
     return resolved
 
 
-def get_asset_profile_config(strategy_key: str | None, asset_key: str) -> dict[str, Any]:
+def get_asset_profile_config(
+    strategy_key: str | None, asset_key: str
+) -> dict[str, Any]:
     """返回asset画像config。"""
     config = get_strategy_config(strategy_key)
     asset_profiles = config.get("asset_profiles") or {}
     raw = asset_profiles.get(asset_key)
-    return deepcopy(raw) if isinstance(raw, dict) else deepcopy(DEFAULT_ASSET_PROFILES.get(asset_key) or {})
+    return (
+        deepcopy(raw)
+        if isinstance(raw, dict)
+        else deepcopy(DEFAULT_ASSET_PROFILES.get(asset_key) or {})
+    )
 
 
-def _filter_inference_for_provider(inference: dict[str, Any], provider: str | None) -> dict[str, Any]:
+def _filter_inference_for_provider(
+    inference: dict[str, Any], provider: str | None
+) -> dict[str, Any]:
     """执行 filter inference for provider 相关辅助逻辑。"""
     resolved = deepcopy(inference or {})
     provider_key = str(provider or "").strip().lower()
@@ -173,7 +196,9 @@ def resolve_ai_profile(
     ai_profiles = {}
     if isinstance(novel_config, dict):
         ai_profiles = novel_config.get("ai_profiles") or {}
-    novel_override = ai_profiles.get(asset_key) if isinstance(ai_profiles, dict) else None
+    novel_override = (
+        ai_profiles.get(asset_key) if isinstance(ai_profiles, dict) else None
+    )
     if isinstance(novel_override, dict):
         if novel_override.get("provider"):
             provider = str(novel_override["provider"])
@@ -208,10 +233,22 @@ def get_review_weights(strategy_key: str | None) -> dict[str, float]:
     config = get_strategy_config(strategy_key)
     weights = config.get("review_weights") or {}
     return {
-        "structure": float(weights.get("structure", DEFAULT_REVIEW_WEIGHTS["structure"]) or DEFAULT_REVIEW_WEIGHTS["structure"]),
-        "factual": float(weights.get("factual", DEFAULT_REVIEW_WEIGHTS["factual"]) or DEFAULT_REVIEW_WEIGHTS["factual"]),
-        "progression": float(weights.get("progression", DEFAULT_REVIEW_WEIGHTS["progression"]) or DEFAULT_REVIEW_WEIGHTS["progression"]),
-        "aesthetic": float(weights.get("aesthetic", DEFAULT_REVIEW_WEIGHTS["aesthetic"]) or DEFAULT_REVIEW_WEIGHTS["aesthetic"]),
+        "structure": float(
+            weights.get("structure", DEFAULT_REVIEW_WEIGHTS["structure"])
+            or DEFAULT_REVIEW_WEIGHTS["structure"]
+        ),
+        "factual": float(
+            weights.get("factual", DEFAULT_REVIEW_WEIGHTS["factual"])
+            or DEFAULT_REVIEW_WEIGHTS["factual"]
+        ),
+        "progression": float(
+            weights.get("progression", DEFAULT_REVIEW_WEIGHTS["progression"])
+            or DEFAULT_REVIEW_WEIGHTS["progression"]
+        ),
+        "aesthetic": float(
+            weights.get("aesthetic", DEFAULT_REVIEW_WEIGHTS["aesthetic"])
+            or DEFAULT_REVIEW_WEIGHTS["aesthetic"]
+        ),
     }
 
 
@@ -230,10 +267,18 @@ def get_pipeline_options(strategy_key: str | None) -> dict[str, Any]:
     opts: dict = raw_opts if isinstance(raw_opts, dict) else {}
     defs = DEFAULT_PIPELINE_OPTIONS
     return {
-        "combined_reviewer": bool(opts.get("combined_reviewer", defs["combined_reviewer"])),
-        "max_retries": int(opts["max_retries"] if "max_retries" in opts else defs["max_retries"]),
-        "enable_cross_chapter_check": bool(opts.get("enable_cross_chapter_check", defs["enable_cross_chapter_check"])),
-        "enable_refine_outline": bool(opts.get("enable_refine_outline", defs["enable_refine_outline"])),
+        "combined_reviewer": bool(
+            opts.get("combined_reviewer", defs["combined_reviewer"])
+        ),
+        "max_retries": int(
+            opts["max_retries"] if "max_retries" in opts else defs["max_retries"]
+        ),
+        "enable_cross_chapter_check": bool(
+            opts.get("enable_cross_chapter_check", defs["enable_cross_chapter_check"])
+        ),
+        "enable_refine_outline": bool(
+            opts.get("enable_refine_outline", defs["enable_refine_outline"])
+        ),
     }
 
 

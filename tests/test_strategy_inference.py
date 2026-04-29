@@ -10,7 +10,10 @@ def test_get_inference_for_stage_returns_defaults():
     structured = strategy.get_inference_for_stage("web-novel", "reviewer.structured")
 
     assert fact["temperature"] == 0.1
-    assert fact["gemini"]["safety_settings"][0]["category"] == "HARM_CATEGORY_DANGEROUS_CONTENT"
+    assert (
+        fact["gemini"]["safety_settings"][0]["category"]
+        == "HARM_CATEGORY_DANGEROUS_CONTENT"
+    )
     assert fact["gemini"]["safety_settings"][0]["threshold"] == "BLOCK_ONLY_HIGH"
     assert factual["temperature"] == 0.1
     assert structured["temperature"] == 0.2
@@ -40,6 +43,32 @@ inference:
 
     assert resolved["temperature"] == 0.15
     assert resolved["gemini"]["safety_settings"][0]["threshold"] == "BLOCK_ONLY_HIGH"
+
+
+def test_get_model_for_stage_uses_stage_provider_and_model(monkeypatch, tmp_path):
+    strategies_dir = tmp_path / "strategies"
+    strategies_dir.mkdir()
+    (strategies_dir / "custom.yaml").write_text(
+        """
+stages:
+  reviewer.factual:
+    provider: fast-provider
+    model: fast-reviewer
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(strategy, "STRATEGIES_DIR", strategies_dir)
+    monkeypatch.setattr(
+        strategy,
+        "get_primary_chat_runtime",
+        lambda: {"provider": "default-provider", "model": "default-model"},
+    )
+    strategy.get_strategy_config.cache_clear()
+
+    provider, model = strategy.get_model_for_stage("custom", "reviewer.factual")
+
+    assert provider == "fast-provider"
+    assert model == "fast-reviewer"
 
 
 def test_get_review_weights_returns_defaults():
@@ -90,29 +119,60 @@ def test_resolve_ai_profile_ignores_gemini_settings_for_non_gemini_provider():
     assert "gemini" not in resolved["inference"]
 
 
-def test_node_prewrite_does_not_force_constitution_provider_into_other_assets(monkeypatch):
+def test_node_prewrite_does_not_force_constitution_provider_into_other_assets(
+    monkeypatch,
+):
     from app.services.generation.nodes.init_node import node_prewrite
 
     captured: dict[str, object] = {}
 
     class _PrewriteAgent:
-        def run(self, novel, num_chapters, language="zh", provider=None, model=None, strategy_key=None, novel_config=None):
+        def run(
+            self,
+            novel,
+            num_chapters,
+            language="zh",
+            provider=None,
+            model=None,
+            strategy_key=None,
+            novel_config=None,
+        ):
             captured["provider"] = provider
             captured["model"] = model
             captured["strategy_key"] = strategy_key
             captured["novel_config"] = novel_config
-            return {"constitution": {}, "specification": {"characters": []}, "creative_plan": {}, "tasks": {}}
+            return {
+                "constitution": {},
+                "specification": {"characters": []},
+                "creative_plan": {},
+                "tasks": {},
+            }
 
-    monkeypatch.setattr("app.services.generation.nodes.init_node._is_resume_like", lambda _state: False)
-    monkeypatch.setattr("app.services.generation.nodes.init_node.progress", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr("app.services.generation.nodes.init_node.save_prewrite_artifacts", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        "app.services.generation.nodes.init_node._is_resume_like", lambda _state: False
+    )
+    monkeypatch.setattr(
+        "app.services.generation.nodes.init_node.progress",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.services.generation.nodes.init_node.save_prewrite_artifacts",
+        lambda *_args, **_kwargs: None,
+    )
 
     state = {
         "novel_id": 1,
         "strategy": "web-novel",
         "num_chapters": 20,
         "target_language": "zh",
-        "novel_info": {"title": "测试书", "config": {"ai_profiles": {"prewrite.specification": {"provider": "openai", "model": "x"}}}},
+        "novel_info": {
+            "title": "测试书",
+            "config": {
+                "ai_profiles": {
+                    "prewrite.specification": {"provider": "openai", "model": "x"}
+                }
+            },
+        },
         "prewrite_agent": _PrewriteAgent(),
     }
 

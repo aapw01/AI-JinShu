@@ -1,7 +1,10 @@
 """Tests for get_pipeline_options and get_max_retries."""
-import pytest
-from unittest.mock import patch
-from app.core.strategy import get_pipeline_options, get_max_retries, DEFAULT_PIPELINE_OPTIONS
+
+from app.core.strategy import (
+    get_pipeline_options,
+    get_max_retries,
+    DEFAULT_PIPELINE_OPTIONS,
+)
 
 
 def test_defaults_when_no_pipeline_options_in_yaml():
@@ -26,6 +29,7 @@ def test_pipeline_options_from_yaml(tmp_path, monkeypatch):
     """Strategy YAML with pipeline_options overrides defaults."""
     import yaml
     from app.core import strategy as strat_mod
+
     yaml_content = {
         "id": "test-fast",
         "pipeline_options": {
@@ -49,9 +53,23 @@ def test_pipeline_options_from_yaml(tmp_path, monkeypatch):
 def test_max_retries_from_yaml(tmp_path, monkeypatch):
     import yaml
     from app.core import strategy as strat_mod
+
     yaml_content = {"id": "test-r1", "pipeline_options": {"max_retries": 1}}
     (tmp_path / "test-r1.yaml").write_text(yaml.dump(yaml_content))
     monkeypatch.setattr(strat_mod, "STRATEGIES_DIR", tmp_path)
     strat_mod.get_strategy_config.cache_clear()
     assert get_max_retries("test-r1") == 1
     strat_mod.get_strategy_config.cache_clear()
+
+
+def test_fast_pro_keeps_cross_chapter_check_enabled():
+    from app.core import strategy as strat_mod
+
+    strat_mod.get_strategy_config.cache_clear()
+
+    opts = get_pipeline_options("fast-pro")
+
+    assert opts["combined_reviewer"] is True
+    assert opts["max_retries"] == 1
+    assert opts["enable_cross_chapter_check"] is True
+    assert opts["enable_refine_outline"] is False

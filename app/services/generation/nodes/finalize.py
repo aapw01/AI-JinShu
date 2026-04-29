@@ -1,9 +1,12 @@
 """Finalize node — polishes draft, persists chapter, and commits all artifacts."""
+
 from __future__ import annotations
 
 import asyncio
 import inspect
 import re
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any
 
 from sqlalchemy import select
 
@@ -15,7 +18,10 @@ from app.core.strategy import resolve_ai_profile
 from app.models.novel import ChapterVersion
 from app.prompts import render_prompt
 from app.services.generation.chapter_commit import write_longform_artifacts
-from app.services.generation.character_profiles import update_character_profiles_incremental
+from app.services.generation.character_profiles import (
+    update_character_profiles_incremental,
+)
+from app.services.generation.concurrency import submit_with_context
 from app.services.generation.common import (
     MAX_RETRIES,
     REVIEW_SCORE_THRESHOLD,
@@ -29,7 +35,11 @@ from app.services.generation.contracts import OutputContractError
 from app.services.generation.heuristics import aesthetic_score, chapter_progress_signal
 from app.services.generation.length_control import maybe_compact_chapter_length
 from app.services.generation.policies import PacingController, PacingInput
-from app.services.generation.progress import chapter_progress, persist_resume_runtime_state, progress
+from app.services.generation.progress import (
+    chapter_progress,
+    persist_resume_runtime_state,
+    progress,
+)
 from app.services.generation.state import GenerationState
 from app.services.memory.progression_control import ProgressionPromotionService
 
@@ -39,7 +49,14 @@ _SENTENCE_SPLIT_RE = re.compile(r"[。！？!?；;…]+")
 def _build_fallback_facts_from_summary(summary_text: str, chapter_num: int) -> dict:
     """Minimal facts from summary when fact_extractor fails completely."""
     return {
-        "events": [{"title": f"第{chapter_num}章事件", "description": (summary_text or "")[:200]}] if summary_text else [],
+        "events": [
+            {
+                "title": f"第{chapter_num}章事件",
+                "description": (summary_text or "")[:200],
+            }
+        ]
+        if summary_text
+        else [],
         "characters": [],
         "items": [],
         "locations": [],
@@ -49,7 +66,9 @@ def _build_fallback_facts_from_summary(summary_text: str, chapter_num: int) -> d
 
 def _paragraph_fragmentation_metrics(content: str) -> dict[str, float]:
     """执行 paragraph fragmentation metrics 相关辅助逻辑。"""
-    paragraphs = [part.strip() for part in str(content or "").split("\n\n") if part.strip()]
+    paragraphs = [
+        part.strip() for part in str(content or "").split("\n\n") if part.strip()
+    ]
     if not paragraphs:
         return {
             "paragraph_count": 0,
@@ -61,7 +80,9 @@ def _paragraph_fragmentation_metrics(content: str) -> dict[str, float]:
     short_count = sum(1 for length in paragraph_lengths if length < 25)
     single_sentence_count = 0
     for paragraph in paragraphs:
-        sentence_count = len([part for part in _SENTENCE_SPLIT_RE.split(paragraph) if part.strip()])
+        sentence_count = len(
+            [part for part in _SENTENCE_SPLIT_RE.split(paragraph) if part.strip()]
+        )
         if sentence_count <= 1:
             single_sentence_count += 1
     total = len(paragraphs)
@@ -147,8 +168,150 @@ def _is_quality_passed(
     )
 
 
+def _run_memory_extraction_tasks(
+    *,
+    state: GenerationState,
+    chapter_num: int,
+    final_content: str,
+    fact_profile: dict[str, Any],
+    progression_profile: dict[str, Any],
+) -> dict[str, Any]:
+    """Run independent post-finalization memory extraction calls before DB I/O."""
+    outline = state.get("outline") or {}
+    fact_provider = fact_profile["provider"]
+    fact_model = fact_profile["model"]
+    fact_inference = fact_profile["inference"]
+    progression_provider = progression_profile["provider"]
+    progression_model = progression_profile["model"]
+    progression_inference = progression_profile["inference"]
+
+    def _extract_facts() -> dict[str, Any]:
+        extracted_facts = None
+        try:
+            extracted_facts = state["fact_extractor"].run(
+                chapter_num=chapter_num,
+                content=final_content,
+                outline=outline,
+                language=state["target_language"],
+                provider=fact_provider,
+                model=fact_model,
+                inference=fact_inference,
+            )
+        except Exception as exc:
+            logger.warning(
+                "fact_extractor first attempt failed chapter=%s error=%s",
+                chapter_num,
+                exc,
+            )
+
+        if not extracted_facts:
+            try:
+                extracted_facts = state["fact_extractor"].run(
+                    chapter_num=chapter_num,
+                    content=final_content,
+                    outline=outline,
+                    language=state["target_language"],
+                    provider=fact_provider,
+                    model=fact_model,
+                    inference=fact_inference,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "fact_extractor retry failed chapter=%s error=%s", chapter_num, exc
+                )
+
+        if not extracted_facts:
+            logger.warning(
+                "fact_extractor using fallback facts chapter=%s", chapter_num
+            )
+            return _build_fallback_facts_from_summary("", chapter_num)
+        return extracted_facts
+
+    def _extract_summary() -> str:
+        return generate_chapter_summary(
+            final_content,
+            outline,
+            chapter_num,
+            state["target_language"],
+            state["strategy"],
+        )
+
+    def _extract_progression_memory() -> dict[str, Any]:
+        return state["progression_memory_extractor"].run(
+            chapter_num=chapter_num,
+            content=final_content,
+            outline=outline,
+            language=state["target_language"],
+            provider=progression_provider,
+            model=progression_model,
+            inference=progression_inference,
+        )
+
+    def _extract_foreshadow() -> tuple[list, list]:
+        try:
+            foreshadow_result = state["fact_extractor"].run_foreshadow_extraction(
+                content=final_content,
+                chapter_num=chapter_num,
+                outline=outline,
+                target_language=state["target_language"],
+                provider=fact_provider,
+                model=fact_model,
+                inference=fact_inference,
+            )
+            return (foreshadow_result.get("planted") or [])[:5], (
+                foreshadow_result.get("resolved") or []
+            )[:5]
+        except Exception as exc:
+            logger.warning(
+                "foreshadow_extraction failed chapter=%s error=%s", chapter_num, exc
+            )
+            return [], []
+
+    def _extract_relations() -> list:
+        try:
+            existing_characters = list((state.get("character_state") or {}).keys())
+            relations_result = asyncio.run(
+                state["fact_extractor"].run_relation_extraction(
+                    chapter_text=final_content,
+                    existing_characters=existing_characters,
+                    provider=fact_provider,
+                    model=fact_model,
+                    inference=fact_inference,
+                )
+            )
+            return list(relations_result.relations)
+        except Exception as exc:
+            logger.warning(
+                "relation_extraction failed chapter=%s error=%s", chapter_num, exc
+            )
+            return []
+
+    with ThreadPoolExecutor(
+        max_workers=5, thread_name_prefix="chapter-memory"
+    ) as executor:
+        futures = {
+            "summary_text": submit_with_context(executor, _extract_summary),
+            "extracted_facts": submit_with_context(executor, _extract_facts),
+            "progression_memory_raw": submit_with_context(
+                executor, _extract_progression_memory
+            ),
+            "foreshadow": submit_with_context(executor, _extract_foreshadow),
+            "relation_objects": submit_with_context(executor, _extract_relations),
+        }
+        foreshadow_planted, foreshadow_resolved = futures["foreshadow"].result()
+        return {
+            "summary_text": futures["summary_text"].result(),
+            "extracted_facts": futures["extracted_facts"].result(),
+            "progression_memory_raw": futures["progression_memory_raw"].result(),
+            "foreshadow_planted": foreshadow_planted,
+            "foreshadow_resolved": foreshadow_resolved,
+            "relation_objects": futures["relation_objects"].result(),
+        }
+
+
 def node_finalize(state: GenerationState) -> GenerationState:
     """执行 node finalize 相关辅助逻辑。"""
+
     def _call_finalizer_run(
         draft: str,
         feedback: str,
@@ -184,16 +347,29 @@ def node_finalize(state: GenerationState) -> GenerationState:
         )
 
     chapter_num = state["current_chapter"]
-    progress(state, "finalizer", chapter_num, chapter_progress(state, 0.70), "定稿...", {"current_phase": "chapter_finalizing", "total_chapters": state["num_chapters"]})
+    progress(
+        state,
+        "finalizer",
+        chapter_num,
+        chapter_progress(state, 0.70),
+        "定稿...",
+        {
+            "current_phase": "chapter_finalizing",
+            "total_chapters": state["num_chapters"],
+        },
+    )
     novel_config = (state.get("novel_info") or {}).get("config")
-    finalizer_profile = resolve_ai_profile(state["strategy"], "finalizer", novel_config=novel_config)
-    fact_profile = resolve_ai_profile(state["strategy"], "fact_extractor", novel_config=novel_config)
-    progression_profile = resolve_ai_profile(state["strategy"], "progression_memory", novel_config=novel_config)
+    finalizer_profile = resolve_ai_profile(
+        state["strategy"], "finalizer", novel_config=novel_config
+    )
+    fact_profile = resolve_ai_profile(
+        state["strategy"], "fact_extractor", novel_config=novel_config
+    )
+    progression_profile = resolve_ai_profile(
+        state["strategy"], "progression_memory", novel_config=novel_config
+    )
     f_provider, f_model = finalizer_profile["provider"], finalizer_profile["model"]
     finalizer_inference = finalizer_profile["inference"]
-    fact_inference = fact_profile["inference"]
-    progression_inference = progression_profile["inference"]
-    progression_provider, progression_model = progression_profile["provider"], progression_profile["model"]
     base_feedback = str(state.get("feedback") or "")
     format_guardrail = (
         "【输出格式纠偏】上一次输出包含说明性前言或标题污染。\n"
@@ -204,7 +380,9 @@ def node_finalize(state: GenerationState) -> GenerationState:
     feedback_for_attempt = base_feedback
     for attempt in range(2):
         try:
-            final_content = _call_finalizer_run(state["draft"], feedback_for_attempt).strip()
+            final_content = _call_finalizer_run(
+                state["draft"], feedback_for_attempt
+            ).strip()
             break
         except OutputContractError as exc:
             if exc.code != "MODEL_OUTPUT_POLICY_VIOLATION" or attempt >= 1:
@@ -215,7 +393,9 @@ def node_finalize(state: GenerationState) -> GenerationState:
                 attempt + 1,
             )
             feedback_for_attempt = (
-                f"{base_feedback}\n\n{format_guardrail}" if base_feedback else format_guardrail
+                f"{base_feedback}\n\n{format_guardrail}"
+                if base_feedback
+                else format_guardrail
             )
     final_content = normalize_chapter_content(final_content)
     fragment_metrics = _paragraph_fragmentation_metrics(final_content)
@@ -226,7 +406,9 @@ def node_finalize(state: GenerationState) -> GenerationState:
                 _call_finalizer_run(final_content, compaction_feedback).strip()
             )
         except Exception:
-            logger.warning("finalizer paragraph compaction skipped after failure", exc_info=True)
+            logger.warning(
+                "finalizer paragraph compaction skipped after failure", exc_info=True
+            )
     final_content, length_diagnostics = maybe_compact_chapter_length(
         content=final_content,
         word_count=DEFAULT_CHAPTER_WORD_COUNT,
@@ -242,56 +424,10 @@ def node_finalize(state: GenerationState) -> GenerationState:
             length_diagnostics.get("length_compaction_applied"),
             length_diagnostics.get("length_compaction_reason"),
         )
-    extracted_facts = None
-
-    # First attempt
-    try:
-        extracted_facts = state["fact_extractor"].run(
-            chapter_num=chapter_num,
-            content=final_content,
-            outline=state.get("outline") or {},
-            language=state["target_language"],
-            provider=f_provider,
-            model=f_model,
-            inference=fact_inference,
-        )
-    except Exception as exc:
-        logger.warning("fact_extractor first attempt failed chapter=%s error=%s", chapter_num, exc)
-
-    # Retry once
-    if not extracted_facts:
-        try:
-            extracted_facts = state["fact_extractor"].run(
-                chapter_num=chapter_num,
-                content=final_content,
-                outline=state.get("outline") or {},
-                language=state["target_language"],
-                provider=f_provider,
-                model=f_model,
-                inference=fact_inference,
-            )
-        except Exception as exc:
-            logger.warning("fact_extractor retry failed chapter=%s error=%s", chapter_num, exc)
-
-    # Fallback: minimal facts when both attempts fail
-    if not extracted_facts:
-        extracted_facts = _build_fallback_facts_from_summary("", chapter_num)
-        logger.warning("fact_extractor using fallback facts chapter=%s", chapter_num)
-
-    language_score, language_report = evaluate_language_quality(final_content, state["target_language"])
+    language_score, language_report = evaluate_language_quality(
+        final_content, state["target_language"]
+    )
     aesthetic_score_val = aesthetic_score(final_content)
-    progression_memory_raw: dict[str, object] = {
-        "advancement": {},
-        "transition": {},
-        "advancement_confidence": 0.0,
-        "transition_confidence": 0.0,
-        "validation_notes": [],
-    }
-    progression_promotion: dict[str, object] = {
-        "decision": "promote_none",
-        "promotion_score": 0.0,
-        "promoted_payload": {"advancement": {}, "transition": {}},
-    }
     chapter_title = resolve_chapter_title(
         chapter_num=chapter_num,
         title=(state.get("outline") or {}).get("title"),
@@ -300,64 +436,51 @@ def node_finalize(state: GenerationState) -> GenerationState:
     )
 
     # P0: LLM calls BEFORE opening DB session — keeps connection held time to DB I/O only
-    progress(state, "memory_update", chapter_num, chapter_progress(state, 0.85), "生成摘要 & 更新记忆...", {"current_phase": "memory_update", "total_chapters": state["num_chapters"]})
-    summary_text = generate_chapter_summary(final_content, state["outline"], chapter_num, state["target_language"], state["strategy"])
-    progression_memory_raw = state["progression_memory_extractor"].run(
-        chapter_num=chapter_num,
-        content=final_content,
-        outline=state.get("outline") or {},
-        language=state["target_language"],
-        provider=progression_provider,
-        model=progression_model,
-        inference=progression_inference,
+    progress(
+        state,
+        "memory_update",
+        chapter_num,
+        chapter_progress(state, 0.85),
+        "生成摘要 & 更新记忆...",
+        {"current_phase": "memory_update", "total_chapters": state["num_chapters"]},
     )
-
-    # Foreshadow extraction (best-effort LLM call, before DB session)
-    _foreshadow_planted: list = []
-    _foreshadow_resolved: list = []
-    try:
-        foreshadow_result = state["fact_extractor"].run_foreshadow_extraction(
-            content=final_content,
-            chapter_num=chapter_num,
-            outline=state.get("outline") or {},
-            target_language=state["target_language"],
-            provider=fact_profile["provider"],
-            model=fact_profile["model"],
-            inference=fact_profile["inference"],
-        )
-        _foreshadow_planted = (foreshadow_result.get("planted") or [])[:5]
-        _foreshadow_resolved = (foreshadow_result.get("resolved") or [])[:5]
-    except Exception as exc:
-        logger.warning("foreshadow_extraction failed chapter=%s error=%s", chapter_num, exc)
-
-    # Relation extraction (best-effort, before DB session)
-    _relation_objects: list = []
-    try:
-        existing_characters = list((state.get("character_state") or {}).keys())
-        relations_result = asyncio.run(
-            state["fact_extractor"].run_relation_extraction(
-                chapter_text=final_content,
-                existing_characters=existing_characters,
-                provider=fact_profile["provider"],
-                model=fact_profile["model"],
-                inference=fact_profile["inference"],
-            )
-        )
-        _relation_objects = list(relations_result.relations)
-    except Exception as exc:
-        logger.warning("relation_extraction failed chapter=%s error=%s", chapter_num, exc)
+    memory_pack = _run_memory_extraction_tasks(
+        state=state,
+        chapter_num=chapter_num,
+        final_content=final_content,
+        fact_profile=fact_profile,
+        progression_profile=progression_profile,
+    )
+    summary_text = memory_pack["summary_text"]
+    extracted_facts = memory_pack["extracted_facts"]
+    progression_memory_raw = memory_pack["progression_memory_raw"]
+    _foreshadow_planted = memory_pack["foreshadow_planted"]
+    _foreshadow_resolved = memory_pack["foreshadow_resolved"]
+    _relation_objects = memory_pack["relation_objects"]
 
     progression_promotion = ProgressionPromotionService().decide(
         chapter_num=chapter_num,
         extraction=progression_memory_raw,
-        outline_contract=((state.get("context") or {}).get("outline_contract") if isinstance(state.get("context"), dict) else None)
+        outline_contract=(
+            (state.get("context") or {}).get("outline_contract")
+            if isinstance(state.get("context"), dict)
+            else None
+        )
         or state.get("outline")
         or {},
-        review_suggestions=state.get("review_suggestions") if isinstance(state.get("review_suggestions"), dict) else {},
-        review_gate=state.get("review_gate") if isinstance(state.get("review_gate"), dict) else {},
+        review_suggestions=state.get("review_suggestions")
+        if isinstance(state.get("review_suggestions"), dict)
+        else {},
+        review_gate=state.get("review_gate")
+        if isinstance(state.get("review_gate"), dict)
+        else {},
     )
     promoted_progression = progression_promotion.get("promoted_payload")
-    progression_memory = promoted_progression if isinstance(promoted_progression, dict) else {"advancement": {}, "transition": {}}
+    progression_memory = (
+        promoted_progression
+        if isinstance(promoted_progression, dict)
+        else {"advancement": {}, "transition": {}}
+    )
     factual_score = float(state.get("factual_score", 0.0) or 0.0)
     progression_score = float(state.get("progression_score", 0.0) or 0.0)
     reviewer_aesthetic = float(state.get("aesthetic_review_score", 0.0) or 0.0)
@@ -394,9 +517,16 @@ def node_finalize(state: GenerationState) -> GenerationState:
                     novel_version_id=state.get("novel_version_id"),
                 )
             except Exception as exc:
-                logger.warning("character_state update failed chapter=%s error=%s", chapter_num, exc)
+                logger.warning(
+                    "character_state update failed chapter=%s error=%s",
+                    chapter_num,
+                    exc,
+                )
         else:
-            logger.info("character_state update skipped (fallback facts) chapter=%s", chapter_num)
+            logger.info(
+                "character_state update skipped (fallback facts) chapter=%s",
+                chapter_num,
+            )
         update_character_profiles_incremental(
             db=db,
             novel_id=state["novel_id"],
@@ -414,7 +544,11 @@ def node_finalize(state: GenerationState) -> GenerationState:
         )
         existing = db.execute(existing_stmt).scalar_one_or_none()
         _ensure_retry_write_allowed(state, chapter_num)
-        revision_count = state.get("review_attempt", 0) + 1 + (state.get("rerun_count", 0) * (MAX_RETRIES + 1))
+        revision_count = (
+            state.get("review_attempt", 0)
+            + 1
+            + (state.get("rerun_count", 0) * (MAX_RETRIES + 1))
+        )
         payload = {
             "title": chapter_title,
             "content": final_content,
@@ -425,10 +559,14 @@ def node_finalize(state: GenerationState) -> GenerationState:
             "language_quality_report": language_report,
             "metadata_": {
                 "language_quality_report": language_report,
-                "consistency_report": (cr := state.get("consistency_report")) and cr.summary() or {},
+                "consistency_report": (cr := state.get("consistency_report"))
+                and cr.summary()
+                or {},
                 "revision_count": revision_count,
                 "context_budget_used": state["context"].get("budget_used", 0),
-                "context_sources": list((state.get("context") or {}).get("context_sources") or []),
+                "context_sources": list(
+                    (state.get("context") or {}).get("context_sources") or []
+                ),
                 "rerun_count": state.get("rerun_count", 0),
                 "factual_score": factual_score,
                 "progression_score": progression_score,
@@ -437,11 +575,21 @@ def node_finalize(state: GenerationState) -> GenerationState:
                 "chapter_transition": progression_memory.get("transition") or {},
                 "progression_memory_raw": progression_memory_raw,
                 "progression_promotion": progression_promotion,
-                "word_count_before_compaction": int(length_diagnostics.get("word_count_before_compaction") or 0),
-                "word_count_after_compaction": int(length_diagnostics.get("word_count_after_compaction") or 0),
-                "length_compaction_attempted": bool(length_diagnostics.get("length_compaction_attempted")),
-                "length_compaction_applied": bool(length_diagnostics.get("length_compaction_applied")),
-                "length_compaction_reason": str(length_diagnostics.get("length_compaction_reason") or ""),
+                "word_count_before_compaction": int(
+                    length_diagnostics.get("word_count_before_compaction") or 0
+                ),
+                "word_count_after_compaction": int(
+                    length_diagnostics.get("word_count_after_compaction") or 0
+                ),
+                "length_compaction_attempted": bool(
+                    length_diagnostics.get("length_compaction_attempted")
+                ),
+                "length_compaction_applied": bool(
+                    length_diagnostics.get("length_compaction_applied")
+                ),
+                "length_compaction_reason": str(
+                    length_diagnostics.get("length_compaction_reason") or ""
+                ),
             },
         }
         if existing:
@@ -456,7 +604,10 @@ def node_finalize(state: GenerationState) -> GenerationState:
                 )
             )
         write_longform_artifacts(
-            state={**state, "outline": {**(state.get("outline") or {}), "title": chapter_title}},
+            state={
+                **state,
+                "outline": {**(state.get("outline") or {}), "title": chapter_title},
+            },
             chapter_num=chapter_num,
             summary_text=summary_text,
             final_content=final_content,
@@ -512,7 +663,9 @@ def node_finalize(state: GenerationState) -> GenerationState:
                 db=db,
             )
         except Exception as exc:
-            logger.warning("foreshadow_suggest failed chapter=%s error=%s", chapter_num, exc)
+            logger.warning(
+                "foreshadow_suggest failed chapter=%s error=%s", chapter_num, exc
+            )
         db.commit()
     except Exception:
         db.rollback()
@@ -521,9 +674,15 @@ def node_finalize(state: GenerationState) -> GenerationState:
         db.close()
 
     usage = snapshot_usage()
-    total_input_tokens = int(usage.get("input_tokens") or state["total_input_tokens"] or 0)
-    total_output_tokens = int(usage.get("output_tokens") or state["total_output_tokens"] or 0)
-    estimated_cost = round((total_input_tokens / 1000) * 0.0015 + (total_output_tokens / 1000) * 0.002, 6)
+    total_input_tokens = int(
+        usage.get("input_tokens") or state["total_input_tokens"] or 0
+    )
+    total_output_tokens = int(
+        usage.get("output_tokens") or state["total_output_tokens"] or 0
+    )
+    estimated_cost = round(
+        (total_input_tokens / 1000) * 0.0015 + (total_output_tokens / 1000) * 0.002, 6
+    )
     factual_score = float(state.get("factual_score", 0.0) or 0.0)
     progress_sig = chapter_progress_signal(
         outline=state.get("outline") or {},
@@ -552,13 +711,19 @@ def node_finalize(state: GenerationState) -> GenerationState:
     decision_state["quality"] = {
         "review_score": round(float(state.get("score", 0.0) or 0.0), 4),
         "factual_score": round(float(factual_score), 4),
-        "progression_score": round(float(state.get("progression_score", 0.0) or 0.0), 4),
+        "progression_score": round(
+            float(state.get("progression_score", 0.0) or 0.0), 4
+        ),
         "language_score": round(float(language_score), 4),
         "aesthetic_score": round(float(aesthetic_score_val), 4),
         "consistency_scorecard": state.get("consistency_scorecard") or {},
         "review_gate": state.get("review_gate") or {},
-        "chapter_advancement": progression_memory.get("advancement") if isinstance(progression_memory, dict) else {},
-        "chapter_transition": progression_memory.get("transition") if isinstance(progression_memory, dict) else {},
+        "chapter_advancement": progression_memory.get("advancement")
+        if isinstance(progression_memory, dict)
+        else {},
+        "chapter_transition": progression_memory.get("transition")
+        if isinstance(progression_memory, dict)
+        else {},
         "progression_promotion": progression_promotion,
         "quality_passed": bool(
             _is_quality_passed(
@@ -566,7 +731,9 @@ def node_finalize(state: GenerationState) -> GenerationState:
                 factual_score=factual_score,
                 progression_score=float(state.get("progression_score", 0.0) or 0.0),
                 language_score=language_score,
-                reviewer_aesthetic=float(state.get("aesthetic_review_score", 0.0) or 0.0),
+                reviewer_aesthetic=float(
+                    state.get("aesthetic_review_score", 0.0) or 0.0
+                ),
                 aesthetic_score_val=aesthetic_score_val,
             )
         ),
@@ -580,7 +747,10 @@ def node_finalize(state: GenerationState) -> GenerationState:
         f"第{chapter_num}章完成",
         {
             "current_phase": "chapter_done",
-            "total_chapters": max(int(state.get("book_effective_end_chapter") or 0), int(state.get("end_chapter") or chapter_num)),
+            "total_chapters": max(
+                int(state.get("book_effective_end_chapter") or 0),
+                int(state.get("end_chapter") or chapter_num),
+            ),
             "token_usage_input": total_input_tokens,
             "token_usage_output": total_output_tokens,
             "estimated_cost": estimated_cost,
@@ -590,16 +760,30 @@ def node_finalize(state: GenerationState) -> GenerationState:
             "decision_state": decision_state,
         },
     )
-    if chapter_num < int(state.get("segment_end_chapter") or state.get("end_chapter") or chapter_num):
+    if chapter_num < int(
+        state.get("segment_end_chapter") or state.get("end_chapter") or chapter_num
+    ):
         persist_resume_runtime_state(
             state,
             mode="segment_running",
             next_chapter=chapter_num + 1,
-            segment_start_chapter=int(state.get("segment_start_chapter") or state.get("start_chapter") or 1),
-            segment_end_chapter=int(state.get("segment_end_chapter") or state.get("end_chapter") or chapter_num),
-            book_effective_end_chapter=int(state.get("book_effective_end_chapter") or state.get("end_chapter") or chapter_num),
+            segment_start_chapter=int(
+                state.get("segment_start_chapter") or state.get("start_chapter") or 1
+            ),
+            segment_end_chapter=int(
+                state.get("segment_end_chapter")
+                or state.get("end_chapter")
+                or chapter_num
+            ),
+            book_effective_end_chapter=int(
+                state.get("book_effective_end_chapter")
+                or state.get("end_chapter")
+                or chapter_num
+            ),
             volume_no=int(state.get("volume_no") or 1),
-            retry_resume_chapter=int(state.get("retry_resume_chapter") or chapter_num + 1),
+            retry_resume_chapter=int(
+                state.get("retry_resume_chapter") or chapter_num + 1
+            ),
         )
     fail_reason = ""
     if not quality_passed:
