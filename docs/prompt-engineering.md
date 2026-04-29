@@ -103,6 +103,15 @@ Memory policy 的核心原则：
 
 writer 节点会把每章的 prompt asset、prompt hash、上下文 block 选择、模型与诊断信息写入 `creation_tasks.resume_cursor_json.runtime_state.chapter_runtime_snapshots`。该快照用于失败复盘和重跑解释，不参与前端 API 形态。
 
+## Generation Harness
+
+`app/services/generation/harness/` 提供四个后端-only 的回归与诊断工具，不新增路由、数据库表或前端功能：
+
+- `replay.py`：从 runtime snapshot 生成章节 replay bundle，用于定位某章使用的 prompt、上下文裁剪和诊断信息。
+- `consistency_eval.py`：对固定一致性用例做 pass/fail 评分，先支持预计算的 blocker / warning 结果。
+- `fact_ledger.py`：聚合 `StoryEntity`、`StoryFact`、`StoryEvent`、`StoryForeshadow`、`StoryRelation` 和角色记忆，形成全书事实账本。
+- `context_budget.py`：用固定场景回放 context block token 预算选择，检查 required / preferred / optional 的保留与裁剪是否符合预期。
+
 ## Character Focus Pack
 
 `app/services/memory/character_focus.py` 会为当前章节生成轻量人物约束包，来源包括：
