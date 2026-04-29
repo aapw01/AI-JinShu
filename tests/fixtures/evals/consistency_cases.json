@@ -1,0 +1,14 @@
+[
+  {
+    "id": "dead-character-outline",
+    "description": "outline mentions a dead character as active",
+    "report": {"blockers": 1, "warnings": 0},
+    "expected": {"min_blockers": 1, "max_warnings": 0}
+  },
+  {
+    "id": "clean-outline",
+    "description": "outline has no known contradiction",
+    "report": {"blockers": 0, "warnings": 0},
+    "expected": {"max_blockers": 0, "max_warnings": 0}
+  }
+]
