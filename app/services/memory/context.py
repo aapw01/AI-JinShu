@@ -148,6 +148,19 @@ def select_context_candidates(
             int(item.get("_selector_index") or 0),
         )
     )
+    # #10: optional embedding-based rescoring (flag-controlled, pass-through默认关)
+    try:
+        from app.services.memory.context_embedding import rescore_candidates_by_embedding
+
+        outline_text = " ".join(_selection_terms_from_outline(outline)) or ""
+        scored = rescore_candidates_by_embedding(
+            outline_text=outline_text,
+            candidates=scored,
+            content_key=content_key,
+        )
+    except Exception:
+        # 任何异常都不破坏字面量基线，旧路径继续工作
+        pass
     return [{k: v for k, v in item.items() if not k.startswith("_selector_")} for item in scored[:max_items]]
 
 

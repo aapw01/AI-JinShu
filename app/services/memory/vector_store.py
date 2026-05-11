@@ -26,9 +26,51 @@ class VectorStoreWrapper:
         limit: int = 5,
         db: Optional[Session] = None,
     ) -> list[dict]:
-        """Search relevant knowledge chunks for novel."""
+        """Search relevant knowledge chunks for novel.
+
+        ``flag memory.hybrid_search`` 开启时走 BM25 + dense + RRF 融合路径；
+        失败任何环节自动降级到 dense-only。
+        """
+        # Hybrid search 路径（flag-controlled）
+        hybrid_attempted = False
+        try:
+            from app.core.feature_flags import is_enabled
+
+            if (
+                query_text
+                and is_enabled("memory.hybrid_search", novel_id=novel_id)
+            ):
+                hybrid_attempted = True
+                hybrid_hits = self._search_hybrid(
+                    novel_id=novel_id,
+                    novel_version_id=novel_version_id,
+                    query_text=query_text,
+                    limit=limit,
+                    db=db,
+                )
+                if hybrid_hits is not None:
+                    try:
+                        from app.core.metrics import context_selection_path_total
+
+                        context_selection_path_total.inc(scoring="hybrid")
+                    except Exception:
+                        pass
+                    return hybrid_hits
+        except Exception:
+            logger.debug("hybrid path init failed", exc_info=True)
+
+        try:
+            from app.core.metrics import context_selection_path_total
+
+            context_selection_path_total.inc(
+                scoring="dense_fallback" if hybrid_attempted else "dense"
+            )
+        except Exception:
+            pass
+
         should_close = db is None
         db = db or SessionLocal()
+        dense_started = time.perf_counter()
         try:
             stmt = select(KnowledgeChunk).where(
                 KnowledgeChunk.novel_id == novel_id,
@@ -55,10 +97,120 @@ class VectorStoreWrapper:
                 rows = _lexical_rank(rows, query_text, limit)
             else:
                 rows = rows[:limit]
+            try:
+                from app.core.metrics import memory_search_duration_ms
+
+                memory_search_duration_ms.observe(
+                    (time.perf_counter() - dense_started) * 1000.0,
+                    path="dense_fallback" if hybrid_attempted else "dense",
+                )
+            except Exception:
+                logger.debug("dense metric failed", exc_info=True)
             return [{"content": r.content, "chunk_type": r.chunk_type} for r in rows]
         finally:
             if should_close:
                 db.close()
+
+    def _search_hybrid(
+        self,
+        *,
+        novel_id: int,
+        novel_version_id: int,
+        query_text: str,
+        limit: int,
+        db: Optional[Session],
+    ) -> Optional[list[dict]]:
+        """Hybrid 路径：拉候选 → ``hybrid_search`` 融合 → 返回 ``[{content, chunk_type}]``。
+
+        关键约束：
+        - **候选必须按 cosine 距离排序后再 limit**：否则 SQLite/PG 返回的物理顺序
+          会让 BM25/RRF 退化成"对前 N 条随机 chunk 重排"，长篇小说下完全没意义。
+        - 取不到 query_vec 时退化到 ``KnowledgeChunk.id`` 排序，保证确定性；同时
+          打 ``context_selection_path_total{scoring="hybrid_no_dense"}`` 用于诊断。
+        - 任何异常都返回 ``None``，让外层走 dense 兜底。
+        """
+        started = time.perf_counter()
+        try:
+            from app.services.memory.hybrid_search import Document, hybrid_search
+
+            should_close = db is None
+            session = db or SessionLocal()
+            try:
+                try:
+                    query_vec = embed_query(query_text)
+                except Exception:
+                    query_vec = None
+
+                candidate_limit = max(limit * 8, 32)
+                base_stmt = (
+                    select(KnowledgeChunk)
+                    .where(KnowledgeChunk.novel_id == novel_id)
+                    .where(KnowledgeChunk.novel_version_id == novel_version_id)
+                )
+                ordered_stmt = base_stmt
+                if query_vec is not None:
+                    try:
+                        ordered_stmt = base_stmt.order_by(
+                            KnowledgeChunk.embedding.cosine_distance(query_vec)
+                        )
+                    except Exception:
+                        # pgvector 不可用 / SQLite 等情况：退化到 id 排序保证确定性
+                        ordered_stmt = base_stmt.order_by(KnowledgeChunk.id.asc())
+                else:
+                    ordered_stmt = base_stmt.order_by(KnowledgeChunk.id.asc())
+                rows = (
+                    session.execute(ordered_stmt.limit(candidate_limit))
+                    .scalars()
+                    .all()
+                )
+                if not rows:
+                    return []
+                docs = [
+                    Document(
+                        doc_id=str(r.id),
+                        text=r.content or "",
+                        embedding=list(r.embedding) if r.embedding is not None else None,
+                    )
+                    for r in rows
+                ]
+                row_by_id = {str(r.id): r for r in rows}
+                fused = hybrid_search(
+                    query_text,
+                    docs=docs,
+                    query_vec=query_vec,
+                    top_k=limit,
+                    novel_id=novel_id,
+                )
+                results: list[dict] = []
+                for hit in fused:
+                    row = row_by_id.get(str(hit.doc_id))
+                    if row is None:
+                        continue
+                    results.append(
+                        {"content": row.content, "chunk_type": row.chunk_type}
+                    )
+                try:
+                    from app.core.metrics import memory_search_duration_ms
+
+                    duration_ms = (time.perf_counter() - started) * 1000.0
+                    memory_search_duration_ms.observe(
+                        duration_ms, path="hybrid"
+                    )
+                except Exception:
+                    logger.debug("hybrid metric failed", exc_info=True)
+                return results
+            finally:
+                if should_close:
+                    session.close()
+        except Exception:
+            logger.debug("hybrid search failed", exc_info=True)
+            try:
+                from app.core.metrics import memory_search_timeout_total
+
+                memory_search_timeout_total.inc(path="hybrid")
+            except Exception:
+                pass
+            return None
 
     def add_chunk(
         self,
