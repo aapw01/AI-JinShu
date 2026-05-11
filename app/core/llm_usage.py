@@ -8,6 +8,19 @@ from threading import RLock
 from typing import Any
 
 
+def _parse_stage_prefix(stage: str | None) -> tuple[str | None, str | None]:
+    """解析 ``llm.{provider}.{model}`` → (provider, model)。
+
+    ``model`` 可能本身含 ``.`` （如 ``gemini-1.5-flash`` ），所以 split 限制 maxsplit=2。
+    """
+    if not stage:
+        return None, None
+    parts = str(stage).split(".", 2)
+    if len(parts) >= 3 and parts[0] == "llm":
+        return parts[1] or None, parts[2] or None
+    return None, None
+
+
 def _to_int(value: Any) -> int:
     """执行 to int 相关辅助逻辑。"""
     try:
@@ -34,6 +47,52 @@ class UsageSession:
 _usage_session_var: ContextVar[UsageSession | None] = ContextVar(
     "llm_usage_session", default=None
 )
+
+
+# 记录"自上次 pop 起累积发生的所有 LLM 调用"。这是一条 *list*，因为同一个
+# agent 内通常有：
+#   - structured-output 解析失败的重试（不止一次 LLM）
+#   - circuit breaker fallback 链 primary → fallback_a → fallback_b
+#   - 同一 stage 多轮 review
+# 旧实现是单值 ContextVar，后到的调用会把前一次覆盖，导致 cost 严重低估。
+# 现在每次 ``record_usage_from_response`` 都 append；``pop_last_llm_call()``
+# 返回整段并清空。``emit_agent_event`` 会把所有 cost 累加进 payload + Prom。
+_last_llm_call_var: ContextVar[list[dict[str, Any]] | None] = ContextVar(
+    "llm_last_calls", default=None
+)
+
+
+def pop_last_llm_call() -> list[dict[str, Any]]:
+    """取出并清空自上次 pop 起累积的全部 LLM 调用元数据。
+
+    返回值固定是 list（可能为空），调用方按时间序遍历计算 cost / token。
+    """
+    snapshot = _last_llm_call_var.get() or []
+    _last_llm_call_var.set(None)
+    if not isinstance(snapshot, list):
+        return [snapshot] if snapshot else []
+    return list(snapshot)
+
+
+def peek_last_llm_call() -> dict[str, Any] | None:
+    """只读最近一次调用元数据，不清空（debug/metric 用）。返回末条或 ``None``。"""
+    bucket = _last_llm_call_var.get()
+    if not bucket:
+        return None
+    if isinstance(bucket, list):
+        return bucket[-1] if bucket else None
+    return bucket
+
+
+def _append_llm_call(record: dict[str, Any]) -> None:
+    """内部：追加一条 LLM 调用记录到当前 ContextVar 桶。"""
+    bucket = _last_llm_call_var.get()
+    if not isinstance(bucket, list):
+        # 兼容旧的单值（极少分支，但避免历史调用方崩）
+        bucket = [bucket] if isinstance(bucket, dict) else []
+    bucket = list(bucket)
+    bucket.append(record)
+    _last_llm_call_var.set(bucket)
 
 
 def begin_usage_session(
@@ -224,6 +283,27 @@ def record_usage_from_response(
         "total_tokens": total_t,
         "billable_total_tokens": billable_t,
     }
+
+    # 记录单次调用元数据 + cost_usd（供 emit_agent_event 自动消费）
+    provider, model = _parse_stage_prefix(stage)
+    cost_usd = 0.0
+    try:
+        from app.services.cost.budget import compute_cost
+
+        cost_usd = float(compute_cost(model or "", in_t, out_t)) if model else 0.0
+    except Exception:
+        cost_usd = 0.0
+    _append_llm_call(
+        {
+            "provider": provider,
+            "model": model,
+            "stage": stage or "",
+            "input_tokens": in_t,
+            "output_tokens": out_t,
+            "total_tokens": total_t,
+            "cost_usd": cost_usd,
+        }
+    )
     if not session:
         return payload
     total_delta = total_t if total_t > 0 else (in_t + out_t)

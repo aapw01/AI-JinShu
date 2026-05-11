@@ -623,6 +623,42 @@ def reclaim_stale_running_tasks(db: Session) -> int:
     return reclaimed
 
 
+def _is_budget_hard_stopped(db: Session, *, task: CreationTask) -> bool:
+    """flag-controlled：``cost.budget_enforcement`` 开启时，对 generation /
+    rewrite 这类绑 novel 的任务跑 ``check_budget``；hard_stop → 直接 fail 拦截。"""
+    try:
+        from app.core.feature_flags import is_enabled
+
+        if not is_enabled("cost.budget_enforcement"):
+            return False
+    except Exception:
+        return False
+    if task.task_type not in {"generation", "rewrite", "storyboard"}:
+        return False
+    if task.resource_type != "novel":
+        return False
+    novel_id = int(task.resource_id or 0)
+    if novel_id <= 0:
+        return False
+    try:
+        from app.services.cost.budget import check_budget
+
+        verdict = check_budget(novel_id, db=db)
+    except Exception:
+        # 预算检查本身炸了 ≠ 没超预算。要 *显式* 告警，而不是让 guardrail
+        # 静默关掉。这里走 warning + 计数器；调用方仍返回 False（放行），但
+        # SLO dashboard 应该能立刻看到 "budget guard down" 的脉冲。
+        logger.warning("budget check failed novel=%s", novel_id, exc_info=True)
+        try:
+            from app.core.metrics import budget_guardrail_error_total
+
+            budget_guardrail_error_total.inc(reason="check_failed")
+        except Exception:
+            logger.debug("budget guardrail metric failed", exc_info=True)
+        return False
+    return getattr(verdict, "status", "ok") == "hard_stop"
+
+
 def _reserve_dispatch_batch(
     db: Session, *, user_uuid: str
 ) -> list[DispatchReservation]:
@@ -664,6 +700,18 @@ def _reserve_dispatch_batch(
     )
     dispatched: list[DispatchReservation] = []
     for task in queued:
+        # Cost governance hard-stop（§11）：在改 status 前先看预算。
+        if _is_budget_hard_stopped(db, task=task):
+            transition_task_status(
+                db,
+                task=task,
+                to_status="failed",
+                phase="failed",
+                message="预算硬停",
+                error_code="BUDGET_HARD_STOP",
+                error_category="permanent",
+            )
+            continue
         transition_task_status(
             db,
             task=task,

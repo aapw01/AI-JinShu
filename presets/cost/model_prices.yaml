@@ -1,0 +1,35 @@
+schema_version: 1
+default_currency: usd
+fallback_unknown_model:
+  tier: unknown
+  input_per_1k_tokens_usd: 0.005
+  output_per_1k_tokens_usd: 0.015
+models:
+  gpt-4o:
+    tier: premium
+    input_per_1k_tokens_usd: 0.0025
+    output_per_1k_tokens_usd: 0.010
+  gpt-4o-mini:
+    tier: cheap
+    input_per_1k_tokens_usd: 0.00015
+    output_per_1k_tokens_usd: 0.00060
+  gemini-1.5-flash:
+    tier: cheap
+    input_per_1k_tokens_usd: 0.000075
+    output_per_1k_tokens_usd: 0.0003
+  gemini-1.5-pro:
+    tier: premium
+    input_per_1k_tokens_usd: 0.00125
+    output_per_1k_tokens_usd: 0.005
+  claude-3-5-sonnet:
+    tier: premium
+    input_per_1k_tokens_usd: 0.003
+    output_per_1k_tokens_usd: 0.015
+  claude-3-haiku:
+    tier: cheap
+    input_per_1k_tokens_usd: 0.00025
+    output_per_1k_tokens_usd: 0.00125
+  deepseek-chat:
+    tier: cheap
+    input_per_1k_tokens_usd: 0.00027
+    output_per_1k_tokens_usd: 0.0011
