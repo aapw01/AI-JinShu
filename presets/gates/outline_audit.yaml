@@ -1,0 +1,12 @@
+schema_version: 1
+gates:
+  must_fix_threshold:
+    mode: warn
+    threshold: 1.0
+    metric_label: "outline_audit.must_fix"
+  partial_threshold:
+    mode: warn
+    threshold: 0.3
+    metric_label: "outline_audit.partial_rate"
+overrides:
+  per_novel: {}

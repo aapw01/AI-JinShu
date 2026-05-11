@@ -1,0 +1,14 @@
+schema_version: 1
+gates:
+  anchor_required:
+    mode: strict
+    metric_label: "precision_rewrite.anchor"
+  length_delta_max_ratio:
+    mode: strict
+    threshold: 0.3
+    metric_label: "precision_rewrite.length_delta"
+  forbid_new_characters:
+    mode: strict
+    metric_label: "precision_rewrite.new_chars"
+overrides:
+  per_novel: {}

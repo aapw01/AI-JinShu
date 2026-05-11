@@ -1,0 +1,12 @@
+schema_version: 1
+gates:
+  fluency_min:
+    mode: warn
+    threshold: 0.55
+    metric_label: "reader_lens.fluency"
+  density_min:
+    mode: warn
+    threshold: 0.40
+    metric_label: "reader_lens.density"
+overrides:
+  per_novel: {}

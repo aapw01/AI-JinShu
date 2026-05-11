@@ -1,0 +1,11 @@
+schema_version: 1
+gates:
+  confidence_min_gap:
+    mode: strict
+    threshold: 0.1
+    metric_label: "fact_arbitration.gap"
+  reviewer_must_pass:
+    mode: strict
+    metric_label: "fact_arbitration.reviewer"
+overrides:
+  per_novel: {}

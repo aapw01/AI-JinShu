@@ -2,7 +2,7 @@
 import uuid
 import os
 from datetime import datetime, timezone
-from sqlalchemy import BigInteger, Column, Integer, String, Text, DateTime, ForeignKey, JSON, Float, Index
+from sqlalchemy import BigInteger, Column, Integer, String, Text, DateTime, ForeignKey, JSON, Float, Index, UniqueConstraint
 from pgvector.sqlalchemy import Vector
 
 from app.core.database import Base
@@ -274,6 +274,15 @@ class StoryFact(Base):
     chapter_from = Column(Integer, nullable=False)
     chapter_to = Column(Integer, nullable=True)
     revision = Column(Integer, default=1)
+    # #9 expand fields (alembic 007). Kept nullable + default for backward compat.
+    source_chapter = Column(Integer, nullable=True)
+    source_run_id = Column(String(64), nullable=True)
+    source_kind = Column(String(32), nullable=True, default="extractor")
+    confidence = Column(Float, nullable=True, default=0.5)
+    extractor_model = Column(String(128), nullable=True)
+    verified_chapter = Column(Integer, nullable=True)
+    superseded_by = Column(Integer, nullable=True)
+    is_active = Column(Integer, nullable=True, default=1)  # bool 兼容 SQLite
     created_at = Column(DateTime, default=_utc_now)
     updated_at = Column(DateTime, default=_utc_now, onupdate=_utc_now)
 
@@ -312,6 +321,14 @@ class StoryForeshadow(Base):
     resolved_chapter = Column(Integer, nullable=True)
     state = Column(String(32), default="planted")  # planted, resolved, expired
     payload = Column(JSON, default=dict)
+    # #6 lifecycle extension (alembic 008). All additive + nullable.
+    lifecycle_state = Column(String(16), nullable=True, default="planned")
+    plant_chapter = Column(Integer, nullable=True)
+    payoff_chapter = Column(Integer, nullable=True)
+    plant_anchor = Column(JSON, nullable=True)
+    payoff_anchor = Column(JSON, nullable=True)
+    match_confidence = Column(Float, nullable=True)
+    match_method = Column(String(16), nullable=True)
     created_at = Column(DateTime, default=_utc_now)
     updated_at = Column(DateTime, default=_utc_now, onupdate=_utc_now)
 
@@ -658,3 +675,230 @@ Index(
     StoryRelation.target,
     unique=True,
 )
+
+
+class AgentEvent(Base):
+    """Unified agent event log for decisions / failures / patches.
+
+    Phase 0 baseline (see docs/agent-engineering-roadmap.md §4.1).
+    All agent decisions, failures, retries, and patch attempts go here so the
+    front-end panel, alerting, and regression baselines can read from a single
+    source. High-cardinality fields like novel_id / task_id stay as columns;
+    metric labels in Prometheus must use bucket-only dimensions (see §4.1
+    "基数控制").
+    """
+
+    __tablename__ = "agent_events"
+
+    # SQLite 不会自动 autoincrement BIGINT 主键；用 with_variant 在 SQLite 测试库
+    # 退化到 INTEGER（rowid 自动递增），PG 生产侧仍为 BIGSERIAL。
+    id = Column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    trace_id = Column(String(64), nullable=True)
+    novel_id = Column(Integer, ForeignKey("novels.id", ondelete="CASCADE"), nullable=False)
+    novel_version_id = Column(
+        Integer, ForeignKey("novel_versions.id", ondelete="CASCADE"), nullable=True
+    )
+    task_id = Column(String(255), nullable=True)
+    chapter_num = Column(Integer, nullable=True)
+    agent_name = Column(String(64), nullable=False)
+    event_type = Column(String(64), nullable=False)
+    verdict = Column(String(32), nullable=True)
+    error_code = Column(String(64), nullable=True)
+    error_category = Column(String(32), nullable=True)
+    duration_ms = Column(Integer, nullable=True)
+    input_tokens = Column(Integer, nullable=True)
+    output_tokens = Column(Integer, nullable=True)
+    payload = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=_utc_now)
+
+
+Index(
+    "idx_agent_events_novel_chapter_time",
+    AgentEvent.novel_id,
+    AgentEvent.chapter_num,
+    AgentEvent.created_at,
+)
+Index(
+    "idx_agent_events_agent_event_time",
+    AgentEvent.agent_name,
+    AgentEvent.event_type,
+    AgentEvent.created_at,
+)
+Index("idx_agent_events_trace", AgentEvent.trace_id)
+Index("idx_agent_events_task", AgentEvent.task_id)
+
+
+class FlagAuditLog(Base):
+    """Audit trail for feature flag toggles (see §4.2.1)."""
+
+    __tablename__ = "flag_audit_log"
+
+    id = Column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    flag_name = Column(String(128), nullable=False)
+    changed_by = Column(String(128), nullable=False)
+    before_state = Column(JSON, default=dict)
+    after_state = Column(JSON, default=dict)
+    reason = Column(Text, nullable=True)
+    changed_at = Column(DateTime, default=_utc_now)
+
+
+Index("idx_flag_audit_log_flag_time", FlagAuditLog.flag_name, FlagAuditLog.changed_at)
+
+
+class FactExtractionFailure(Base):
+    """Persistent fact extractor failure for self-heal pipeline (#11)."""
+
+    __tablename__ = "fact_extraction_failures"
+
+    id = Column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    novel_id = Column(Integer, ForeignKey("novels.id", ondelete="CASCADE"), nullable=False)
+    novel_version_id = Column(
+        Integer, ForeignKey("novel_versions.id", ondelete="CASCADE"), nullable=True
+    )
+    chapter_num = Column(Integer, nullable=False)
+    run_id = Column(String(64), nullable=True)
+    failure_kind = Column(String(32), nullable=False)  # llm_error|parse_error|schema_violation|timeout
+    error_payload = Column(JSON, default=dict)
+    retry_count = Column(Integer, nullable=False, default=0)
+    status = Column(String(16), nullable=False, default="pending")  # pending|retried|recovered|escalated
+    schema_version = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime, default=_utc_now)
+    updated_at = Column(DateTime, default=_utc_now, onupdate=_utc_now)
+
+
+Index(
+    "idx_fact_extraction_failures_status",
+    FactExtractionFailure.status,
+    FactExtractionFailure.updated_at,
+)
+Index("idx_story_facts_entity_active", StoryFact.entity_id, StoryFact.is_active)
+
+
+class CVPromotionState(Base):
+    """Continuous Verification per-flag promotion phase tracker (§4.7)."""
+
+    __tablename__ = "cv_promotion_state"
+
+    id = Column(
+        BigInteger().with_variant(Integer, "sqlite"),
+        primary_key=True,
+        autoincrement=True,
+    )
+    flag_name = Column(String(128), nullable=False, unique=True)
+    phase = Column(String(32), nullable=False)
+    baseline_at = Column(DateTime, nullable=True)
+    current_canary_pct = Column(Integer, nullable=False, default=0)
+    last_check_at = Column(DateTime, nullable=True)
+    verdict = Column(String(32), nullable=True)
+    payload = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=_utc_now)
+    updated_at = Column(DateTime, default=_utc_now, onupdate=_utc_now)
+
+
+Index(
+    "idx_cv_promotion_state_phase",
+    CVPromotionState.phase,
+    CVPromotionState.last_check_at,
+)
+
+
+class AliasRegistry(Base):
+    """Character alias registry for #2 NER precision."""
+
+    __tablename__ = "alias_registry"
+
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    novel_version_id = Column(Integer, ForeignKey("novel_versions.id", ondelete="CASCADE"), nullable=False)
+    character_key = Column(String(64), nullable=False)
+    alias = Column(String(255), nullable=False)
+    alias_type = Column(String(32), nullable=False, default="surface")  # surface|nickname|title|honorific
+    priority = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=_utc_now)
+
+    __table_args__ = (
+        UniqueConstraint("novel_version_id", "alias", name="uq_alias_registry_alias"),
+    )
+
+
+Index("idx_alias_registry_char", AliasRegistry.novel_version_id, AliasRegistry.character_key)
+
+
+class SpacetimeAnchorRow(Base):
+    """Per-chapter spacetime anchor (#4)."""
+
+    __tablename__ = "spacetime_anchors"
+
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    novel_version_id = Column(Integer, ForeignKey("novel_versions.id", ondelete="CASCADE"), nullable=False)
+    chapter_num = Column(Integer, nullable=False)
+    when_text = Column(String(255), nullable=True)
+    where_text = Column(String(255), nullable=True)
+    who_keys = Column(JSON, default=list)
+    duration_minutes = Column(Integer, nullable=True)
+    relative_to_prev = Column(String(16), nullable=True)
+    payload = Column(JSON, default=dict)
+    schema_version = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime, default=_utc_now)
+
+
+class VoiceFingerprintRow(Base):
+    """Character voice fingerprint (#5)."""
+
+    __tablename__ = "voice_fingerprints"
+
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    novel_version_id = Column(Integer, ForeignKey("novel_versions.id", ondelete="CASCADE"), nullable=False)
+    character_key = Column(String(64), nullable=False)
+    avg_sentence_len = Column(Float, nullable=False, default=0.0)
+    formality_score = Column(Float, nullable=False, default=0.5)
+    register = Column(String(16), nullable=False, default="neutral")
+    sample_chapter_from = Column(Integer, nullable=True)
+    sample_chapter_to = Column(Integer, nullable=True)
+    payload = Column(JSON, default=dict)
+    schema_version = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime, default=_utc_now)
+    updated_at = Column(DateTime, default=_utc_now, onupdate=_utc_now)
+
+
+class OutlineAuditReportRow(Base):
+    """Per-chapter outline audit verdict (#7)."""
+
+    __tablename__ = "outline_audit_reports"
+
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    novel_version_id = Column(Integer, ForeignKey("novel_versions.id", ondelete="CASCADE"), nullable=False)
+    chapter_num = Column(Integer, nullable=False)
+    must_fix_count = Column(Integer, nullable=False, default=0)
+    partial_rate = Column(Float, nullable=False, default=0.0)
+    payload = Column(JSON, default=dict)
+    schema_version = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime, default=_utc_now)
+
+
+class ReaderLensReportRow(Base):
+    """Per-chapter reader-lens evaluation (#12)."""
+
+    __tablename__ = "reader_lens_reports"
+
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, autoincrement=True)
+    novel_version_id = Column(Integer, ForeignKey("novel_versions.id", ondelete="CASCADE"), nullable=False)
+    chapter_num = Column(Integer, nullable=False)
+    first_read_fluency = Column(Float, nullable=False, default=0.0)
+    info_density = Column(Float, nullable=False, default=0.0)
+    missing_setups = Column(JSON, default=list)
+    model = Column(String(128), nullable=False, default="")
+    sampled_at_chapter = Column(Integer, nullable=False)
+    schema_version = Column(Integer, nullable=False, default=1)
+    created_at = Column(DateTime, default=_utc_now)

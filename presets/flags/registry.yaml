@@ -1,0 +1,109 @@
+# Feature Flag Registry — GitOps source-of-truth (Phase 0 §4.2).
+#
+# 这份文件覆盖 §4.2 表格里的全部 14 条改造 flag。CODEOWNERS 应守整个
+# `presets/flags/` 路径，所有 flag toggle 都必须 PR review。
+#
+# 同步：`app/tasks/feature_flags.py:flag_yaml_sync_task` 周期把这里的状态
+# 推到 DB 副本（`system_settings.flag.*`）。`cv_watchdog` 自动回滚后会反向
+# 开 PR 同步回 yaml，闭环。
+#
+# 如某 flag 需要独立审计或更复杂元字段，可拆成 `presets/flags/<name>.yaml`，
+# 同步任务先读单文件再读 registry，单文件优先。
+
+schema_version: 1
+
+flags:
+  consistency.blocker_hard_gate:
+    enabled: false
+    rollout_pct: 0
+    novel_allowlist: []
+    owner: team:generation-pipeline
+    purpose: "#1 一致性 blocker 硬门控 + outline_revise 自修复回路"
+  consistency.alias_registry_v1:
+    enabled: false
+    rollout_pct: 0
+    novel_allowlist: []
+    owner: team:generation-pipeline
+    purpose: "#2 中文实体识别精度（alias_registry 替代 NER）"
+  memory.volume_brief_distill:
+    enabled: false
+    rollout_pct: 0
+    novel_allowlist: []
+    owner: team:memory
+    purpose: "#3a 卷级摘要 LLM 蒸馏（替代字符截断）"
+  memory.hybrid_search:
+    enabled: false
+    rollout_pct: 0
+    novel_allowlist: []
+    owner: team:memory
+    purpose: "#3b 混合检索（dense + BM25 + RRF 融合）"
+  memory.cross_encoder_rerank:
+    enabled: false
+    rollout_pct: 0
+    novel_allowlist: []
+    owner: team:memory
+    purpose: "#3c cross-encoder 重排"
+    depends_on:
+      - memory.hybrid_search
+  consistency.spacetime_v1:
+    enabled: false
+    rollout_pct: 0
+    novel_allowlist: []
+    owner: team:generation-pipeline
+    purpose: "#4 时空五元组建模"
+  quality.voice_drift_audit:
+    enabled: false
+    rollout_pct: 0
+    novel_allowlist: []
+    owner: team:quality
+    purpose: "#5 角色声纹漂移离线巡检"
+  consistency.foreshadow_lifecycle_v1:
+    enabled: false
+    rollout_pct: 0
+    novel_allowlist: []
+    owner: team:generation-pipeline
+    purpose: "#6 伏笔生命周期 + 语义匹配"
+  quality.outline_promise_audit:
+    enabled: false
+    rollout_pct: 0
+    novel_allowlist: []
+    owner: team:quality
+    purpose: "#7 Outline 兑现度审计"
+  repair.precision_rewrite:
+    enabled: false
+    rollout_pct: 0
+    novel_allowlist: []
+    owner: team:generation-pipeline
+    purpose: "#8 段落级局部修订（替代整章重写）"
+  memory.fact_arbitration_v1:
+    enabled: false
+    rollout_pct: 0
+    novel_allowlist: []
+    owner: team:memory
+    purpose: "#9 事实置信度 + 溯源 + 仲裁"
+  memory.context_embedding_score:
+    enabled: false
+    rollout_pct: 0
+    novel_allowlist: []
+    owner: team:memory
+    purpose: "#10 上下文选择器：embedding 评分保守升级"
+    depends_on:
+      - memory.cross_encoder_rerank
+  extractor.self_heal:
+    enabled: false
+    rollout_pct: 0
+    novel_allowlist: []
+    owner: team:memory
+    purpose: "#11 FactExtractor 失败自愈"
+  quality.reader_lens_audit:
+    enabled: false
+    rollout_pct: 0
+    novel_allowlist: []
+    owner: team:quality
+    purpose: "#12 读者视角离线评估"
+  cost.budget_enforcement:
+    enabled: false
+    rollout_pct: 0
+    novel_allowlist: []
+    owner: team:platform
+    purpose: "§11 Cost Governance: scheduler 分发前强制 check_budget"

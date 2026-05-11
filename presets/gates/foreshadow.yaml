@@ -1,0 +1,12 @@
+schema_version: 1
+gates:
+  payoff_match_strict:
+    mode: warn
+    threshold: 0.7
+    metric_label: "foreshadow.payoff_match"
+  unplanted_overdue:
+    mode: warn
+    threshold: 5.0
+    metric_label: "foreshadow.unplanted_overdue"
+overrides:
+  per_novel: {}

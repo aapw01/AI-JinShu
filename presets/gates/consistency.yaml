@@ -1,0 +1,20 @@
+schema_version: 1
+gates:
+  character_existence:
+    mode: strict
+    max_outline_revise: 2
+    downgrade_to: warn
+    metric_label: "consistency.character_existence"
+  hard_constraint:
+    mode: strict
+    max_outline_revise: 2
+    downgrade_to: save_blocked
+    metric_label: "consistency.hard_constraint"
+  foreshadow_unplanted:
+    mode: warn
+    metric_label: "consistency.foreshadow_unplanted"
+  timeline_jump:
+    mode: warn
+    metric_label: "consistency.timeline_jump"
+overrides:
+  per_novel: {}
