@@ -19,6 +19,29 @@ _NAME_EXCLUDE = frozenset(
     {"可以", "已经", "不是", "这个", "那个", "什么", "怎么", "等等", "因为", "所以", "如果", "但是"}
 )
 
+# Payoff 匹配用的中文 token 停用词。这里的目标是过滤"两边都会出现的虚词/常用动名"，
+# 让 token IoU 真正反映"事件 / 人物 / 物件"层面的重叠，而不是"了 / 的 / 不过 / 之后"这种
+# 噪声。停用词和上面的 _NAME_EXCLUDE 是两个语境，刻意分开维护。
+_PAYOFF_STOPWORDS = frozenset(
+    {
+        # 高频虚词 / 助词 / 副词（中文 2-3 字）
+        "已经", "可以", "不是", "这个", "那个", "什么", "怎么", "等等", "因为",
+        "所以", "如果", "但是", "然后", "之后", "之前", "终于", "应该", "或许",
+        "似乎", "好像", "依旧", "仍然", "其实", "其中", "于是", "其后", "也许",
+        "可能", "竟然", "突然", "立刻", "马上", "依然", "并且", "而且", "虽然",
+        "只是", "正是", "便是", "便会", "便要", "继续", "开始", "出来", "上去",
+        "下去", "起来", "回来", "过来", "过去", "之后", "如今", "此时", "此刻",
+        "那时", "顿时", "随后", "随即", "之后", "原来",
+        # 章节大纲常见叙述动词
+        "决定", "想要", "打算", "知道", "意识", "发现", "出现", "看到", "看见",
+        "感到", "觉得", "明白", "得到", "回到",
+    }
+)
+
+_PAYOFF_LATIN_RE = re.compile(r"[A-Za-z0-9_]{2,}")
+_PAYOFF_CHINESE_RUN_RE = re.compile(r"[\u4e00-\u9fff]+")
+_PAYOFF_ID_RE = re.compile(r"[A-Z]-\d+")
+
 _NAME_CONTEXT_PATTERNS = [
     r"([\u4e00-\u9fff]{2,4})[说道问答喝叫嗤冷哼]",
     r"([\u4e00-\u9fff]{2,4})[看望转瞥盯扫]向",
@@ -225,28 +248,67 @@ def _check_entity_hard_constraints(
     chapter_num: int,
 ) -> None:
     """Generic entity hard-constraint validation from constraint registry."""
-    constraints = context.get("hard_constraints") or {}
-    registry = constraints.get("entity_hard_constraints") or []
-    if not isinstance(registry, list) or not registry:
-        return
     outline_text = (outline.get("outline") or "") + (outline.get("title") or "") + (outline.get("summary") or "")
+    for violation in detect_entity_constraint_violations(text=outline_text, context=context):
+        report.issues.append(
+            ConsistencyIssue(
+                "blocker",
+                "character",
+                violation["message"],
+                chapter_num,
+            )
+        )
+
+
+def detect_forbidden_character_violations(*, text: str, context: dict) -> list[dict]:
+    """检测 hard_constraints.forbidden_characters 在任意文本上的命中。"""
+    if not text:
+        return []
+    constraints = (context or {}).get("hard_constraints") or {}
+    forbidden_chars = constraints.get("forbidden_characters") or []
+    if not isinstance(forbidden_chars, list):
+        return []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for raw in forbidden_chars:
+        name = str(raw or "").strip()
+        if name and name not in seen and name in text:
+            seen.add(name)
+            out.append(
+                {
+                    "entity": name,
+                    "constraint_type": "forbidden_characters",
+                    "matched_pattern": name,
+                    "message": f"硬约束冲突：角色「{name}」已在 Story Bible 标记为不可出场",
+                }
+            )
+    return out
+
+
+def detect_entity_constraint_violations(*, text: str, context: dict) -> list[dict]:
+    """检测 hard_constraints.entity_hard_constraints 注册表在任意文本上的命中。"""
+    if not text:
+        return []
+    constraints = (context or {}).get("hard_constraints") or {}
+    registry = constraints.get("entity_hard_constraints") or []
+    if not isinstance(registry, list):
+        return []
+    out: list[dict] = []
     for item in registry[:60]:
         if not isinstance(item, dict):
             continue
         entity = str(item.get("entity") or "").strip()
-        if not entity:
-            continue
-        if entity not in outline_text:
+        if not entity or entity not in text:
             continue
         ctype = str(item.get("constraint_type") or "").strip()
         if ctype == "forbidden_presence":
-            report.issues.append(
-                ConsistencyIssue(
-                    "blocker",
-                    "character",
-                    f"硬约束冲突：角色「{entity}」不应在本章正常出场",
-                    chapter_num,
-                )
+            out.append(
+                {
+                    "entity": entity,
+                    "constraint_type": "forbidden_presence",
+                    "matched_pattern": entity,
+                    "message": f"硬约束冲突：角色「{entity}」不应在本章正常出场",
+                }
             )
             continue
         forbidden_patterns = item.get("forbidden_patterns") or []
@@ -254,16 +316,100 @@ def _check_entity_hard_constraints(
             continue
         for pattern in forbidden_patterns[:12]:
             token = str(pattern).strip()
-            if token and token in outline_text:
-                report.issues.append(
-                    ConsistencyIssue(
-                        "blocker",
-                        "character",
-                        f"硬约束冲突：角色「{entity}」触发限制动作「{token}」",
-                        chapter_num,
-                    )
+            if token and token in text:
+                out.append(
+                    {
+                        "entity": entity,
+                        "constraint_type": ctype or "forbidden_action_pattern",
+                        "matched_pattern": token,
+                        "message": f"硬约束冲突：角色「{entity}」触发限制动作「{token}」",
+                    }
                 )
                 break
+    return out
+
+
+def detect_hard_constraint_violations(*, text: str, context: dict) -> list[dict]:
+    """对任意文本（大纲或正文）执行硬约束检测，返回结构化违规列表。
+
+    复用同一份规则给 pre-write（大纲）和 post-write（正文草稿），
+    避免 writer "听不见" pre-write blocker 的漏洞。
+
+    返回的每个 dict 包含：entity / constraint_type / message / matched_pattern。
+    """
+    return (
+        detect_forbidden_character_violations(text=text, context=context)
+        + detect_entity_constraint_violations(text=text, context=context)
+    )
+
+
+def _payoff_tokens(text: str) -> set[str]:
+    """提取 payoff / planted 比较时使用的关键词 token，过滤掉常见停用词。
+
+    中文采用滑动 2-3 字 n-gram，而不是非重叠 greedy 切分。原因是中文 outline
+    经常在改写后用不同的句法结构包裹相同的人物 / 物件 / 关键动词，非重叠切分
+    会让两段相同语义的文本几乎没有共同 token；2-3 字滑窗能稳定捕获人名、
+    短语和固定搭配。
+    """
+    if not text:
+        return set()
+    tokens: set[str] = set()
+    for tok in _PAYOFF_LATIN_RE.findall(text):
+        if tok and tok not in _PAYOFF_STOPWORDS:
+            tokens.add(tok)
+    for run in _PAYOFF_CHINESE_RUN_RE.findall(text):
+        for n in (2, 3):
+            if len(run) < n:
+                continue
+            for index in range(0, len(run) - n + 1):
+                gram = run[index : index + n]
+                if gram in _PAYOFF_STOPWORDS or gram in _NAME_EXCLUDE:
+                    continue
+                tokens.add(gram)
+    return tokens
+
+
+def _payoff_relates_to_planted(payoff: str, planted: str) -> bool:
+    """判断 payoff 是否与某条已埋设伏笔在语义上有关联。
+
+    采用三段式 OR 判定（任一通过即视作关联），而非脆弱的 substring：
+
+    1. 直接 substring 命中（保留旧行为，处理 outline 几乎抄写的情况）。
+    2. 编号 / 英数标识符（如 F-001、Token-A1）任意一边出现且交集非空。
+    3. 去停用词后的 token Jaccard 相似度 ≥ 0.34（中文 2-4 字 token 比较稳健）。
+
+    任何一条命中即返回 True；都不命中才视为"未关联"。
+    """
+    if not payoff or not planted:
+        return False
+    if payoff in planted or planted in payoff:
+        return True
+    payoff_low = payoff.lower()
+    planted_low = planted.lower()
+    if payoff_low in planted_low or planted_low in payoff_low:
+        return True
+
+    payoff_ids = set(_PAYOFF_ID_RE.findall(payoff))
+    planted_ids = set(_PAYOFF_ID_RE.findall(planted))
+    if payoff_ids and planted_ids and (payoff_ids & planted_ids):
+        return True
+
+    payoff_tokens = _payoff_tokens(payoff)
+    planted_tokens = _payoff_tokens(planted)
+    if not payoff_tokens or not planted_tokens:
+        return False
+    overlap = payoff_tokens & planted_tokens
+    union = payoff_tokens | planted_tokens
+    if not union:
+        return False
+    jaccard = len(overlap) / len(union)
+    if jaccard >= 0.34:
+        return True
+    # 在重叠较多但 union 也较大的长 outline 场景下，给一个绝对计数补丁，
+    # 避免 IoU 因 union 体量被稀释。
+    if len(overlap) >= 3:
+        return True
+    return False
 
 
 def _check_foreshadowing_continuity(
@@ -302,7 +448,7 @@ def _check_foreshadowing_continuity(
     spec = prewrite.get("specification") or prewrite.get("spec") or {}
     foreshadow_list = spec.get("foreshadowing") or []
     if isinstance(foreshadow_list, list):
-        for fid in re.findall(r"[A-Z]-\d+", payoff):
+        for fid in _PAYOFF_ID_RE.findall(payoff):
             for f in foreshadow_list:
                 if isinstance(f, dict) and f.get("id") == fid:
                     plant_ch = f.get("plant_chapter")
@@ -317,15 +463,15 @@ def _check_foreshadowing_continuity(
                         )
                         return
 
-    # Check if payoff references any planted content (substring match)
+    # Check if payoff is related to any planted foreshadowing.
+    # 早期版本只做 substring，导致 outline 改写措辞就告警；改为多信号 OR
+    # 判定（substring + 编号 + 关键词 Jaccard），降低误报率。
     planted_texts = [str(a.get("foreshadowing", "")) for a in active if a.get("foreshadowing")]
     if planted_texts:
-        payoff_lower = payoff.lower()
-        any_match = any(pt and (pt in payoff or payoff_lower in pt.lower()) for pt in planted_texts)
+        any_match = any(_payoff_relates_to_planted(payoff, pt) for pt in planted_texts if pt)
         if not any_match and len(payoff) > 10:
-            # Downgraded to warning: substring matching between outline texts is
-            # too unreliable for a hard block (paraphrasing or slight wording
-            # differences cause false positives).
+            # Downgraded to warning: even with multi-signal matching, outline
+            # paraphrasing can still produce false negatives, so we never block.
             report.issues.append(
                 ConsistencyIssue(
                     "warning",

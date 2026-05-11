@@ -5,6 +5,7 @@ from app.services.generation.consistency import (
     _check_entity_hard_constraints,
     _check_progression_conflicts,
     _check_transition_conflicts,
+    _payoff_relates_to_planted,
 )
 
 
@@ -92,3 +93,38 @@ def test_transition_conflict_blocks_impossible_scene_reset():
     _check_transition_conflicts(report, outline, context, chapter_num=19)
     assert report.blockers
     assert any("缺少过渡" in issue.message for issue in report.blockers)
+
+
+# ---------------------------------------------------------------------------
+# _payoff_relates_to_planted: 多信号匹配
+# 旧实现只有 substring，措辞稍改就误报；以下用例覆盖三种正向信号 + 一种反例。
+# ---------------------------------------------------------------------------
+
+def test_payoff_matches_planted_when_substring_overlaps():
+    assert _payoff_relates_to_planted(
+        payoff="主角揭穿黑石令的真正主人",
+        planted="黑石令的真正主人在朝堂之内",
+    )
+
+
+def test_payoff_matches_planted_when_id_token_shared():
+    assert _payoff_relates_to_planted(
+        payoff="终于回收 F-007，主角拿到铁券",
+        planted="F-007: 主角在第3章捡到的半枚铁券",
+    )
+
+
+def test_payoff_matches_planted_via_keyword_jaccard():
+    # 措辞完全不同，但人物 + 关键道具 + 关键动作三者重叠，应被视为关联。
+    assert _payoff_relates_to_planted(
+        payoff="林霜在玉清宫将断玉拼合，揭示母亲遗书的下落",
+        planted="林霜母亲留下的断玉与遗书藏在玉清宫深处",
+    )
+
+
+def test_payoff_does_not_match_unrelated_planted():
+    # 完全无关的两件事，不应被多信号匹配误判为有关。
+    assert not _payoff_relates_to_planted(
+        payoff="主角与北疆使团达成秘密盟约",
+        planted="厨房里的灶神像在第二章被打碎",
+    )

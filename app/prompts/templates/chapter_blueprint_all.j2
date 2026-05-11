@@ -48,7 +48,21 @@
       "opening_scene": "本章开篇主场景",
       "opening_character_positions": ["角色A在何处", "角色B在何处"],
       "opening_time_state": "开篇时间状态，例如当晚/次日/半小时后",
-      "transition_mode": "direct/time_skip/location_shift/aftermath/investigation_followup"
+      "transition_mode": "direct | continuous | jump | flashback",
+      "character_aliases": [
+        {"canonical": "主角名", "aliases": ["昵称", "尊称"]}
+      ],
+      "spacetime_hint": {
+        "place": "本章主场景所在地点",
+        "time_of_day": "时辰/时段",
+        "weather": "天气",
+        "prev_anchor": "上一章末尾的地点+时间短语，首章留空字符串"
+      }
     }
   ]
 }
+
+【强约束】
+1. ``character_aliases``：列出本章会出现的所有具名角色及其别称；不在前文出现过的新角色不得塞入 aliases。
+2. ``spacetime_hint.prev_anchor``：必须复述上一章结尾的"地点+时间"，首章/无上文留空字符串。
+3. ``transition_mode``：**只能填 ``direct``/``continuous``/``jump``/``flashback`` 之一**，不确定时留空 ``""``。语义：``direct``=直接切入；``continuous``=承接上章末尾；``jump``=时间或地点跳跃；``flashback``=回忆/倒叙。**禁止使用 ``time_skip``/``location_shift``/``aftermath``/``investigation_followup`` 等其他值**——会被下游 Pydantic 校验拒绝。

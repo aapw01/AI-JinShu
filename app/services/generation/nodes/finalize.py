@@ -673,6 +673,23 @@ def node_finalize(state: GenerationState) -> GenerationState:
     finally:
         db.close()
 
+    # Post-chapter audit hooks（§A 主路径接线 / 默认 swallow，绝不阻塞主流程）
+    try:
+        from app.services.generation.post_chapter_hooks import (
+            run_post_chapter_hooks,
+        )
+
+        run_post_chapter_hooks(
+            novel_id=int(state["novel_id"]),
+            novel_version_id=state.get("novel_version_id"),
+            chapter_num=int(chapter_num),
+            chapter_text=final_content,
+            chapter_summary=summary_text,
+            outline=state.get("outline") or {},
+        )
+    except Exception:
+        logger.exception("post_chapter_hooks failed (chapter=%s)", chapter_num)
+
     usage = snapshot_usage()
     total_input_tokens = int(
         usage.get("input_tokens") or state["total_input_tokens"] or 0

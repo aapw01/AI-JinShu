@@ -41,6 +41,33 @@ def setup_db():
         TEST_DB.unlink()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_runtime_flags():
+    """Test 间清空 feature flag DB 行 + 缓存（避免 set_flag 跨测试污染）。"""
+    from app.core.feature_flags import invalidate_flags_cache
+    from app.models.novel import SystemRuntimeSetting
+
+    db = SessionLocal()
+    try:
+        db.query(SystemRuntimeSetting).filter(
+            SystemRuntimeSetting.setting_key.like("flag.%")
+        ).delete(synchronize_session=False)
+        db.commit()
+    finally:
+        db.close()
+    invalidate_flags_cache()
+    yield
+    db = SessionLocal()
+    try:
+        db.query(SystemRuntimeSetting).filter(
+            SystemRuntimeSetting.setting_key.like("flag.%")
+        ).delete(synchronize_session=False)
+        db.commit()
+    finally:
+        db.close()
+    invalidate_flags_cache()
+
+
 @pytest.fixture
 def client():
     ensure_test_user("test-admin-user", role="admin")

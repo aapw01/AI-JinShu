@@ -116,7 +116,7 @@ def normalize_outline_contract(outline: dict[str, Any] | None, chapter_num: int)
     hook = _clean_text(data.get("hook"))
     summary = _clean_text(data.get("summary"))
     role = _clean_text(data.get("role"))
-    transition_mode = _clean_text(data.get("transition_mode")) or "direct"
+    transition_mode = _coerce_transition_mode(data.get("transition_mode"))
     opening_scene = _clean_text(data.get("opening_scene"))
     if not opening_scene:
         opening_scene = _clean_text(data.get("title")) or f"第{chapter_num}章开场"
@@ -151,8 +151,101 @@ def normalize_outline_contract(outline: dict[str, Any] | None, chapter_num: int)
         "opening_character_positions": _string_list(data.get("opening_character_positions"))[:6],
         "opening_time_state": _clean_text(data.get("opening_time_state"))[:120],
         "transition_mode": transition_mode[:80],
+        # B 强约束新字段：alias 来源 + spacetime hint 来源
+        "character_aliases": _normalize_character_aliases(data.get("character_aliases")),
+        "spacetime_hint": _normalize_spacetime_hint(data.get("spacetime_hint")),
     }
     return {**data, **contract}
+
+
+# OutlineContract Literal 集合（必须与 contracts/outline.py 同步）
+_TRANSITION_MODE_WHITELIST: frozenset[str] = frozenset(
+    {"direct", "continuous", "jump", "flashback", ""}
+)
+# LLM 历史上常输出但不被 schema 接受的别名 → 收敛到合法值
+_TRANSITION_MODE_ALIAS: dict[str, str] = {
+    "cut": "direct",
+    "time_skip": "jump",
+    "time-skip": "jump",
+    "timeskip": "jump",
+    "location_shift": "jump",
+    "location-shift": "jump",
+    "scene_change": "jump",
+    "aftermath": "continuous",
+    "investigation_followup": "continuous",
+    "follow_up": "continuous",
+    "followup": "continuous",
+    "callback": "flashback",
+    "memory": "flashback",
+    "recall": "flashback",
+}
+
+
+def _coerce_transition_mode(value: Any) -> str:
+    """把 LLM 输出的 transition_mode 收敛到 ``OutlineContract`` 允许的 Literal。
+
+    任何无法识别的值默认 ``"direct"``（之前默认值）—— 这样既不会触发下游
+    Pydantic ValidationError，也尽量保留 LLM 表达的"直接切入"意图。
+    """
+    raw = _clean_text(value).lower()
+    if not raw:
+        return "direct"
+    if raw in _TRANSITION_MODE_WHITELIST:
+        return raw
+    return _TRANSITION_MODE_ALIAS.get(raw, "direct")
+
+
+def _normalize_character_aliases(value: Any) -> list[dict[str, Any]]:
+    """归一化 ``character_aliases``。
+
+    LLM 可能输出：
+      - ``[{"canonical": "X", "aliases": ["a", "b"]}]``
+      - ``{"X": ["a", "b"]}``  →  转成上面那种
+      - ``["a", "b"]``         →  无 canonical 直接丢弃
+      - ``None`` / 其他         →  ``[]``
+    """
+    items: list[dict[str, Any]] = []
+    if isinstance(value, dict):
+        for canonical, aliases in value.items():
+            if not isinstance(canonical, str) or not canonical.strip():
+                continue
+            alias_list = aliases if isinstance(aliases, list) else []
+            items.append(
+                {
+                    "canonical": canonical.strip(),
+                    "aliases": [str(a).strip() for a in alias_list if str(a).strip()],
+                }
+            )
+    elif isinstance(value, list):
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            canonical = item.get("canonical")
+            aliases = item.get("aliases") or []
+            if not isinstance(canonical, str) or not canonical.strip():
+                continue
+            if not isinstance(aliases, list):
+                aliases = []
+            items.append(
+                {
+                    "canonical": canonical.strip(),
+                    "aliases": [
+                        str(a).strip() for a in aliases if isinstance(a, str) and a.strip()
+                    ],
+                }
+            )
+    return items[:32]
+
+
+def _normalize_spacetime_hint(value: Any) -> dict[str, str]:
+    """归一化 ``spacetime_hint`` ← 始终输出 4 个 key 的字典（缺失给空串）。"""
+    src = value if isinstance(value, dict) else {}
+    return {
+        "place": _clean_text(src.get("place"))[:80],
+        "time_of_day": _clean_text(src.get("time_of_day"))[:40],
+        "weather": _clean_text(src.get("weather"))[:40],
+        "prev_anchor": _clean_text(src.get("prev_anchor"))[:120],
+    }
 
 
 class ProgressionMemoryManager:

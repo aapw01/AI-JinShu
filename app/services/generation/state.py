@@ -86,6 +86,7 @@ class GenerationState(TypedDict, total=False):
     closure_state: dict[str, Any]
     retry_resume_chapter: int
     consistency_soft_fail: bool
+    consistency_revise_attempts: int  # #1 outline revise loop counter
     tail_rewrite_attempts: int
     bridge_attempts: int
     low_progress_streak: int

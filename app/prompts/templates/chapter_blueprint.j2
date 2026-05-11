@@ -39,6 +39,20 @@
   "opening_scene": "开篇场景",
   "opening_character_positions": ["角色位置/站位"],
   "opening_time_state": "开篇时间状态",
-  "transition_mode": "direct/cut/time_skip/aftermath"
+  "transition_mode": "direct | continuous | jump | flashback",
+  "character_aliases": [
+    {"canonical": "李白", "aliases": ["谪仙人", "李太白"]}
+  ],
+  "spacetime_hint": {
+    "place": "破庙·后院",
+    "time_of_day": "戌时",
+    "weather": "雨",
+    "prev_anchor": "上一章末尾在城南客栈"
+  }
 }
+
+【强约束】
+1. ``character_aliases``：列出本章会出现的所有具名角色及其别称（含尊称、亲昵称呼、官名、外号），缺省时空数组。**不允许把不在前文出现过的新角色塞进 aliases**。
+2. ``spacetime_hint.prev_anchor``：必须复述上一章结尾的"地点 + 时间"短语；若是首章/无上文，留空字符串。
+3. ``transition_mode``：**只能填 ``direct``/``continuous``/``jump``/``flashback`` 之一**，不确定时留空字符串 ``""``。语义：``direct``=直接切到新场景；``continuous``=从上章末尾连续推进；``jump``=时间或地点跳跃；``flashback``=回忆/倒叙。**禁止使用 ``cut``/``time_skip``/``aftermath`` 等其他值**——会被下游 Pydantic 校验拒绝。
 </output_schema>

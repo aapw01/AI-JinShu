@@ -171,7 +171,9 @@ def test_upsert_chapter_outline_persists_progression_contract_fields():
             )
         ).scalar_one()
         assert row.metadata_["chapter_objective"] == "发现幕后黑手的关键证据"
-        assert row.metadata_["transition_mode"] == "aftermath"
+        # transition_mode 现在被收敛到 OutlineContract Literal 集合：
+        # ``aftermath`` (旧 LLM 别名) → ``continuous``（语义保留）
+        assert row.metadata_["transition_mode"] == "continuous"
         assert row.metadata_["opening_scene"] == "深夜旧宅门口"
         assert row.metadata_["forbidden_repeats"] == ["重复强调证据很重要但不行动"]
         assert normalized["required_new_information"] == ["旧宅密室里藏有父亲留下的账册"]

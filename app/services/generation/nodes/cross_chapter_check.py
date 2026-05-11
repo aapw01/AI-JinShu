@@ -6,6 +6,7 @@ import logging
 from app.core.strategy import get_inference_for_stage, get_model_for_stage
 from app.services.generation.consistency import (
     _get_dead_characters,
+    detect_hard_constraint_violations,
     extract_unknown_characters,
 )
 from app.services.generation.progress import chapter_progress, progress
@@ -52,6 +53,32 @@ def node_cross_chapter_check(state: GenerationState) -> dict:
                 "evidence": char,
                 "confidence": 0.90,
             })
+
+    # --- Rule-based: post-write hard-constraint gate ---
+    # pre-write 阶段对 forbidden_characters / entity_hard_constraints 的告警当前
+    # 是 soft-fail（_route_consistency 始终 beats），writer 可能完全忽略。
+    # 这里在写完之后用同一份规则在正文上复核一遍，命中即强制 rewrite，
+    # 避免硬约束被悄悄破坏。
+    hard_violations = detect_hard_constraint_violations(text=draft, context=db_ctx)
+    for violation in hard_violations:
+        contradictions.append({
+            "category": "character",
+            "severity": "must_fix",
+            "claim": f"[硬约束] {violation.get('message') or ''}",
+            "evidence": str(violation.get("matched_pattern") or violation.get("entity") or ""),
+            "confidence": 0.95,
+        })
+    if hard_violations:
+        existing_violations = list(suggestions.get("hard_constraint_violations") or [])
+        for violation in hard_violations:
+            existing_violations.append({
+                "entity": violation.get("entity"),
+                "constraint_type": violation.get("constraint_type"),
+                "matched_pattern": violation.get("matched_pattern"),
+                "message": violation.get("message"),
+                "chapter_num": chapter_num,
+            })
+        suggestions["hard_constraint_violations"] = existing_violations[:12]
 
     # --- LLM: cross-chapter contradiction check (only when prior summaries exist) ---
     if full_recent_summaries and len(full_recent_summaries) >= 2:

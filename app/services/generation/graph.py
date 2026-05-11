@@ -57,10 +57,32 @@ from app.services.generation.state import GenerationState
 def _route_consistency(state: GenerationState) -> str:
     """一致性检查后的路由。
 
-    当前策略选择始终继续到 beats，把一致性问题以约束形式注入后续写作，
-    而不是在这里直接中断整条链路。
+    - flag ``consistency.blocker_hard_gate`` 关闭：保持旧行为，永远 beats
+      （soft-fail，把一致性问题以约束形式注入后续写作）。
+    - flag 开启：当存在 blocker 且未达 ``max_outline_revise`` 时进入
+      ``outline_revise``；超过则按 yaml ``downgrade_to`` 走 ``save_blocked``
+      或 ``beats``（warn 降级）。详见 ``nodes/outline_revise.py``。
     """
-    return "beats"  # always proceed; consistency issues injected into writer context
+    from app.core.feature_flags import is_enabled
+    from app.core.gates import get_gate
+
+    novel_id = state.get("novel_id")
+    if not is_enabled("consistency.blocker_hard_gate", novel_id=novel_id):
+        return "beats"
+
+    report = state.get("consistency_report")
+    blockers = list(getattr(report, "blockers", None) or []) if report else []
+    if not blockers:
+        return "beats"
+
+    attempts = int(state.get("consistency_revise_attempts") or 0)
+    gate = get_gate("consistency", "hard_constraint", novel_id=novel_id)
+    max_attempts = max(0, int(gate.max_outline_revise or 0))
+
+    if attempts < max_attempts:
+        return "outline_revise"
+    target = (gate.downgrade_to or "save_blocked").strip().lower()
+    return "save_blocked" if target != "warn" else "beats"
 
 
 def _route_review(state: GenerationState) -> str:
@@ -222,6 +244,8 @@ def _build_generation_graph():
     graph.add_node("load_context", _timed_node("load_context", node_load_context))
     graph.add_node("refine_outline", _timed_node("refine_outline", node_refine_chapter_outline))
     graph.add_node("consistency_check", _timed_node("consistency_check", node_consistency_check))
+    from app.services.generation.nodes.outline_revise import node_outline_revise
+    graph.add_node("outline_revise", _timed_node("outline_revise", node_outline_revise))
     graph.add_node("save_blocked", _timed_node("save_blocked", node_save_blocked))
     graph.add_node("beats", _timed_node("beats", node_beats))
     graph.add_node("writer", _timed_node("writer", node_writer))
@@ -245,7 +269,16 @@ def _build_generation_graph():
     graph.add_edge("volume_replan", "load_context")
     graph.add_edge("load_context", "refine_outline")
     graph.add_edge("refine_outline", "consistency_check")
-    graph.add_conditional_edges("consistency_check", _route_consistency, {"save_blocked": "save_blocked", "beats": "beats"})
+    graph.add_conditional_edges(
+        "consistency_check",
+        _route_consistency,
+        {
+            "save_blocked": "save_blocked",
+            "beats": "beats",
+            "outline_revise": "outline_revise",
+        },
+    )
+    graph.add_edge("outline_revise", "consistency_check")
     graph.add_edge("beats", "writer")
     graph.add_edge("save_blocked", "advance_chapter")
     graph.add_edge("writer", "reviewer")

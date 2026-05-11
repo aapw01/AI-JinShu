@@ -80,7 +80,9 @@ def test_outliner_run_full_book_uses_absolute_chapter_numbers(monkeypatch):
     assert outlines[1]["title"] == "第32章 新局展开"
     assert outlines[0]["chapter_objective"] == "处理上一卷余波"
     assert outlines[0]["opening_scene"] == "云家车队外"
-    assert outlines[0]["transition_mode"] == "aftermath"
+    # transition_mode 被规范化到 OutlineContract Literal：
+    # aftermath（旧 LLM 别名）→ continuous（语义保留）
+    assert outlines[0]["transition_mode"] == "continuous"
     assert outlines[1]["required_new_information"] == ["陆家旧案与主线相连"]
 
 
