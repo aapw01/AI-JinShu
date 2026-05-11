@@ -1,0 +1,38 @@
+schema_version: 1
+default:
+  observation_minutes: 15
+  canary_10:
+    min_samples: 20
+    max_failure_rate: 0.05
+    rollback_failure_rate: 0.20
+  canary_50:
+    min_samples: 50
+    max_failure_rate: 0.05
+    rollback_failure_rate: 0.15
+  full:
+    min_samples: 100
+    max_failure_rate: 0.05
+    rollback_failure_rate: 0.10
+  stable:
+    min_samples: 200
+    max_failure_rate: 0.05
+    rollback_failure_rate: 0.08
+flags:
+  consistency.blocker_hard_gate:
+    observation_minutes: 30
+    canary_10:
+      min_samples: 30
+      max_failure_rate: 0.05
+      rollback_failure_rate: 0.20
+    canary_50:
+      min_samples: 80
+      max_failure_rate: 0.05
+      rollback_failure_rate: 0.12
+    full:
+      min_samples: 200
+      max_failure_rate: 0.04
+      rollback_failure_rate: 0.08
+    stable:
+      min_samples: 400
+      max_failure_rate: 0.04
+      rollback_failure_rate: 0.06

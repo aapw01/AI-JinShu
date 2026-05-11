@@ -1,0 +1,26 @@
+schema_version: 1
+observation_minutes: 20
+canary_10:
+  min_samples: 20
+  max_failure_rate: 0.10
+  max_p95_latency_ms: 15000
+  rollback_failure_rate: 0.30
+  rollback_burn_rate_1h_over: 5.0
+canary_50:
+  min_samples: 60
+  max_failure_rate: 0.08
+  max_p95_latency_ms: 12000
+  rollback_failure_rate: 0.20
+  rollback_burn_rate_1h_over: 4.0
+full:
+  min_samples: 150
+  max_failure_rate: 0.06
+  max_p95_latency_ms: 10000
+  rollback_failure_rate: 0.12
+  rollback_burn_rate_1h_over: 3.0
+stable:
+  min_samples: 300
+  max_failure_rate: 0.06
+  max_p95_latency_ms: 10000
+  rollback_failure_rate: 0.10
+  rollback_burn_rate_1h_over: 3.0
