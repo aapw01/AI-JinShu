@@ -1,0 +1,23 @@
+你正在为一部正在创作中的小说，提炼"分卷概要"。把第 {{ volume_no }} 卷
+（{{ chapter_from }}~{{ chapter_to }} 章）的章节摘要压缩成 ≤ {{ max_chars }} 字的
+**三段式**结构化文本。**严格按下面的 JSON schema 输出，不允许任何额外文字**：
+
+{
+  "characters":     "≤30% 字数。本卷出场的关键角色（用 character_key），各自的目标 / 处境 / 立场变化",
+  "conflicts":      "≤45% 字数。主要冲突线推进与未解事件。说清楚 谁 vs 谁、为什么、目前进展",
+  "foreshadowings": "≤25% 字数。本卷已埋伏笔（planted）与已兑现伏笔（paid）的状态总结，列出 foreshadow_id"
+}
+
+【硬约束】
+1. 三段总字数加起来 ≤ {{ max_chars }}。
+2. 不引入新的事实细节，只重述章节摘要中的内容。
+3. 角色用 character_key（短名/英文 key），而不是姓名+尊称。
+4. **每段独立成句，不互相引用对方段落里的具体细节**——下游会按段读取。
+5. 不使用列表符号 / Markdown，写成自然段落。
+
+# 第 {{ volume_no }} 卷章节摘要（{{ chapter_from }}~{{ chapter_to }}）
+{% for s in chapter_summaries %}
+- 章节 {{ s.chapter_num }}：{{ s.summary }}
+{% endfor %}
+
+请严格输出 JSON。

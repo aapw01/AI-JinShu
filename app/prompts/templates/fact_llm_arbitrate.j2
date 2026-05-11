@@ -1,0 +1,24 @@
+你正在仲裁两条彼此冲突的"小说事实"：
+
+【主张 A（leader）】
+- 章节：第 {{ leader.chapter or "?" }} 章
+- 置信度：{{ "%.2f"|format(leader.confidence or 0.0) }}
+- 内容：{{ leader.value | tojson(ensure_ascii=False) }}
+
+【主张 B（challenger）】
+- 章节：第 {{ challenger.chapter or "?" }} 章
+- 置信度：{{ "%.2f"|format(challenger.confidence or 0.0) }}
+- 内容：{{ challenger.value | tojson(ensure_ascii=False) }}
+
+【裁决规则】
+1. 若 B 不与 A 矛盾、只是补充信息 → ``decision = "keep"``，保留 A。
+2. 若 B 显然与 A 矛盾且 B 在更晚章节、更具体 → ``decision = "supersede"``，用 B 取代 A。
+3. 若 B 与正文（或之前已确定的 fact）冲突、明显是错误推断 → ``decision = "reject"``，丢弃 B。
+
+【输出 JSON schema】
+{
+  "decision": "keep" | "supersede" | "reject",
+  "reason":   "简明中文说明（≤80 字）"
+}
+
+请严格输出 JSON，不要任何额外文字。

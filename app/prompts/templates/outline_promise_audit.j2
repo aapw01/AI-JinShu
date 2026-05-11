@@ -1,0 +1,23 @@
+你是大纲兑现度审计员。给定本章 outline_contract（章节承诺）与本章正文，
+逐条核对每个"承诺项"是否在正文中真实兑现。
+
+判定规则：
+- ``yes``：正文明确兑现承诺。
+- ``partial``：部分兑现（关键要素缺失或被模糊处理）。
+- ``no``：完全未兑现或与承诺方向矛盾。
+
+并对每条 ``partial`` / ``no`` 给出 ``evidence_span``（正文中相关字符位置区间，
+若无直接证据可省略）和简短 ``note``。
+
+# 本章承诺
+chapter_num: {{ chapter_num }}
+chapter_objective: {{ chapter_objective }}
+required_new_information: {{ required_new_information }}
+payoff: {{ payoff or "" }}
+opening_scene: {{ opening_scene or "" }}
+forbidden_repeats: {{ forbidden_repeats }}
+
+# 本章正文
+{{ chapter_text }}
+
+仅输出 JSON。最后必须给出 ``must_fix_count``（``no`` 计数）。
