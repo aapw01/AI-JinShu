@@ -4,7 +4,7 @@ DEV_REDIS_URL ?= redis://localhost:26379/0
 DEV_CELERY_BROKER_URL ?= redis://localhost:26379/1
 DEV_ENV := DATABASE_URL="$(DEV_DATABASE_URL)" REDIS_URL="$(DEV_REDIS_URL)" CELERY_BROKER_URL="$(DEV_CELERY_BROKER_URL)"
 
-.PHONY: help install web-install infra migrate migrate-safe dev-api dev-worker dev-beat dev-web dev stop test lint dev-reset logs
+.PHONY: help install web-install infra migrate migrate-safe dev-api dev-worker dev-beat dev-web dev stop test test-offline offline-report lint dev-reset logs
 
 help:
 	@echo "Available targets:"
@@ -98,6 +98,12 @@ logs:
 
 test:
 	@uv run pytest -q
+
+test-offline:
+	@uv run pytest -q -m offline
+
+offline-report:
+	@uv run python scripts/offline_harness_report.py --enforce-baseline
 
 lint:
 	@uv run python -m compileall app alembic

@@ -1,6 +1,7 @@
 """Full-book fact ledger aggregation for long-form consistency review."""
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 from typing import Any
 
@@ -9,9 +10,106 @@ from sqlalchemy.orm import Session
 
 from app.models.novel import NovelMemory, StoryEntity, StoryEvent, StoryFact, StoryForeshadow, StoryRelation
 
+_DEAD_TOKENS = ("dead", "deceased", "死", "亡", "殁", "身故")
+_ALIVE_TOKENS = ("alive", "living", "存活", "活着", "在世")
+
 
 def _json_mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _life_state(status: Any) -> str | None:
+    """Classify a status string as ``dead`` / ``alive`` / ``None`` (unknown)."""
+    text = str(status or "").lower()
+    if not text:
+        return None
+    if any(tok in text for tok in _DEAD_TOKENS):
+        return "dead"
+    if any(tok in text for tok in _ALIVE_TOKENS):
+        return "alive"
+    return None
+
+
+def _value_signature(value_json: Any) -> str:
+    """Stable signature for a fact value, order-independent for dicts."""
+    try:
+        return json.dumps(value_json, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError):
+        return str(value_json)
+
+
+def _ranges_overlap(a_from: int, a_to: int | None, b_from: int, b_to: int | None) -> bool:
+    """Inclusive overlap where ``None`` upper bound means open-ended (+inf)."""
+    a_hi = a_to if a_to is not None else float("inf")
+    b_hi = b_to if b_to is not None else float("inf")
+    return a_from <= b_hi and b_from <= a_hi
+
+
+def detect_fact_ledger_conflicts(ledger: dict[str, Any]) -> list[dict[str, Any]]:
+    """Detect likely contradictions in an aggregated ledger (pure, offline).
+
+    Two signals:
+    - ``fact_value_conflict``: same entity + fact_type has differing values whose
+      chapter ranges overlap (e.g. two simultaneous "current location"s).
+    - ``status_mismatch``: an entity's ``status`` and its character-memory status
+      classify to opposite life states (alive vs dead).
+    """
+    conflicts: list[dict[str, Any]] = []
+
+    facts_by_entity: dict[str, list[dict[str, Any]]] = ledger.get("facts_by_entity") or {}
+    for entity_name, rows in facts_by_entity.items():
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            grouped[str(row.get("fact_type") or "")].append(row)
+        for fact_type, group in grouped.items():
+            for i in range(len(group)):
+                for j in range(i + 1, len(group)):
+                    a, b = group[i], group[j]
+                    if _value_signature(a.get("value_json")) == _value_signature(
+                        b.get("value_json")
+                    ):
+                        continue
+                    if _ranges_overlap(
+                        int(a.get("chapter_from") or 0),
+                        a.get("chapter_to"),
+                        int(b.get("chapter_from") or 0),
+                        b.get("chapter_to"),
+                    ):
+                        conflicts.append(
+                            {
+                                "type": "fact_value_conflict",
+                                "entity": entity_name,
+                                "fact_type": fact_type,
+                                "left": {
+                                    "value": a.get("value_json"),
+                                    "chapter_from": a.get("chapter_from"),
+                                    "chapter_to": a.get("chapter_to"),
+                                },
+                                "right": {
+                                    "value": b.get("value_json"),
+                                    "chapter_from": b.get("chapter_from"),
+                                    "chapter_to": b.get("chapter_to"),
+                                },
+                            }
+                        )
+
+    character_memory: dict[str, dict[str, Any]] = ledger.get("character_memory") or {}
+    for _entity_type, rows in (ledger.get("entities") or {}).items():
+        for entity in rows:
+            name = str(entity.get("name") or "")
+            entity_state = _life_state(entity.get("status"))
+            mem_state = _life_state((character_memory.get(name) or {}).get("status"))
+            if entity_state and mem_state and entity_state != mem_state:
+                conflicts.append(
+                    {
+                        "type": "status_mismatch",
+                        "entity": name,
+                        "entity_status": entity.get("status"),
+                        "memory_status": (character_memory.get(name) or {}).get("status"),
+                    }
+                )
+
+    return conflicts
 
 
 def _json_list(value: Any) -> list[Any]:
@@ -154,7 +252,7 @@ def build_fact_ledger(db: Session, *, novel_id: int, novel_version_id: int | Non
         if memory.key
     }
 
-    return {
+    ledger = {
         "novel_id": int(novel_id),
         "novel_version_id": int(novel_version_id) if novel_version_id is not None else None,
         "entities": dict(grouped_entities),
@@ -164,12 +262,16 @@ def build_fact_ledger(db: Session, *, novel_id: int, novel_version_id: int | Non
         "foreshadows": foreshadows,
         "relations": relations,
         "character_memory": character_memory,
-        "ledger_meta": {
-            "entity_count": len(entities),
-            "fact_count": len(facts),
-            "event_count": len(events),
-            "foreshadow_count": len(foreshadows),
-            "relation_count": len(relations),
-            "character_memory_count": len(character_memory),
-        },
     }
+    conflicts = detect_fact_ledger_conflicts(ledger)
+    ledger["conflicts"] = conflicts
+    ledger["ledger_meta"] = {
+        "entity_count": len(entities),
+        "fact_count": len(facts),
+        "event_count": len(events),
+        "foreshadow_count": len(foreshadows),
+        "relation_count": len(relations),
+        "character_memory_count": len(character_memory),
+        "conflict_count": len(conflicts),
+    }
+    return ledger

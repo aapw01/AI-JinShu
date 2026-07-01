@@ -40,6 +40,12 @@ dev = ["pytest>=7.4.0", "pytest-asyncio>=0.23.0", "httpx>=0.26.0", "ruff>=0.1.0"
 [tool.setuptools]
 packages = ["app"]
 
+[tool.pytest.ini_options]
+markers = [
+    "offline: zero-external-call deterministic harness tests (safe in CI)",
+    "slow: tests that run the full generation pipeline (seconds each)",
+]
+
 [dependency-groups]
 dev = [
     "pytest-cov>=7.0.0",
