@@ -414,6 +414,23 @@ def install_offline_harness(
     monkeypatch.setattr(llm_mod, "get_llm_with_fallback", lambda *a, **k: FakeLLM())
     monkeypatch.setattr(llm_mod, "get_embedding_model", _raise_offline)
 
+    # --- language-quality safety net ---
+    # ``evaluate_language_quality`` instantiates ``language_tool_python.LanguageTool``
+    # (downloads a ~200MB Java package on first use) and, if the local server is
+    # unavailable, falls back to the *public* LanguageTool API — a real network call
+    # made once per finalized chapter. Both break the "zero external calls" contract
+    # and blow up CI wall-time. Stub it to a deterministic passing score.
+    import app.core.i18n as i18n_mod
+    import app.services.generation.nodes.finalize as finalize_mod
+
+    def _fake_language_quality(text: str, lang_code: str) -> tuple[float, str]:
+        return 0.95, "offline-stub"
+
+    monkeypatch.setattr(i18n_mod, "evaluate_language_quality", _fake_language_quality)
+    monkeypatch.setattr(
+        finalize_mod, "evaluate_language_quality", _fake_language_quality
+    )
+
     # --- observability: node execution trace ---
     node_trace: list[str] = []
     real_log_event: Callable[..., Any] = graph_mod.log_event
